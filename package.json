@@ -1,0 +1,35 @@
+{
+  "name": "yunspire-desktop",
+  "version": "0.1.0",
+  "description": "云枢：以本地 Obsidian 为知识数据库的中文桌面 Agent 系统",
+  "author": "leochang <leochang210@gmail.com>",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": "https://github.com/Leo-sail/yunspire.git",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "node scripts/build-windows-python-runtime.mjs && node scripts/build-windows-native.mjs && node scripts/build-windows-media-helper.mjs && vite build",
+    "build:windows-python-runtime": "node scripts/build-windows-python-runtime.mjs",
+    "build:windows-media-helper": "node scripts/build-windows-media-helper.mjs",
+    "native:check": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "native:fmt:check": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
+    "native:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "tauri:build:debug": "tauri build --debug --bundles app --no-sign --ci"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "lucide": "^0.468.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "esbuild": "^0.27.2",
+    "vite": "^8.1.5"
+  }
+}

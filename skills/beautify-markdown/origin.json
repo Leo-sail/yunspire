@@ -1,0 +1,10 @@
+{
+  "owner": "Yunspire",
+  "policy": "yunspire_first_party",
+  "implementation": "independently_designed",
+  "runtime_scope": "background_system",
+  "ui_visibility": "hidden",
+  "scripts": ["scripts/beautify-markdown.mjs"],
+  "system_apis": ["node:process"],
+  "external_code": []
+}

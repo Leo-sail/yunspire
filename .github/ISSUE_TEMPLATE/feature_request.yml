@@ -1,0 +1,23 @@
+name: 功能建议 / Feature request
+description: 说明希望解决的问题 / Describe the problem you want Yunspire to solve
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 现在遇到的问题 / Problem
+      placeholder: 写清使用场景和现有方式的不足 / Describe the use case and current limitation
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: 希望达到的结果 / Desired outcome
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: 其他信息 / Additional context
+      description: 可附界面草图或脱敏示例，不要提交私人知识内容。Do not include private knowledge content.

@@ -1,0 +1,10 @@
+{
+  "owner": "Yunspire",
+  "policy": "yunspire_first_party",
+  "implementation": "independently_designed",
+  "runtime_scope": "background_system",
+  "ui_visibility": "hidden",
+  "scripts": ["scripts/extract_video.py", "scripts/media_discovery.py", "scripts/yunspire_media.m", "scripts/yunspire_media_windows.cpp", "scripts/yunspire_speech.m", "scripts/yunspire_speech_windows.cpp", "scripts/yunspire_speech_info.plist", "scripts/yunspire_transcribe.py"],
+  "system_apis": ["python-standard-library", "Apple-clang", "macOS-AVFoundation", "macOS-Speech", "macOS-ImageIO", "Windows-MediaFoundation", "Windows-WIC", "Windows-SAPI", "Windows-SDK-MSVC"],
+  "external_code": []
+}

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BeautifyMarkdownOutput",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "markdown", "changes", "warnings", "snapshot_ref"],
+  "properties": {
+    "status": { "type": "string", "enum": ["ready", "needs_review"] },
+    "markdown": { "type": "string" },
+    "changes": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "warnings": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "snapshot_ref": { "type": "string", "minLength": 1 }
+  }
+}

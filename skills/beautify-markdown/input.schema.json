@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BeautifyMarkdownInput",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["markdown", "vault_id", "target_path"],
+  "properties": {
+    "markdown": { "type": "string" },
+    "vault_id": { "type": "string", "minLength": 1 },
+    "target_path": { "type": "string", "pattern": "^[^/].*\\.md$" },
+    "options": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cjk_spacing": { "type": "boolean", "default": true },
+        "normalize_blank_lines": { "type": "boolean", "default": true },
+        "preserve_semantics": { "const": true }
+      }
+    }
+  }
+}

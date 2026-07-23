@@ -1,0 +1,47 @@
+# macOS and editors
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local user knowledge and Obsidian state
+/vault/
+.obsidian/
+
+# Local runtime data and credentials
+*.sqlite
+*.sqlite-*
+*.sqlite.key
+*.db
+*.key
+*.pem
+.env
+.env.*
+!.env.example
+/runtime/
+/logs/
+/checkpoints/
+/backups/
+/cache/
+
+# Dependencies and generated output
+/node_modules/
+/dist/
+/src-tauri/target/
+/src-tauri/gen/
+/release/
+*.app
+*.dmg
+*.zip
+__pycache__/
+*.py[cod]
+
+# Local build artifacts
+/artifacts/
+*.log
+*.tmp

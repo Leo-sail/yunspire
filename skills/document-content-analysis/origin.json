@@ -1,0 +1,29 @@
+{
+  "owner": "Yunspire",
+  "policy": "yunspire_first_party",
+  "implementation": "independently_designed",
+  "runtime_scope": "background_system",
+  "ui_visibility": "hidden",
+  "scripts": [
+    "scripts/external_image_localizer.py",
+    "scripts/extract_document.py",
+    "scripts/ooxml_excel.py",
+    "scripts/ooxml_ppt.py",
+    "scripts/ooxml_word.py",
+    "scripts/yunspire_pdf.m",
+    "scripts/yunspire_image_windows.cpp",
+    "scripts/yunspire_pdf_windows.cpp"
+  ],
+  "system_apis": [
+    "python-standard-library",
+    "Apple-clang",
+    "macOS-AppKit",
+    "macOS-PDFKit",
+    "Microsoft-MSVC",
+    "Windows-Runtime",
+    "Windows.Data.Pdf",
+    "Windows.Graphics.Imaging",
+    "Windows-Imaging-Component"
+  ],
+  "external_code": []
+}

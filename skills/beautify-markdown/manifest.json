@@ -1,0 +1,35 @@
+{
+  "id": "beautify-markdown",
+  "display_name": "自动美化排版",
+  "description": "安全优化中文 Obsidian Markdown 的结构、间距、图片说明和可读性，不改变原意并保留所有 Obsidian 语法。",
+  "status": "active",
+  "user_editable": false,
+  "instructions_path": "skills/beautify-markdown/SKILL.md",
+  "input_schema": "skills/beautify-markdown/input.schema.json",
+  "output_schema": "skills/beautify-markdown/output.schema.json",
+  "capabilities": {
+    "vault_read": ["selected_note"],
+    "vault_write": ["selected_note"],
+    "network": [],
+    "shell": [],
+    "application_commands": ["create"]
+  },
+  "model_requirements": {
+    "vision": false,
+    "structured_output": true,
+    "tool_calling": false,
+    "minimum_context_tokens": 4096
+  },
+  "workflow": [
+    { "id": "snapshot", "kind": "processor", "ref": "vault.snapshot", "when": null },
+    { "id": "format", "kind": "processor", "ref": "scripts/beautify-markdown.mjs", "when": null },
+    { "id": "validate", "kind": "processor", "ref": "markdown.semantic-guard", "when": null },
+    { "id": "commit", "kind": "commit", "ref": "vault.atomic-write", "when": "validation_passed" }
+  ],
+  "timeout_seconds": 60,
+  "retry": { "max_attempts": 1, "backoff_seconds": 0 },
+  "side_effects": ["vault_write"],
+  "approval": "policy",
+  "created_by": "yunspire",
+  "created_at": "2026-07-16T16:00:00-04:00"
+}

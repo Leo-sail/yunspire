@@ -1,0 +1,43 @@
+name: 缺陷报告 / Bug report
+description: 报告可复现的问题 / Report a reproducible problem
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: 云枢版本 / Version
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 系统环境 / Environment
+      placeholder: macOS or Windows version, device architecture, and Obsidian version
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤 / Steps to reproduce
+      placeholder: 从打开云枢开始，按顺序写清每一步 / List each step from launch
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: 实际结果 / Actual result
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果 / Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 补充信息 / Additional context
+      description: 可附脱敏日志或截图。不要提交 API 密钥、私人 Vault 内容或本机绝对路径。Attach sanitized logs or screenshots only.

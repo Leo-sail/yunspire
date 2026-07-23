@@ -1,0 +1,37 @@
+Yunspire / 云枢
+Copyright (c) 2026 leochang. All rights reserved.
+
+中文
+
+我独立创作并实现了本仓库中的云枢第一方源代码、系统架构、
+交互设计、算法实现、产品文档和品牌资产，并保留全部权利。
+
+该原创声明不包含 Tauri、Rust crates、Vite、Lucide、Obsidian、
+操作系统框架、标准、API、商标或其他第三方组件。第三方内容
+仍属于各自权利人，并适用各自的许可证、条款和商标规则。
+
+Windows 安装包包含 Python Software Foundation 发布的官方 CPython
+3.13.7 x64 嵌入式运行时，用于执行云枢自研的第一方处理脚本。该运行时
+不是我的原创实现，适用其随包 `LICENSE.txt` 中的 PSF 许可。
+
+任何商业使用均须事先取得我的书面商业授权。
+联系邮箱：leochang210@gmail.com
+
+English
+
+I independently created and implemented the Yunspire first-party source code,
+system architecture, interaction design, algorithms, product documentation,
+and brand assets in this repository. I reserve all rights in that work.
+
+This authorship statement excludes Tauri, Rust crates, Vite, Lucide, Obsidian,
+operating-system frameworks, standards, APIs, trademarks, and all other
+third-party components. Third-party materials remain the property of their
+respective rights holders and are governed by their own licenses and terms.
+
+The Windows installer contains the official CPython 3.13.7 x64 embeddable
+runtime published by the Python Software Foundation solely to execute
+Yunspire's first-party processing scripts. The runtime is not claimed as my
+work and remains governed by the PSF terms in its bundled `LICENSE.txt`.
+
+Every commercial use requires my prior written commercial authorization.
+Contact: leochang210@gmail.com

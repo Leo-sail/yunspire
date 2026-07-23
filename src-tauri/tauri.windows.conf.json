@@ -1,0 +1,12 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "bundle": {
+    "resources": {
+      "target/yunspire-runtime/python/": "runtime/python/",
+      "target/yunspire-native/yunspire_pdf_windows.exe": "skills/document-content-analysis/scripts/yunspire_pdf_windows.exe",
+      "target/yunspire-native/yunspire_image_windows.exe": "skills/document-content-analysis/scripts/yunspire_image_windows.exe",
+      "target/yunspire-native/yunspire-media.exe": "skills/video-content-analysis/scripts/bin/yunspire-media.exe",
+      "target/yunspire-native/yunspire-speech.exe": "skills/video-content-analysis/scripts/bin/yunspire-speech.exe"
+    }
+  }
+}

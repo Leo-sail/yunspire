@@ -1,0 +1,101 @@
+# Yunspire Non-Commercial Source License 1.0
+# 云枢非商业源代码许可协议 1.0
+
+Copyright (c) 2026 leochang. All rights reserved.
+Contact: leochang210@gmail.com
+
+## 中文条款
+
+### 1. 定义
+
+“本软件”指本仓库中由 leochang 创作并享有权利的云枢第一方源代码、系统架构、交互设计、算法实现、产品文档、品牌资产及其修改版本，不包括第三方组件。
+
+“非商业用途”指不以直接或间接获得收入、商业利益、竞争优势或为营利性组织提供经营支持为目的的个人学习、非营利研究、教学、评估和内部实验。
+
+“商业用途”包括但不限于：在营利性业务或生产环境中使用；向客户、雇主或合作方提供服务；收费咨询或交付；销售、出租、转售或再许可；SaaS、托管服务或订阅服务；广告、赞助或流量变现；商业产品集成；基于本软件开发、训练、优化或交付商业产品、商业衍生品或竞争性产品。
+
+### 2. 非商业授权
+
+在完整遵守本协议的前提下，著作权人授予您一项有限的、非独占的、不可转让的、不可再许可的、可撤销的许可，允许您仅为非商业用途查看、运行、复制和修改本软件。
+
+### 3. 再分发条件
+
+仅可为非商业用途再分发本软件的未修改或修改版本，且必须同时满足：
+
+1. 保留本协议、`NOTICE`、版权声明和原创声明；
+2. 清楚标明您所作的修改，不得暗示修改版本由著作权人背书；
+3. 以本协议完整约束接收者，不得附加削弱本协议的条款；
+4. 不得收取许可费、服务费、订阅费或通过再分发获得其他商业利益。
+
+### 4. 禁止事项
+
+未经 leochang 事先书面授权，您不得：
+
+1. 将本软件全部或部分用于任何直接或间接商业用途；
+2. 销售、出租、托管、再许可、商业部署或商业集成本软件；
+3. 将本软件的代码、架构、交互设计、算法或文档用于商业产品、商业服务、商业衍生品或竞争性产品；
+4. 删除、隐藏或修改本协议、版权声明、原创声明或权利人信息；
+5. 使用 Yunspire、云枢、相关标志或品牌资产，使他人误认为您获得商业授权、合作关系或官方认可；
+6. 规避本协议限制，或协助第三方实施上述行为。
+
+### 5. 商业授权
+
+任何商业用途均须在使用前取得 leochang 单独签署的书面商业许可。询价或申请商业授权，请联系 `leochang210@gmail.com`。未回复、口头交流、代码可公开访问或接受贡献均不构成商业授权。
+
+### 6. 第三方组件
+
+本软件依赖或引用的 Tauri、Rust crates、Vite、Lucide、Obsidian、操作系统框架、标准、API 及其他第三方组件不属于本协议的原创权利主张。第三方组件继续适用各自许可证、服务条款、商标规则和权利声明。本协议不会扩大或限制您依据第三方许可证已经获得的权利。
+
+### 7. 权利保留与终止
+
+除本协议明确授予的权利外，所有权利均由 leochang 保留。违反本协议时，授权自动立即终止；您必须停止使用和分发本软件，并删除受本协议约束的副本。终止不影响著作权人追究既有违约、侵权或损害责任。
+
+### 8. 无担保与责任限制
+
+本软件按“现状”和“可用”状态提供，不作任何明示或默示保证，包括但不限于适销性、特定用途适用性、准确性、安全性、不侵权或持续可用性保证。在适用法律允许的最大范围内，著作权人不对因使用、无法使用或分发本软件产生的任何直接、间接、附带、特殊、惩罚性或后果性损失承担责任。
+
+### 9. 可分割性与完整协议
+
+如本协议任何条款被认定无效或不可执行，其余条款仍继续有效。本协议构成非商业授权的完整协议；任何商业权利只能由著作权人另行书面授予。
+
+## English Terms
+
+### 1. Definitions
+
+"Software" means the first-party Yunspire source code, system architecture, interaction design, algorithm implementations, product documentation, brand assets, and modifications owned by leochang in this repository. It excludes Third-Party Components.
+
+"Non-Commercial Use" means personal study, nonprofit research, teaching, evaluation, or internal experimentation that is not intended to obtain direct or indirect revenue, commercial benefit, competitive advantage, or operational support for a for-profit organization.
+
+"Commercial Use" includes, without limitation: use in a for-profit business or production environment; services for a customer, employer, or partner; paid consulting or delivery; sale, rental, resale, or sublicensing; SaaS, hosting, or subscription services; advertising, sponsorship, or traffic monetization; integration into a commercial product; or use of the Software to develop, train, optimize, or deliver a commercial product, derivative, service, or competing product.
+
+### 2. Non-Commercial Grant
+
+Subject to full compliance with this License, the copyright holder grants you a limited, non-exclusive, non-transferable, non-sublicensable, revocable license to view, run, copy, and modify the Software solely for Non-Commercial Use.
+
+### 3. Redistribution
+
+You may redistribute modified or unmodified copies solely for Non-Commercial Use if you: retain this License, `NOTICE`, all copyright and authorship notices; clearly identify your changes; apply this License in full to recipients; and receive no fee or other commercial benefit from the redistribution.
+
+### 4. Prohibited Uses
+
+Without prior written authorization from leochang, you may not use any part of the Software for Commercial Use; sell, rent, host, sublicense, commercially deploy, or commercially integrate it; use its code, architecture, interaction design, algorithms, or documentation in a commercial or competing product or service; remove or obscure legal notices; imply endorsement or authorization; or assist another party in doing so.
+
+### 5. Commercial License
+
+Every Commercial Use requires a separate written commercial license signed by leochang before use begins. Contact `leochang210@gmail.com`. Silence, oral communications, public source availability, or acceptance of contributions does not grant commercial rights.
+
+### 6. Third-Party Components
+
+Tauri, Rust crates, Vite, Lucide, Obsidian, operating-system frameworks, standards, APIs, and all other third-party components are excluded from the authorship claim and remain governed by their respective licenses, terms, trademarks, and notices. Nothing in this License changes rights independently granted under a third-party license.
+
+### 7. Reservation and Termination
+
+All rights not expressly granted are reserved by leochang. Any breach terminates this License immediately. Upon termination, you must stop using and distributing the Software and delete copies governed by this License. Termination does not waive claims arising from prior breach or infringement.
+
+### 8. Disclaimer and Limitation of Liability
+
+THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, ACCURACY, SECURITY, NON-INFRINGEMENT, OR AVAILABILITY. TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE COPYRIGHT HOLDER SHALL NOT BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, PUNITIVE, OR CONSEQUENTIAL DAMAGES ARISING FROM USE, INABILITY TO USE, OR DISTRIBUTION OF THE SOFTWARE.
+
+### 9. Severability and Entire Agreement
+
+If any provision is unenforceable, the remaining provisions remain effective. This License is the complete agreement for Non-Commercial Use. Commercial rights may be granted only in a separate written agreement signed by the copyright holder.
