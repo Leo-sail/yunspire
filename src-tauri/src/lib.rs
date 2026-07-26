@@ -332,6 +332,7 @@ pub fn run() {
                 obsidian::list_vault_folders,
                 obsidian::search_vault_notes,
                 obsidian::read_vault_note,
+                obsidian::open_vault_note_in_obsidian,
                 obsidian::list_vault_notes,
                 obsidian::save_creation_draft_asset,
                 obsidian::load_creation_draft_asset,
@@ -437,4 +438,47 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        command_available_without_application_authorization,
+        persist_grant_after_runtime_preparation,
+    };
+
+    #[test]
+    fn restricted_mode_only_exposes_application_authorization_commands() {
+        assert!(command_available_without_application_authorization(
+            "load_application_authorization"
+        ));
+        assert!(command_available_without_application_authorization(
+            "update_application_authorization"
+        ));
+        assert!(!command_available_without_application_authorization(
+            "discover_obsidian_vaults"
+        ));
+        assert!(!command_available_without_application_authorization(
+            "chat_with_assistant"
+        ));
+    }
+
+    #[test]
+    fn failed_runtime_preparation_does_not_persist_grant() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let database =
+            crate::runtime_db::RuntimeDatabase::open_test(&directory.path().join("runtime.sqlite"))
+                .expect("open test database");
+
+        let result = persist_grant_after_runtime_preparation::<(), _>(&database, || {
+            Err("runtime initialization failed".to_string())
+        });
+
+        assert!(result.is_err());
+        let authorization = database
+            .application_authorization()
+            .expect("read authorization after failure");
+        let serialized = serde_json::to_value(authorization).expect("serialize authorization");
+        assert_eq!(serialized["status"], "pending");
+    }
 }

@@ -1,8 +1,8 @@
 [package]
 name = "yunspire"
-version = "0.1.0"
+version = "0.1.1"
 description = "Yunspire local Obsidian agent desktop"
-authors = ["leochang <leochang210@gmail.com>"]
+authors = ["Leo Chang <leochang210@gmail.com>"]
 license-file = "../LICENSE"
 repository = "https://github.com/Leo-sail/yunspire.git"
 edition = "2021"

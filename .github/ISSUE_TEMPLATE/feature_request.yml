@@ -1,23 +1,38 @@
 name: 功能建议 / Feature request
-description: 说明希望解决的问题 / Describe the problem you want Yunspire to solve
+description: 向我说明一个符合云枢边界的改进 / Propose an improvement within Yunspire's boundaries
 title: "[Feature] "
-labels: ["enhancement"]
+labels: ["enhancement", "needs-triage"]
 body:
   - type: textarea
     id: problem
     attributes:
-      label: 现在遇到的问题 / Problem
-      placeholder: 写清使用场景和现有方式的不足 / Describe the use case and current limitation
+      label: 要解决的问题 / Problem to solve
+      description: 请描述真实工作流，不要只写功能名称 / Describe the real workflow, not only a feature name
     validations:
       required: true
   - type: textarea
     id: outcome
     attributes:
-      label: 希望达到的结果 / Desired outcome
+      label: 期望结果 / Desired outcome
     validations:
       required: true
   - type: textarea
-    id: notes
+    id: boundary
     attributes:
-      label: 其他信息 / Additional context
-      description: 可附界面草图或脱敏示例，不要提交私人知识内容。Do not include private knowledge content.
+      label: 数据与权限影响 / Data and permission impact
+      description: 说明涉及的 Vault、SQLite、网络、模型或文件副作用 / Identify Vault, SQLite, network, model, or file side effects
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 已考虑方案 / Alternatives considered
+  - type: checkboxes
+    id: principles
+    attributes:
+      label: 架构确认 / Architecture checks
+      options:
+        - label: 建议保持 Obsidian 为知识权威来源 / The proposal keeps Obsidian authoritative for knowledge
+          required: true
+        - label: 建议不会把内容或模型输出直接变成权限 / The proposal does not turn content or model output into permission
+          required: true

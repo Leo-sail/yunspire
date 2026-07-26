@@ -1640,3 +1640,416 @@ pub fn update_obsidian_graph_config(
         committed_at,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy::{self, ApplicationCommand, CommandBudget, CommandOrigin};
+    use std::ffi::OsString;
+
+    struct EnvironmentGuard(Vec<(&'static str, Option<OsString>)>);
+
+    impl EnvironmentGuard {
+        fn set(values: &[(&'static str, &Path)]) -> Self {
+            let previous = values
+                .iter()
+                .map(|(key, _)| (*key, env::var_os(key)))
+                .collect::<Vec<_>>();
+            for (key, value) in values {
+                env::set_var(key, value);
+            }
+            Self(previous)
+        }
+    }
+
+    impl Drop for EnvironmentGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.0.drain(..) {
+                if let Some(value) = value {
+                    env::set_var(key, value);
+                } else {
+                    env::remove_var(key);
+                }
+            }
+        }
+    }
+
+    fn persist_task(
+        database: &RuntimeDatabase,
+        intent: &str,
+        capability_id: &str,
+        operation: &str,
+        vault_id: Option<&str>,
+        relative_paths: Vec<String>,
+    ) -> String {
+        let id = format!("command-{}", Uuid::new_v4());
+        let command = ApplicationCommand {
+            id: id.clone(),
+            command_type: "assistant.operation".to_string(),
+            origin: CommandOrigin::Assistant,
+            intent: intent.to_string(),
+            capability_id: capability_id.to_string(),
+            operation: operation.to_string(),
+            parameters: Value::Object(Map::new()),
+            vault_id: vault_id.map(str::to_string),
+            relative_paths,
+            network_targets: Vec::new(),
+            declared_scope: vec![format!("capability:{capability_id}")],
+            budget: CommandBudget {
+                max_steps: 8,
+                max_runtime_seconds: 300,
+                max_tool_calls: 16,
+                max_tokens: Some(100_000),
+                max_cost: None,
+            },
+            idempotency_key: format!("test-{}", Uuid::new_v4()),
+            trace_id: Some(format!("trace-{}", Uuid::new_v4())),
+            model_decision_receipt: Some(format!("receipt-{}", Uuid::new_v4())),
+        };
+        let decision = policy::evaluate(&command);
+        let trace_id = command.trace_id.clone().expect("trace id");
+        database
+            .persist_application_command("local", &command, &decision, &trace_id, &now_string())
+            .expect("persist application command")
+            .0
+            .expect("native task id")
+    }
+
+    #[test]
+    fn frontmatter_update_preserves_unknown_blocks() {
+        let content =
+            "---\ntitle: Old\naliases:\n  - One\ncustom:\n  nested: true\n---\n\n# Body\n";
+        let mut updates = Map::new();
+        updates.insert("title".to_string(), Value::String("New".to_string()));
+        updates.insert(
+            "tags".to_string(),
+            Value::Array(vec![Value::String("alpha".to_string())]),
+        );
+        let result = mutate_frontmatter(content, &updates, &BTreeSet::new()).unwrap();
+        assert!(result.contains("title: \"New\""));
+        assert!(result.contains("custom:\n  nested: true"));
+        assert!(result.contains("tags: [\"alpha\"]"));
+        assert!(result.contains("# Body"));
+    }
+
+    #[test]
+    fn rejects_internal_and_traversal_paths() {
+        assert!(normalized_relative_path("../outside.md", false, false).is_err());
+        assert!(normalized_relative_path(".obsidian/graph.json", false, false).is_err());
+        assert!(normalized_relative_path("资料/笔记.md", false, false).is_ok());
+    }
+
+    #[test]
+    fn confirmed_delete_moves_to_trash_and_restores_without_touching_real_vaults() {
+        let _environment = crate::obsidian::TEST_ENVIRONMENT_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temporary = tempfile::tempdir().expect("create isolated directory");
+        let vault = temporary.path().join("vaults").join("测试库");
+        let note = vault.join("资料").join("重要笔记.md");
+        let app_data = temporary.path().join("app-data");
+        let trash = temporary.path().join("system-trash").join("Yunspire");
+        let obsidian_config = temporary.path().join("obsidian").join("obsidian.json");
+        fs::create_dir_all(vault.join(".obsidian")).expect("create vault metadata");
+        fs::create_dir_all(note.parent().expect("note parent")).expect("create note parent");
+        let original_content = "---\ntags: [\"重要\"]\n---\n\n# 不可丢失的笔记\n";
+        fs::write(&note, original_content).expect("write isolated note");
+        fs::create_dir_all(obsidian_config.parent().expect("config parent"))
+            .expect("create config parent");
+        fs::write(
+            &obsidian_config,
+            serde_json::to_vec(&serde_json::json!({
+                "vaults": {
+                    "vault-test": {
+                        "path": vault.to_string_lossy(),
+                        "open": false
+                    }
+                }
+            }))
+            .expect("serialize config"),
+        )
+        .expect("write isolated Obsidian config");
+        let home = temporary.path().join("home");
+        fs::create_dir_all(&home).expect("create isolated home");
+        let _variables = EnvironmentGuard::set(&[
+            ("YUNSPIRE_HOME_DIR", &home),
+            ("YUNSPIRE_OBSIDIAN_CONFIG_PATH", &obsidian_config),
+            ("YUNSPIRE_APP_DATA_DIR", &app_data),
+            ("YUNSPIRE_TRASH_DIR", &trash),
+        ]);
+        let database = RuntimeDatabase::open_test(&app_data.join("runtime.sqlite"))
+            .expect("open isolated runtime database");
+        let state = ObsidianManagementState::default();
+
+        let delete_task = persist_task(
+            &database,
+            "delete",
+            "system:delete",
+            "delete",
+            Some("vault-test"),
+            vec!["资料/重要笔记.md".to_string()],
+        );
+        let preview = prepare_vault_entry_delete_inner(
+            &state,
+            &database,
+            "vault-test".to_string(),
+            Some("资料/重要笔记.md".to_string()),
+            Some(false),
+            OperationContext {
+                task_id: Some(delete_task.clone()),
+                trace_id: Some("trace-delete".to_string()),
+            },
+        )
+        .expect("prepare isolated delete");
+        assert_eq!(
+            fs::read_to_string(&note).expect("preview keeps note"),
+            original_content
+        );
+        assert!(!trash.exists(), "preview must not create trash content");
+        database
+            .transition_native_runtime_task(
+                "local",
+                &delete_task,
+                "running",
+                10,
+                "用户点击确认",
+                None,
+            )
+            .expect("approve native delete task");
+        let deleted =
+            commit_vault_entry_delete_inner(&app_data, &state, &database, &preview.approval_id)
+                .expect("commit isolated delete");
+        assert!(
+            !note.exists(),
+            "confirmed delete removes the original entry"
+        );
+        let manifest_path = PathBuf::from(&deleted.target_path).join("manifest.json");
+        assert!(
+            manifest_path.is_file(),
+            "confirmed delete writes a trash manifest"
+        );
+        let entries = list_yunspire_trash_entries().expect("list isolated trash");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].original_relative_path.as_deref(),
+            Some("资料/重要笔记.md")
+        );
+
+        let restore_task = persist_task(
+            &database,
+            "vaults",
+            "system:vaults",
+            "restore",
+            Some("vault-test"),
+            Vec::new(),
+        );
+        database
+            .transition_native_runtime_task("local", &restore_task, "running", 10, "启动恢复", None)
+            .expect("start restore task");
+        restore_yunspire_trash_entry_inner(
+            &app_data,
+            &database,
+            deleted.operation_id,
+            Some("vault-test".to_string()),
+            None,
+            OperationContext {
+                task_id: Some(restore_task),
+                trace_id: Some("trace-restore".to_string()),
+            },
+        )
+        .expect("restore isolated note");
+        assert_eq!(
+            fs::read_to_string(&note).expect("read restored note"),
+            original_content
+        );
+        assert!(list_yunspire_trash_entries()
+            .expect("list empty isolated trash")
+            .is_empty());
+        let events = database
+            .list_native_operation_events(20)
+            .expect("read native operation events");
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == "vault.file.delete"));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == "vault.file.restore"));
+
+        let nested = vault.join("待删除文件夹").join("子目录").join("资料.txt");
+        fs::create_dir_all(nested.parent().expect("nested parent"))
+            .expect("create isolated folder tree");
+        fs::write(&nested, b"folder payload").expect("write isolated folder payload");
+        let folder_delete_task = persist_task(
+            &database,
+            "delete",
+            "system:delete",
+            "delete",
+            Some("vault-test"),
+            vec!["待删除文件夹".to_string()],
+        );
+        let folder_preview = prepare_vault_entry_delete_inner(
+            &state,
+            &database,
+            "vault-test".to_string(),
+            Some("待删除文件夹".to_string()),
+            Some(false),
+            OperationContext {
+                task_id: Some(folder_delete_task.clone()),
+                trace_id: Some("trace-folder-delete".to_string()),
+            },
+        )
+        .expect("prepare isolated folder delete");
+        assert!(nested.is_file(), "folder preview keeps every nested file");
+        database
+            .transition_native_runtime_task(
+                "local",
+                &folder_delete_task,
+                "running",
+                10,
+                "用户点击确认文件夹删除",
+                None,
+            )
+            .expect("approve native folder delete task");
+        let folder_deleted = commit_vault_entry_delete_inner(
+            &app_data,
+            &state,
+            &database,
+            &folder_preview.approval_id,
+        )
+        .expect("commit isolated folder delete");
+        assert!(!vault.join("待删除文件夹").exists());
+        let folder_restore_task = persist_task(
+            &database,
+            "vaults",
+            "system:vaults",
+            "restore",
+            Some("vault-test"),
+            Vec::new(),
+        );
+        database
+            .transition_native_runtime_task(
+                "local",
+                &folder_restore_task,
+                "running",
+                10,
+                "启动文件夹恢复",
+                None,
+            )
+            .expect("start folder restore task");
+        restore_yunspire_trash_entry_inner(
+            &app_data,
+            &database,
+            folder_deleted.operation_id,
+            Some("vault-test".to_string()),
+            None,
+            OperationContext {
+                task_id: Some(folder_restore_task),
+                trace_id: Some("trace-folder-restore".to_string()),
+            },
+        )
+        .expect("restore isolated folder");
+        assert_eq!(
+            fs::read(&nested).expect("read restored nested file"),
+            b"folder payload"
+        );
+
+        let vault_delete_task = persist_task(
+            &database,
+            "delete",
+            "system:delete",
+            "delete",
+            Some("vault-test"),
+            Vec::new(),
+        );
+        let vault_preview = prepare_vault_entry_delete_inner(
+            &state,
+            &database,
+            "vault-test".to_string(),
+            None,
+            Some(true),
+            OperationContext {
+                task_id: Some(vault_delete_task.clone()),
+                trace_id: Some("trace-vault-delete".to_string()),
+            },
+        )
+        .expect("prepare isolated vault delete");
+        assert!(vault.is_dir(), "vault preview keeps the entire vault");
+        database
+            .transition_native_runtime_task(
+                "local",
+                &vault_delete_task,
+                "running",
+                10,
+                "用户点击确认 Vault 删除",
+                None,
+            )
+            .expect("approve native vault delete task");
+        let vault_deleted = commit_vault_entry_delete_inner(
+            &app_data,
+            &state,
+            &database,
+            &vault_preview.approval_id,
+        )
+        .expect("commit isolated vault delete");
+        assert!(
+            !vault.exists(),
+            "confirmed vault delete removes the original root"
+        );
+        let config_after_delete: Value = serde_json::from_slice(
+            &fs::read(&obsidian_config).expect("read config after vault delete"),
+        )
+        .expect("parse config after vault delete");
+        assert!(config_after_delete["vaults"].get("vault-test").is_none());
+
+        let vault_restore_task = persist_task(
+            &database,
+            "vaults",
+            "system:vaults",
+            "restore",
+            None,
+            Vec::new(),
+        );
+        database
+            .transition_native_runtime_task(
+                "local",
+                &vault_restore_task,
+                "running",
+                10,
+                "启动整个 Vault 恢复",
+                None,
+            )
+            .expect("start vault restore task");
+        let restored_vault = restore_yunspire_trash_entry_inner(
+            &app_data,
+            &database,
+            vault_deleted.operation_id,
+            None,
+            None,
+            OperationContext {
+                task_id: Some(vault_restore_task),
+                trace_id: Some("trace-vault-restore".to_string()),
+            },
+        )
+        .expect("restore isolated vault");
+        assert!(vault.join(".obsidian").is_dir());
+        assert_eq!(
+            fs::read_to_string(&note).expect("read note after vault restore"),
+            original_content
+        );
+        assert_eq!(
+            fs::read(&nested).expect("read folder after vault restore"),
+            b"folder payload"
+        );
+        let restored_config: Value = serde_json::from_slice(
+            &fs::read(&obsidian_config).expect("read restored Obsidian config"),
+        )
+        .expect("parse restored Obsidian config");
+        assert!(restored_config["vaults"]
+            .get(&restored_vault.vault_id)
+            .is_some());
+        assert!(list_yunspire_trash_entries()
+            .expect("list empty trash after all restores")
+            .is_empty());
+    }
+}

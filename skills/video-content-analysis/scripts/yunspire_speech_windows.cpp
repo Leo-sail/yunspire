@@ -1,7 +1,4 @@
 #define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
 #include <windows.h>
 #include <sapi.h>
 #include <sphelper.h>
@@ -71,17 +68,6 @@ static std::string json_escape(const std::string& value) {
     }
   }
   return out.str();
-}
-
-static void progress_checkpoint(const std::string& label) {
-  const DWORD required = GetEnvironmentVariableW(L"YUNSPIRE_PROGRESS_FILE", nullptr, 0);
-  if (required == 0) return;
-  std::vector<wchar_t> path(required);
-  const DWORD copied = GetEnvironmentVariableW(
-    L"YUNSPIRE_PROGRESS_FILE", path.data(), static_cast<DWORD>(path.size()));
-  if (copied == 0 || copied >= path.size()) return;
-  std::ofstream stream(fs::path(path.data()), std::ios::binary | std::ios::app);
-  if (stream) stream << GetTickCount64() << '\t' << label << '\n';
 }
 
 static uint64_t wav_duration_ms(const std::wstring& path) {
@@ -207,56 +193,39 @@ int wmain(int argc, wchar_t** argv) {
   if (FAILED(hr) || FAILED(context->SetNotifyWin32Event()) || FAILED(context->SetInterest(event_interest, event_interest)) || FAILED(context->CreateGrammar(1, grammar.Put())) || FAILED(grammar->LoadDictation(nullptr, SPLO_STATIC)) || FAILED(grammar->SetDictationState(SPRS_ACTIVE)) || FAILED(recognizer->SetRecoState(SPRST_ACTIVE))) {
     emit(locale, {}, false, {"Windows SAPI 本地听写语法不可用；请安装与系统语言匹配的离线语音识别功能"}, {"windows_sapi_dictation_unavailable"}); return 0;
   }
-  progress_checkpoint("windows-speech-started");
   std::vector<Segment> segments;
+  const ULONGLONG started = GetTickCount64();
+  constexpr ULONGLONG kMaximumProcessingMilliseconds = 11ULL * 60ULL * 1000ULL;
+  const ULONGLONG deadline = started + kMaximumProcessingMilliseconds;
   bool stream_ended = false;
-  ULONGLONG last_stream_position = 0;
-  ULONGLONG last_checkpoint = GetTickCount64();
-  while (!stream_ended) {
-    if (context->WaitForNotifyEvent(250) == S_OK) {
-      SPEVENT event = {};
-      ULONG fetched = 0;
-      while (SUCCEEDED(context->GetEvents(1, &event, &fetched)) && fetched) {
-        if (event.eEventId == SPEI_RECOGNITION && event.lParam) {
-          ISpRecoResult* result = reinterpret_cast<ISpRecoResult*>(event.lParam);
-          LPWSTR text = nullptr;
-          constexpr ULONG whole_phrase = static_cast<ULONG>(SP_GETWHOLEPHRASE);
-          if (SUCCEEDED(result->GetText(whole_phrase, whole_phrase, TRUE, &text, nullptr)) && text) {
-            SPRECORESULTTIMES times = {};
-            if (SUCCEEDED(result->GetResultTimes(&times))) {
-              segments.push_back({times.ullStart / 10000, (times.ullStart + times.ullLength) / 10000, utf8(text)});
-              progress_checkpoint("windows-speech-recognized:" + std::to_string(times.ullStart / 10000));
-              last_checkpoint = GetTickCount64();
-            }
-            CoTaskMemFree(text);
+  while (!stream_ended && GetTickCount64() < deadline) {
+    if (context->WaitForNotifyEvent(250) != S_OK) continue;
+    SPEVENT event = {};
+    ULONG fetched = 0;
+    while (SUCCEEDED(context->GetEvents(1, &event, &fetched)) && fetched) {
+      if (event.eEventId == SPEI_RECOGNITION && event.lParam) {
+        ISpRecoResult* result = reinterpret_cast<ISpRecoResult*>(event.lParam);
+        LPWSTR text = nullptr;
+        if (SUCCEEDED(result->GetText(SP_GETWHOLEPHRASE, SP_GETWHOLEPHRASE, TRUE, &text, nullptr)) && text) {
+          SPRECORESULTTIMES times = {};
+          if (SUCCEEDED(result->GetResultTimes(&times))) {
+            segments.push_back({times.ullStart / 10000, (times.ullStart + times.ullLength) / 10000, utf8(text)});
           }
-        } else if (event.eEventId == SPEI_FALSE_RECOGNITION) {
-          progress_checkpoint("windows-speech-rejected");
-          last_checkpoint = GetTickCount64();
-        } else if (event.eEventId == SPEI_END_SR_STREAM) {
-          stream_ended = true;
+          CoTaskMemFree(text);
         }
-        SpClearEvent(&event);
-        fetched = 0;
+      } else if (event.eEventId == SPEI_END_SR_STREAM) {
+        stream_ended = true;
       }
-    }
-    LARGE_INTEGER zero = {};
-    ULARGE_INTEGER position = {};
-    const ULONGLONG now = GetTickCount64();
-    if (now - last_checkpoint >= 5000
-        && SUCCEEDED(stream->Seek(zero, STREAM_SEEK_CUR, &position))
-        && position.QuadPart > last_stream_position) {
-      last_stream_position = position.QuadPart;
-      progress_checkpoint("windows-speech-read:" + std::to_string(last_stream_position));
-      last_checkpoint = now;
+      SpClearEvent(&event);
+      fetched = 0;
     }
   }
   grammar->SetDictationState(SPRS_INACTIVE);
   recognizer->SetRecoState(SPRST_INACTIVE);
   std::vector<std::string> warnings;
   std::vector<std::string> errors;
+  if (!stream_ended) { warnings.push_back("Windows SAPI 本地转写未在处理时限内结束"); errors.push_back("windows_sapi_processing_timeout"); }
   if (segments.empty()) { warnings.push_back("Windows SAPI 未返回可用转写；请确认已安装匹配语言的离线语音识别功能"); errors.push_back("windows_sapi_transcript_unavailable"); }
-  progress_checkpoint("windows-speech-finished:" + std::to_string(segments.size()));
   emit(locale, segments, true, warnings, errors);
   return 0;
 }

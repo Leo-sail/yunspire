@@ -127,7 +127,7 @@ def main():
         if helper is None:
             emit({"transcript": "", "segments": [], "warnings": ["Windows 本地语音适配器未随安装包部署；请使用完整 Yunspire 安装包重新安装"], "errors": ["windows_speech_adapter_missing"]})
             return
-        result = run([str(helper), str(audio), args.locale], None)
+        result = run([str(helper), str(audio), args.locale], 720)
         try:
             if result.returncode == 0:
                 emit(validate_windows_payload(json.loads(result.stdout)))

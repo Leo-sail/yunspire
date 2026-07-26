@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">云枢系统架构 / Yunspire System Architecture</title>
+  <desc id="desc">A local-first architecture that connects the desktop experience, deterministic control plane, capability services, Obsidian Vaults, and SQLite runtime data.</desc>
+  <rect width="1600" height="900" fill="#f7f9fb"/>
+  <rect x="40" y="40" width="1520" height="820" rx="8" fill="#ffffff" stroke="#dce2e8" stroke-width="2"/>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Segoe UI', sans-serif" letter-spacing="0">
+    <text x="80" y="96" fill="#111820" font-size="34" font-weight="700">云枢系统架构</text>
+    <text x="80" y="130" fill="#697681" font-size="18">Yunspire local-first system architecture · v0.1.1</text>
+    <rect x="1320" y="76" width="184" height="42" rx="8" fill="#e8f5ef" stroke="#b7ddcb"/>
+    <text x="1412" y="103" fill="#16764a" font-size="16" font-weight="650" text-anchor="middle">LOCAL FIRST</text>
+
+    <text x="80" y="183" fill="#60707b" font-size="14" font-weight="700">EXPERIENCE / 体验层</text>
+    <g fill="#f4f7f9" stroke="#ced7de">
+      <rect x="80" y="200" width="210" height="74" rx="8"/>
+      <rect x="310" y="200" width="210" height="74" rx="8"/>
+      <rect x="540" y="200" width="210" height="74" rx="8"/>
+      <rect x="770" y="200" width="210" height="74" rx="8"/>
+      <rect x="1000" y="200" width="210" height="74" rx="8"/>
+      <rect x="1230" y="200" width="274" height="74" rx="8"/>
+    </g>
+    <g fill="#19232c" font-size="17" font-weight="650" text-anchor="middle">
+      <text x="185" y="233">AI助手</text><text x="185" y="256" fill="#71808b" font-size="13" font-weight="500">AI Assistant</text>
+      <text x="415" y="233">仪表盘与任务</text><text x="415" y="256" fill="#71808b" font-size="13" font-weight="500">Dashboard &amp; Tasks</text>
+      <text x="645" y="233">采集与报告</text><text x="645" y="256" fill="#71808b" font-size="13" font-weight="500">Capture &amp; Reports</text>
+      <text x="875" y="233">搜索与创作</text><text x="875" y="256" fill="#71808b" font-size="13" font-weight="500">Search &amp; Create</text>
+      <text x="1105" y="233">技能与日志</text><text x="1105" y="256" fill="#71808b" font-size="13" font-weight="500">Skills &amp; Logs</text>
+      <text x="1367" y="233">用户手动设置</text><text x="1367" y="256" fill="#71808b" font-size="13" font-weight="500">User-controlled Settings</text>
+    </g>
+
+    <path d="M792 285v34" stroke="#8b9aa5" stroke-width="2"/>
+    <path d="M784 311l8 8 8-8" fill="none" stroke="#8b9aa5" stroke-width="2"/>
+
+    <text x="80" y="340" fill="#60707b" font-size="14" font-weight="700">CONTROL PLANE / 确定性控制层</text>
+    <rect x="80" y="358" width="1424" height="154" rx="8" fill="#f0f7f4" stroke="#afd4c3" stroke-width="2"/>
+    <g>
+      <rect x="112" y="390" width="286" height="88" rx="8" fill="#ffffff" stroke="#a9cabb"/>
+      <rect x="438" y="390" width="286" height="88" rx="8" fill="#ffffff" stroke="#a9cabb"/>
+      <rect x="764" y="390" width="286" height="88" rx="8" fill="#ffffff" stroke="#a9cabb"/>
+      <rect x="1090" y="390" width="382" height="88" rx="8" fill="#ffffff" stroke="#a9cabb"/>
+    </g>
+    <g fill="#123c2b" font-size="18" font-weight="700" text-anchor="middle">
+      <text x="255" y="425">Command Bus</text><text x="255" y="451" fill="#547064" font-size="13" font-weight="500">类型化命令 · Typed commands</text>
+      <text x="581" y="425">Policy Engine</text><text x="581" y="451" fill="#547064" font-size="13" font-weight="500">范围与风险 · Scope &amp; risk</text>
+      <text x="907" y="425">Task Runtime</text><text x="907" y="451" fill="#547064" font-size="13" font-weight="500">状态、预算、恢复 · State &amp; recovery</text>
+      <text x="1281" y="425">Scheduler + Operation Log</text><text x="1281" y="451" fill="#547064" font-size="13" font-weight="500">调度、回执与审计 · Scheduling &amp; receipts</text>
+    </g>
+    <g stroke="#6c9c86" stroke-width="2" fill="none">
+      <path d="M398 434h40"/><path d="M430 426l8 8-8 8"/>
+      <path d="M724 434h40"/><path d="M756 426l8 8-8 8"/>
+      <path d="M1050 434h40"/><path d="M1082 426l8 8-8 8"/>
+    </g>
+
+    <path d="M792 522v34" stroke="#8b9aa5" stroke-width="2"/>
+    <path d="M784 548l8 8 8-8" fill="none" stroke="#8b9aa5" stroke-width="2"/>
+
+    <text x="80" y="579" fill="#60707b" font-size="14" font-weight="700">CAPABILITIES / 能力层</text>
+    <g>
+      <rect x="80" y="596" width="264" height="108" rx="8" fill="#f3f6fb" stroke="#bfcbe0"/>
+      <rect x="364" y="596" width="264" height="108" rx="8" fill="#f3f6fb" stroke="#bfcbe0"/>
+      <rect x="648" y="596" width="264" height="108" rx="8" fill="#f3f6fb" stroke="#bfcbe0"/>
+      <rect x="932" y="596" width="264" height="108" rx="8" fill="#f3f6fb" stroke="#bfcbe0"/>
+      <rect x="1216" y="596" width="288" height="108" rx="8" fill="#f3f6fb" stroke="#bfcbe0"/>
+    </g>
+    <g fill="#1b2b45" font-size="17" font-weight="700" text-anchor="middle">
+      <text x="212" y="635">Model Gateway</text><text x="212" y="659" fill="#64748d" font-size="13" font-weight="500">模型路由与意图回执</text><text x="212" y="680" fill="#64748d" font-size="12" font-weight="500">Routing &amp; intent receipts</text>
+      <text x="496" y="635">Skill Executor</text><text x="496" y="659" fill="#64748d" font-size="13" font-weight="500">第一方与用户 Skill</text><text x="496" y="680" fill="#64748d" font-size="12" font-weight="500">First-party &amp; user Skills</text>
+      <text x="780" y="635">Capture Pipeline</text><text x="780" y="659" fill="#64748d" font-size="13" font-weight="500">抽取、分析与质量门禁</text><text x="780" y="680" fill="#64748d" font-size="12" font-weight="500">Extract, analyze, gate</text>
+      <text x="1064" y="635">Report Service</text><text x="1064" y="659" fill="#64748d" font-size="13" font-weight="500">日周月年报与复盘</text><text x="1064" y="680" fill="#64748d" font-size="12" font-weight="500">Reports &amp; reflection</text>
+      <text x="1360" y="635">Obsidian Adapter</text><text x="1360" y="659" fill="#64748d" font-size="13" font-weight="500">文件、属性、链接与 Graph</text><text x="1360" y="680" fill="#64748d" font-size="12" font-weight="500">Files, properties &amp; links</text>
+    </g>
+
+    <path d="M792 714v30" stroke="#8b9aa5" stroke-width="2"/>
+    <path d="M784 736l8 8 8-8" fill="none" stroke="#8b9aa5" stroke-width="2"/>
+
+    <text x="80" y="767" fill="#60707b" font-size="14" font-weight="700">LOCAL DATA / 本地数据层</text>
+    <rect x="80" y="784" width="910" height="52" rx="8" fill="#eef5fb" stroke="#aac9df"/>
+    <rect x="1010" y="784" width="494" height="52" rx="8" fill="#f6f3fa" stroke="#c8b8db"/>
+    <text x="535" y="816" fill="#17486a" font-size="17" font-weight="700" text-anchor="middle">Obsidian Vault · Markdown / Properties / Attachments / Wiki Links</text>
+    <text x="1257" y="816" fill="#513b69" font-size="17" font-weight="700" text-anchor="middle">SQLite/WAL · Tasks / Conversations / Events / FTS</text>
+
+    <rect x="1102" y="144" width="402" height="32" rx="6" fill="#fff5dc" stroke="#e7cc86"/>
+    <text x="1303" y="165" fill="#7a5a0d" font-size="13" font-weight="650" text-anchor="middle">Imported content remains untrusted data / 导入内容始终是不可信数据</text>
+  </g>
+</svg>

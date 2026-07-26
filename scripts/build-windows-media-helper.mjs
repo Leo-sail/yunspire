@@ -1,4 +1,4 @@
-import { access, mkdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
@@ -41,23 +41,12 @@ for (const [sourceName, outputName, libraries] of targets) {
   const object = path.join(binaryDirectory, `${path.parse(outputName).name}.obj`);
   await rm(output, { force: true });
   await rm(object, { force: true });
-  const commandFile = path.join(binaryDirectory, `.build-${path.parse(outputName).name}.cmd`);
-  const command = [
-    '@echo off',
-    `call "${developerCommand}" -arch=x64 -host_arch=x64 >nul`,
-    'if errorlevel 1 exit /b 1',
-    `cl.exe /nologo /std:c++17 /O2 /EHsc /MT /utf-8 /permissive- /W4 /WX /external:W0 /external:anglebrackets /DUNICODE /D_UNICODE /DNOMINMAX /Fo:"${object}" "${source}" /Fe:"${output}" /link ${libraries}`,
-  ].join('\r\n') + '\r\n';
-  await writeFile(commandFile, command, 'utf8');
-  try {
-    const result = spawnSync('cmd.exe', ['/d', '/c', commandFile], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
-    if (result.status !== 0) {
-      throw new Error(`构建 ${outputName} 失败：\n${result.stdout}\n${result.stderr}`.trim());
-    }
-    await access(output, constants.X_OK);
-    await rm(object, { force: true });
-  } finally {
-    await rm(commandFile, { force: true });
+  const command = `call "${developerCommand}" -arch=x64 -host_arch=x64 >nul && cl.exe /nologo /std:c++17 /O2 /EHsc /MT /utf-8 /permissive- /W4 /WX /external:W0 /external:anglebrackets /DUNICODE /D_UNICODE /Fo:"${object}" "${source}" /Fe:"${output}" /link ${libraries}`;
+  const result = spawnSync('cmd.exe', ['/d', '/s', '/c', command], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+  if (result.status !== 0) {
+    throw new Error(`构建 ${outputName} 失败：\n${result.stdout}\n${result.stderr}`.trim());
   }
+  await access(output, constants.X_OK);
+  await rm(object, { force: true });
 }
 console.log('WINDOWS_MEDIA_HELPERS_OK yunspire-media.exe yunspire-speech.exe');

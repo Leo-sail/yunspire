@@ -189,6 +189,54 @@ fn normalize_model_provider_assignments(
     ))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_provider_can_assign_distinct_defaults_for_all_model_roles() {
+        let available = serde_json::json!([
+            {"id": "chat-model"},
+            {"id": "analysis-model"},
+            {"id": "image-model"}
+        ]);
+        let assignments = serde_json::json!({
+            "chat": ["chat-model"],
+            "analysis": ["analysis-model"],
+            "image": ["image-model"]
+        });
+        let defaults = serde_json::json!({
+            "chat": "chat-model",
+            "analysis": "analysis-model",
+            "image": "image-model"
+        });
+        let (assignments, defaults) =
+            normalize_model_provider_assignments(&available, &assignments, &defaults)
+                .expect("normalize model assignments");
+        assert_eq!(defaults["chat"], "chat-model");
+        assert_eq!(defaults["analysis"], "analysis-model");
+        assert_eq!(defaults["image"], "image-model");
+        assert_eq!(assignments["image"][0], "image-model");
+    }
+
+    #[test]
+    fn unavailable_models_are_removed_from_assignments_and_defaults() {
+        let available = serde_json::json!([{"id": "available"}]);
+        let assignments = serde_json::json!({
+            "chat": ["available", "missing"],
+            "analysis": ["missing"],
+            "image": []
+        });
+        let defaults = serde_json::json!({"chat": "missing", "analysis": "missing"});
+        let (assignments, defaults) =
+            normalize_model_provider_assignments(&available, &assignments, &defaults)
+                .expect("normalize missing models");
+        assert_eq!(assignments["chat"], serde_json::json!(["available"]));
+        assert!(assignments["analysis"].as_array().unwrap().is_empty());
+        assert!(defaults.as_object().unwrap().is_empty());
+    }
+}
+
 fn provider_display_name(provider: &str) -> &str {
     match provider {
         "openai" => "OpenAI 兼容",

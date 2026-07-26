@@ -1429,10 +1429,10 @@ body.task-drawer-open .task-drawer-backdrop { visibility: visible; opacity: 1; p
 .app-shell .schedule-table.empty-filter-state > .table-head { display: grid !important; }
 .document-pane.empty-filter-state::after { content: "暂无本地草稿"; }
 .document-pane.empty-filter-state.filter-query-active::after { content: "没有匹配文档"; }
-.schedule-table.empty-filter-state::after { content: "暂无定时任务"; }
-.timeline-list.empty-filter-state::after { content: "暂无运行记录"; }
-.dashboard-task-panel.empty-filter-state::after { content: "暂无任务"; }
-.results-pane.empty-filter-state::after { content: "没有搜索结果"; }
+.schedule-table.empty-filter-state::after { content: "暂无真实定时任务"; }
+.timeline-list.empty-filter-state::after { content: "暂无真实运行记录"; }
+.dashboard-task-panel.empty-filter-state::after { content: "暂无真实任务"; }
+.results-pane.empty-filter-state::after { content: "没有真实搜索结果"; }
 .source-preview.is-refreshed { box-shadow: inset 3px 0 0 var(--jade); }
 .inline-diff-detail { margin-top: 8px; padding: 9px; border: 1px solid var(--line); border-radius: 4px; background: #fafbfa; color: var(--ink-2); font-size: 9px; line-height: 1.6; }
 .skill-route-rule-detail { display: grid; gap: 8px; margin-top: 9px; padding: 10px; border: 1px solid #bfd8ce; border-radius: 4px; background: var(--jade-soft); }

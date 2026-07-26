@@ -122,3 +122,23 @@ pub fn list_runtime_tasks(
     let workspace_scope = database.local_workspace_scope()?;
     database.list_runtime_tasks(&workspace_scope, state.as_deref(), limit.unwrap_or(200))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_control_actions_to_states() {
+        assert_eq!(target_state(&TaskControlAction::Start), "running");
+        assert_eq!(target_state(&TaskControlAction::Pause), "paused");
+        assert_eq!(target_state(&TaskControlAction::Succeed), "succeeded");
+    }
+
+    #[test]
+    fn enforces_terminal_states() {
+        assert!(valid_task_transition("queued", "running"));
+        assert!(valid_task_transition("running", "succeeded"));
+        assert!(!valid_task_transition("succeeded", "running"));
+        assert!(!valid_task_transition("cancelled", "queued"));
+    }
+}

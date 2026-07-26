@@ -60,3 +60,20 @@ pub fn start_scheduler(app: &AppHandle) {
 pub fn pause_scheduler(app: &AppHandle) {
     app.state::<SchedulerState>().set_authorized(false);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scheduler_authorization_can_be_revoked_and_restored() {
+        let state = SchedulerState::default();
+        assert!(!state.is_authorized());
+        state.set_authorized(true);
+        assert!(state.is_authorized());
+        state.set_authorized(false);
+        assert!(!state.is_authorized());
+        state.set_authorized(true);
+        assert!(state.is_authorized());
+    }
+}

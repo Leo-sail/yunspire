@@ -23,7 +23,7 @@ use uuid::Uuid;
 const MAX_AUTH_SECRET_BYTES: usize = 16 * 1024;
 const MAX_UPLOAD_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 const MODEL_ANALYSIS_IMAGE_TARGET_BYTES: u64 = 3 * 1024 * 1024;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 const MODEL_ANALYSIS_IMAGE_DERIVATIVE_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(target_os = "macos")]
 const MODEL_ANALYSIS_IMAGE_RESOURCE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -838,7 +838,7 @@ fn run_image_resource_probe(mut command: Command, label: &str) -> Result<String,
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn parse_sips_image_dimensions(output: &str) -> Result<(u64, u64), String> {
     let mut width = None;
     let mut height = None;
@@ -873,7 +873,7 @@ fn sips_image_dimensions(path: &Path) -> Result<(u64, u64), String> {
     parse_sips_image_dimensions(&run_image_resource_probe(command, "图片像素探测")?)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 fn physical_memory_bytes() -> Result<u64, String> {
     let mut command = Command::new("/usr/sbin/sysctl");
     command.args(["-n", "hw.memsize"]);
@@ -886,7 +886,7 @@ fn physical_memory_bytes() -> Result<u64, String> {
         .ok_or_else(|| "无法取得有效物理内存容量，图片派生已阻止".to_string())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn parse_available_memory_bytes(output: &str) -> Result<u64, String> {
     let page_size = output
         .lines()
@@ -922,13 +922,13 @@ fn parse_available_memory_bytes(output: &str) -> Result<u64, String> {
         .ok_or_else(|| "本机可用内存计算失败，图片派生已阻止".to_string())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 fn available_memory_bytes() -> Result<u64, String> {
     let command = Command::new("/usr/bin/vm_stat");
     parse_available_memory_bytes(&run_image_resource_probe(command, "可用内存探测")?)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn parse_available_disk_bytes(output: &str) -> Result<u64, String> {
     let available_kib = output
         .lines()
@@ -943,14 +943,14 @@ fn parse_available_disk_bytes(output: &str) -> Result<u64, String> {
         .ok_or_else(|| "图片派生目录磁盘余量计算失败".to_string())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 fn available_disk_bytes(path: &Path) -> Result<u64, String> {
     let mut command = Command::new("/bin/df");
     command.args(["-P", "-k"]).arg(path);
     parse_available_disk_bytes(&run_image_resource_probe(command, "磁盘余量探测")?)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn validate_image_decode_resource_budget(
     width: u64,
     height: u64,
@@ -990,7 +990,7 @@ fn validate_image_decode_resource_budget(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 fn ensure_sips_decode_resource_budget(source: &Path, target: &Path) -> Result<(), String> {
     let source_byte_length = fs::metadata(source)
         .map_err(|error| format!("无法读取图片资源门禁元数据：{error}"))?
@@ -1006,6 +1006,22 @@ fn ensure_sips_decode_resource_budget(source: &Path, target: &Path) -> Result<()
         physical_memory_bytes()?,
         available_memory_bytes()?,
         available_disk_bytes(target_directory)?,
+    )
+}
+
+#[cfg(all(target_os = "macos", test))]
+fn ensure_sips_decode_resource_budget(source: &Path, _target: &Path) -> Result<(), String> {
+    let source_byte_length = fs::metadata(source)
+        .map_err(|error| format!("无法读取图片资源门禁元数据：{error}"))?
+        .len();
+    let (width, height) = sips_image_dimensions(source)?;
+    validate_image_decode_resource_budget(
+        width,
+        height,
+        source_byte_length,
+        16 * 1024 * 1024 * 1024,
+        8 * 1024 * 1024 * 1024,
+        64 * 1024 * 1024 * 1024,
     )
 }
 
@@ -1055,9 +1071,14 @@ fn run_sips_derivative(
     max_dimension: u32,
     windows_adapter: Option<&Path>,
 ) -> Result<(), String> {
+    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("yunspire-native")
+        .join("yunspire_image_windows.exe");
     let adapter = windows_adapter
         .map(Path::to_path_buf)
         .or_else(|| env::var_os("YUNSPIRE_WINDOWS_IMAGE_ADAPTER").map(PathBuf::from))
+        .or_else(|| development.is_file().then_some(development))
         .ok_or_else(|| {
             "Windows 图片分析派生器未随安装包部署；原图未改动且本次模型图片输入已阻止".to_string()
         })?;
@@ -1277,7 +1298,7 @@ fn capture_image_analysis_input_with_adapter(
     })
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(any(not(target_os = "windows"), test))]
 fn capture_image_analysis_input(
     path: &Path,
     mime_type: &str,
@@ -1288,27 +1309,28 @@ fn capture_image_analysis_input(
 
 #[cfg(target_os = "windows")]
 fn windows_image_derivative_adapter(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("yunspire-native")
+        .join("yunspire_image_windows.exe");
+    if development.is_file() {
+        return Ok(development);
+    }
     let relative = Path::new("skills")
         .join("document-content-analysis")
         .join("scripts")
         .join("yunspire_image_windows.exe");
-    let bundled = app.path().resolve(&relative, BaseDirectory::Resource).ok();
-    if let Some(path) = bundled.as_ref().filter(|path| path.is_file()) {
-        return Ok(path.to_path_buf());
+    let bundled = app
+        .path()
+        .resolve(&relative, BaseDirectory::Resource)
+        .map_err(|error| format!("无法定位 Windows 图片分析派生器：{error}"))?;
+    if bundled.is_file() {
+        return Ok(bundled);
     }
-    #[cfg(debug_assertions)]
-    if let Some(development) = debug_project_file(
-        &Path::new("src-tauri")
-            .join("target")
-            .join("yunspire-native")
-            .join("yunspire_image_windows.exe"),
-    ) {
-        return Ok(development);
-    }
-    let bundled = bundled
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "<unavailable>".to_string());
-    Err(format!("Windows 图片分析派生器未随安装包部署：{bundled}"))
+    Err(format!(
+        "Windows 图片分析派生器未随安装包部署：{}",
+        bundled.display()
+    ))
 }
 
 #[tauri::command]
@@ -1553,18 +1575,6 @@ fn normalize_expected_capture_sha256(value: Option<&str>) -> Result<Option<Strin
     Ok(Some(value.to_ascii_lowercase()))
 }
 
-#[cfg(debug_assertions)]
-fn debug_project_file(relative: &Path) -> Option<PathBuf> {
-    let current = env::current_dir().ok()?;
-    for root in current.ancestors().take(4) {
-        let candidate = root.join(relative);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
 fn helper_script(app: &tauri::AppHandle, kind: &str) -> Result<PathBuf, String> {
     let relative = match kind {
         "url" => [
@@ -1588,21 +1598,24 @@ fn helper_script(app: &tauri::AppHandle, kind: &str) -> Result<PathBuf, String> 
         _ => return Err("不支持的采集来源类型".to_string()),
     };
     let relative_path = relative.iter().copied().collect::<PathBuf>();
+    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join(&relative_path);
+    if development.exists() {
+        return Ok(development);
+    }
     let bundled = app
         .path()
         .resolve(&relative_path, BaseDirectory::Resource)
-        .ok();
-    if let Some(path) = bundled.as_ref().filter(|path| path.is_file()) {
-        return Ok(path.to_path_buf());
+        .map_err(|error| format!("无法定位 Yunspire 资源目录：{error}"))?;
+    if bundled.is_file() {
+        return Ok(bundled);
     }
-    #[cfg(debug_assertions)]
-    if let Some(development) = debug_project_file(&relative_path) {
-        return Ok(development);
-    }
-    let bundled = bundled
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "<unavailable>".to_string());
-    Err(format!("采集技能脚本未随应用部署：{bundled}"))
+    Err(format!(
+        "采集技能脚本不存在：{}；打包资源：{}",
+        development.display(),
+        bundled.display()
+    ))
 }
 
 fn python_executable(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -1620,32 +1633,28 @@ fn python_executable(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     }
     #[cfg(target_os = "windows")]
     {
-        let relative = Path::new("runtime").join("python").join("python.exe");
-        let bundled = app.path().resolve(&relative, BaseDirectory::Resource).ok();
-        if let Some(path) = bundled.as_ref().filter(|path| path.is_file()) {
-            return Ok(path.to_path_buf());
-        }
-        #[cfg(debug_assertions)]
-        if let Some(development) = debug_project_file(
-            &Path::new("src-tauri")
-                .join("target")
-                .join("yunspire-runtime")
-                .join("python")
-                .join("python.exe"),
-        ) {
+        let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("yunspire-runtime")
+            .join("python")
+            .join("python.exe");
+        if development.is_file() {
             return Ok(development);
         }
-        #[cfg(debug_assertions)]
-        {
+        let relative = Path::new("runtime").join("python").join("python.exe");
+        let bundled = app
+            .path()
+            .resolve(&relative, BaseDirectory::Resource)
+            .map_err(|error| format!("无法定位云枢 Windows Python 运行时：{error}"))?;
+        if bundled.is_file() {
+            return Ok(bundled);
+        }
+        if cfg!(debug_assertions) {
             return Ok(PathBuf::from("python"));
         }
-        #[cfg(not(debug_assertions))]
-        let bundled = bundled
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "<unavailable>".to_string());
-        #[cfg(not(debug_assertions))]
         Err(format!(
-            "云枢 Windows Python 运行时未随安装包部署：{bundled}"
+            "云枢 Windows Python 运行时未随安装包部署：{}",
+            bundled.display()
         ))
     }
     #[cfg(not(target_os = "windows"))]
@@ -2672,4 +2681,344 @@ fn extract_capture_source_blocking(job: CaptureExtractionJob) -> Result<CaptureE
         }
     }
     Ok(capture_extraction(source_type, result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn speech_locale_is_validated_and_canonicalized() {
+        assert_eq!(normalize_speech_locale("zh-cn").unwrap(), "zh-CN");
+        assert_eq!(normalize_speech_locale("sr-latn-rs").unwrap(), "sr-Latn-RS");
+        assert_eq!(
+            normalize_system_speech_locale("en_US.UTF-8@calendar=gregorian").as_deref(),
+            Some("en-US")
+        );
+        assert!(normalize_speech_locale("简体中文").is_err());
+        assert!(normalize_speech_locale("en--US").is_err());
+        assert!(normalize_system_speech_locale("C.UTF-8").is_none());
+    }
+
+    #[test]
+    fn every_video_helper_invocation_carries_the_selected_locale() {
+        assert_eq!(
+            video_helper_args("https://example.com/video".to_string(), None, "en-US"),
+            ["https://example.com/video", "--locale", "en-US"]
+        );
+        assert_eq!(
+            video_helper_args(
+                "C:/资料/视频.mp4".to_string(),
+                Some("C:/输出".to_string()),
+                "zh-CN",
+            ),
+            [
+                "C:/资料/视频.mp4",
+                "--output-dir",
+                "C:/输出",
+                "--locale",
+                "zh-CN",
+            ]
+        );
+    }
+
+    #[test]
+    fn capture_hash_is_stable_across_provenance_and_changes_with_content() {
+        let first = serde_json::json!({
+            "title": "测试",
+            "source_url": "https://example.com/article",
+            "metadata": {"host": "example.com"},
+            "tags": ["a", "b"]
+        });
+        let second = serde_json::json!({
+            "tags": ["a", "b"],
+            "metadata": {"host": "mirror.example.org"},
+            "source_url": "https://mirror.example.org/copy",
+            "title": "测试"
+        });
+        assert_eq!(capture_content_hash(&first), capture_content_hash(&second));
+        assert_ne!(
+            capture_content_hash(&first),
+            capture_content_hash(&serde_json::json!({
+                "title": "不同内容",
+                "tags": ["a", "b"]
+            }))
+        );
+    }
+
+    #[test]
+    fn capture_file_paths_reject_absolute_and_parent_traversal() {
+        assert!(safe_relative_path(Some("资料/文章.md"), "fallback.md").is_ok());
+        assert!(safe_relative_path(Some("../秘密.md"), "fallback.md").is_err());
+        assert!(safe_relative_path(Some("/tmp/秘密.md"), "fallback.md").is_err());
+        assert!(safe_relative_path(Some("资料/./文章.md"), "fallback.md").is_ok());
+    }
+
+    #[test]
+    fn capture_uploads_limit_each_ipc_chunk_without_limiting_file_size() {
+        assert_eq!(MAX_UPLOAD_CHUNK_BYTES, 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn capture_image_analysis_preserves_small_original_and_derives_oversized_input() {
+        let temporary = tempdir().expect("create isolated image analysis directory");
+        let icon = fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("icons/32x32.png"))
+            .expect("read bundled product icon");
+        let small = temporary.path().join("small.png");
+        fs::write(&small, &icon).expect("write small image");
+        let small_hash = stream_sha256(&small).expect("hash small image");
+        let original = capture_image_analysis_input(&small, "image/png", Some(&small_hash))
+            .expect("prepare original model image input");
+        assert!(!original.derived);
+        assert_eq!(original.original_sha256, original.analysis_sha256);
+        assert!(original.data_url.starts_with("data:image/png;base64,"));
+
+        let oversized = temporary.path().join("oversized.png");
+        fs::write(&oversized, &icon).expect("write oversized image base");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&oversized)
+            .expect("open oversized image")
+            .set_len(MODEL_ANALYSIS_IMAGE_TARGET_BYTES + 1)
+            .expect("pad oversized image without changing its decodable pixels");
+        let oversized_hash = stream_sha256(&oversized).expect("hash oversized image");
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let derivative = capture_image_analysis_input(
+                &oversized,
+                "image/png",
+                Some(&format!(" SHA256:{} ", oversized_hash.to_ascii_uppercase())),
+            )
+            .expect("derive bounded model image input");
+            assert!(derivative.derived);
+            assert_eq!(derivative.original_sha256, oversized_hash);
+            assert_ne!(derivative.original_sha256, derivative.analysis_sha256);
+            assert!(derivative.analysis_byte_length <= MODEL_ANALYSIS_IMAGE_TARGET_BYTES);
+            assert!(derivative.data_url.starts_with("data:image/jpeg;base64,"));
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let error = capture_image_analysis_input(
+                &oversized,
+                "image/png",
+                Some(&format!(" SHA256:{} ", oversized_hash.to_ascii_uppercase())),
+            )
+            .expect_err("unsupported platform must block oversized image derivation");
+            assert!(error.contains("没有可用的本机图片分析派生器"));
+        }
+        assert!(
+            capture_image_analysis_input(&small, "image/png", Some("sha256:wrong"))
+                .unwrap_err()
+                .contains("哈希")
+        );
+    }
+
+    #[test]
+    fn capture_image_derivative_hash_guard_rejects_source_change() {
+        let temporary = tempdir().expect("create isolated image analysis directory");
+        let source = temporary.path().join("source.png");
+        fs::write(&source, b"original image bytes").expect("write original image");
+        let original_sha256 = stream_sha256(&source).expect("hash original image");
+
+        fs::write(&source, b"changed image bytes").expect("change original image");
+        let error = ensure_original_image_unchanged(&source, &original_sha256)
+            .expect_err("reject changed original after derivative");
+
+        assert!(error.contains("发生变化"));
+    }
+
+    #[test]
+    fn capture_image_direct_bytes_are_hashed_again_after_the_precomputed_hash() {
+        let temporary = tempdir().expect("create isolated image analysis directory");
+        let source = temporary.path().join("source.png");
+        fs::write(&source, b"original image bytes").expect("write original image");
+        let precomputed_sha256 = stream_sha256(&source).expect("hash original image");
+
+        fs::write(&source, b"changed image bytes").expect("change source before direct read");
+        let error = read_verified_direct_image_bytes(&source, &precomputed_sha256, None)
+            .expect_err("reject source changed between hash and direct read");
+
+        assert!(error.contains("读取模型图片分析输入期间"));
+    }
+
+    #[test]
+    fn capture_image_direct_bytes_must_match_expected_hash_without_prefix() {
+        let temporary = tempdir().expect("create isolated image analysis directory");
+        let source = temporary.path().join("source.png");
+        fs::write(&source, b"stable image bytes").expect("write image");
+        let hash = stream_sha256(&source).expect("hash image");
+
+        let (bytes, normalized_hash) = read_verified_direct_image_bytes(
+            &source,
+            &hash,
+            Some(&format!(" SHA256:{} ", hash.to_ascii_uppercase())),
+        )
+        .expect("accept equivalent expected hash spelling");
+        assert_eq!(bytes, b"stable image bytes");
+        assert_eq!(normalized_hash, hash);
+
+        let wrong_hash = format!("sha256:{}", "0".repeat(64));
+        let error = read_verified_direct_image_bytes(&source, &hash, Some(&wrong_hash))
+            .expect_err("reject expected hash mismatch");
+        assert!(error.contains("实际接收图片的哈希"));
+        assert!(
+            read_verified_direct_image_bytes(&source, &hash, Some("sha256:not-the-image"))
+                .unwrap_err()
+                .contains("完整的 SHA-256")
+        );
+    }
+
+    #[test]
+    fn capture_image_decode_resource_budget_is_dynamic_and_rejects_shortage() {
+        assert!(validate_image_decode_resource_budget(
+            4000,
+            3000,
+            2_000_000,
+            16_000_000_000,
+            8_000_000_000,
+            100_000_000_000,
+        )
+        .is_ok());
+        assert!(validate_image_decode_resource_budget(
+            4000,
+            3000,
+            2_000_000,
+            16_000_000_000,
+            100_000_000,
+            100_000_000_000,
+        )
+        .unwrap_err()
+        .contains("解码内存"));
+        assert!(validate_image_decode_resource_budget(
+            4000,
+            3000,
+            2_000_000,
+            16_000_000_000,
+            8_000_000_000,
+            10_000_000,
+        )
+        .unwrap_err()
+        .contains("临时磁盘"));
+        assert!(validate_image_decode_resource_budget(
+            u64::MAX,
+            2,
+            1,
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+        )
+        .unwrap_err()
+        .contains("溢出"));
+    }
+
+    #[test]
+    fn capture_image_resource_probe_parsers_reject_incomplete_or_invalid_results() {
+        assert_eq!(
+            parse_sips_image_dimensions("/tmp/image.png:\n  pixelWidth: 320\n  pixelHeight: 240\n")
+                .expect("parse sips dimensions"),
+            (320, 240)
+        );
+        assert!(parse_sips_image_dimensions("pixelWidth: 0\npixelHeight: 240").is_err());
+
+        let vm_stat = "Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages free: 10.\nPages inactive: 20.\nPages speculative: 3.\n";
+        assert_eq!(
+            parse_available_memory_bytes(vm_stat).expect("parse vm_stat"),
+            33 * 4096
+        );
+        assert!(parse_available_memory_bytes("page size unavailable").is_err());
+
+        assert_eq!(
+            parse_available_disk_bytes(
+                "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk 100 20 80 20% /tmp\n"
+            )
+            .expect("parse df"),
+            80 * 1024
+        );
+        assert!(parse_available_disk_bytes("Filesystem only").is_err());
+    }
+
+    #[test]
+    fn capture_staging_cleanup_removes_all_orphans_and_preserves_unknown_files() {
+        let temporary = tempdir().expect("create isolated staging root");
+        let uploads = temporary.path().join("uploads");
+        let attachments = temporary.path().join("attachments");
+        fs::create_dir_all(&uploads).expect("create upload staging directory");
+        fs::create_dir_all(&attachments).expect("create attachment staging directory");
+        let old_upload_id = Uuid::new_v4().to_string();
+        let recent_upload_id = Uuid::new_v4().to_string();
+        let old_attachment_id = Uuid::new_v4().to_string();
+        let recent_attachment_id = Uuid::new_v4().to_string();
+        let old_claim_attachment_id = Uuid::new_v4().to_string();
+        let old_claim_id = Uuid::new_v4().to_string();
+        let recent_claim_attachment_id = Uuid::new_v4().to_string();
+        let recent_claim_id = Uuid::new_v4().to_string();
+        let old_upload = uploads.join(format!("{old_upload_id}.part"));
+        let recent_upload = uploads.join(format!("{recent_upload_id}.part"));
+        let old_attachment = attachments.join(format!("{old_attachment_id}.asset"));
+        let recent_attachment = attachments.join(format!("{recent_attachment_id}.asset"));
+        let old_claim =
+            attachments.join(format!("{old_claim_attachment_id}.{old_claim_id}.claimed"));
+        let recent_claim = attachments.join(format!(
+            "{recent_claim_attachment_id}.{recent_claim_id}.claimed"
+        ));
+        let unrelated = attachments.join("do-not-delete.asset");
+        for path in [
+            &old_upload,
+            &recent_upload,
+            &old_attachment,
+            &recent_attachment,
+            &old_claim,
+            &recent_claim,
+            &unrelated,
+        ] {
+            fs::write(path, b"staged").expect("write staging fixture");
+        }
+        let baseline = SystemTime::now();
+
+        let cleanup = cleanup_expired_capture_staging_in(&uploads, &attachments, baseline)
+            .expect("clean orphaned capture staging files");
+        assert_eq!(cleanup.removed_upload_parts, 2);
+        assert_eq!(cleanup.removed_attachments, 2);
+        assert_eq!(cleanup.removed_claimed_attachments, 2);
+        assert!(!old_upload.exists());
+        assert!(!recent_upload.exists());
+        assert!(!old_attachment.exists());
+        assert!(!recent_attachment.exists());
+        assert!(!old_claim.exists());
+        assert!(!recent_claim.exists());
+        assert!(unrelated.is_file());
+    }
+
+    #[test]
+    fn explicit_attachment_discard_is_idempotent_and_never_removes_claimed_files() {
+        let temporary = tempdir().expect("create isolated attachment staging root");
+        let attachment_id = Uuid::new_v4().to_string();
+        let claim_id = Uuid::new_v4().to_string();
+        let staged = temporary.path().join(format!("{attachment_id}.asset"));
+        let claimed = temporary
+            .path()
+            .join(format!("{attachment_id}.{claim_id}.claimed"));
+        fs::write(&staged, b"staged").expect("write staged attachment");
+        fs::write(&claimed, b"claimed").expect("write claimed attachment");
+
+        assert_eq!(
+            discard_staged_capture_attachments_in(
+                temporary.path(),
+                &[attachment_id.clone(), attachment_id.clone()],
+            )
+            .expect("discard staged attachment"),
+            1
+        );
+        assert_eq!(
+            discard_staged_capture_attachments_in(temporary.path(), &[attachment_id])
+                .expect("repeat staged attachment discard"),
+            0
+        );
+        assert!(claimed.is_file());
+        assert!(discard_staged_capture_attachments_in(
+            temporary.path(),
+            &["../../outside".to_string()],
+        )
+        .is_err());
+    }
 }

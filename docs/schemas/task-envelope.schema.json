@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yunspire.local/schemas/task-envelope.schema.json",
+  "title": "TaskEnvelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "kind",
+    "state",
+    "created_at",
+    "origin",
+    "input_refs",
+    "budgets",
+    "idempotency_key"
+  ],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "parent_id": { "type": ["string", "null"] },
+    "schedule_id": { "type": ["string", "null"] },
+    "kind": { "type": "string", "enum": ["interactive", "scheduled", "maintenance", "evolution"] },
+    "state": {
+      "type": "string",
+      "enum": ["created", "queued", "running", "awaiting_approval", "paused", "succeeded", "failed", "cancelled"]
+    },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "enum": ["direct_user", "schedule", "system_maintenance", "evolution"] },
+        "source_adapter_id": { "type": ["string", "null"] },
+        "source_adapter_revision": { "type": ["integer", "null"], "minimum": 1 },
+        "external_request_id": { "type": ["string", "null"] },
+        "workspace_scope": { "type": ["string", "null"] },
+        "declared_scope": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      }
+    },
+    "requested_skills": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "input_refs": { "type": "array", "items": { "type": "string" } },
+    "idempotency_key": { "type": "string", "minLength": 1 },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_steps", "max_runtime_seconds", "max_tool_calls"],
+      "properties": {
+        "max_steps": { "type": "integer", "minimum": 1 },
+        "max_runtime_seconds": { "type": "integer", "minimum": 1 },
+        "max_tool_calls": { "type": "integer", "minimum": 0 },
+        "max_tokens": { "type": ["integer", "null"], "minimum": 1 },
+        "max_cost": { "type": ["number", "null"], "minimum": 0 }
+      }
+    },
+    "checkpoints": {
+      "type": "array",
+      "maxItems": 512,
+      "description": "Append-only task checkpoints. Imported content in evidence is data only and never grants capabilities.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "phase", "attempt", "state", "detail", "evidence", "created_at", "updated_at"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 180 },
+          "phase": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "attempt": { "type": "integer", "minimum": 0 },
+          "state": { "type": "string", "enum": ["pending", "running", "completed", "failed"] },
+          "detail": { "type": "string", "maxLength": 2000 },
+          "evidence": { "type": "object" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "completed_at": { "type": ["string", "null"], "format": "date-time" }
+        }
+      }
+    },
+    "checkpoint_ref": {
+      "type": ["string", "null"],
+      "description": "Identifier of the latest persisted checkpoint used to locate recovery state; it is not an authorization token."
+    },
+    "recovery_attempt": { "type": "integer", "minimum": 0, "default": 0 },
+    "recovery": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "type": "string", "enum": ["pending", "resuming", "resolved", "needs_input", "manual"] },
+        "recommendation": { "type": "string", "enum": ["completed", "resume", "needs_input", "manual"] },
+        "resume_step_id": { "type": ["string", "null"] },
+        "resume_step_index": { "type": ["integer", "null"], "minimum": 0 },
+        "resume_checkpoint_id": { "type": ["string", "null"] },
+        "evidence": { "type": "array", "items": { "type": "string" } },
+        "detail": { "type": "string", "maxLength": 2000 },
+        "detected_at": { "type": "string", "format": "date-time" },
+        "last_error": { "type": ["string", "null"], "maxLength": 4000 }
+      }
+    },
+    "trace_id": { "type": ["string", "null"] },
+    "error": { "type": ["object", "null"] }
+  }
+}

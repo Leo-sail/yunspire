@@ -41,7 +41,13 @@
 __pycache__/
 *.py[cod]
 
-# Local build artifacts
+# Local verification artifacts
 /artifacts/
+/installers/
+/design-qa/
+/screenshots/
+/test-results/
+/tests/
+/coverage/
 *.log
 *.tmp

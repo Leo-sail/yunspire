@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yunspire.local/schemas/skill-manifest.schema.json",
+  "title": "SkillManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "display_name",
+    "description",
+    "status",
+    "user_editable",
+    "instructions_path",
+    "input_schema",
+    "output_schema",
+    "capabilities",
+    "timeout_seconds",
+    "side_effects",
+    "approval",
+    "created_by"
+  ],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "display_name": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "status": { "type": "string", "enum": ["draft", "active", "disabled", "archived"] },
+    "user_editable": { "type": "boolean" },
+    "created_by": { "type": "string", "enum": ["system", "user", "evolution"] },
+    "instructions_path": { "type": "string", "pattern": "^skills/[^/]+/SKILL\\.md$" },
+    "input_schema": { "type": "string", "minLength": 1 },
+    "output_schema": { "type": "string", "minLength": 1 },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vault_read", "vault_write", "network", "shell", "application_commands"],
+      "properties": {
+        "vault_read": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "vault_write": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "network": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "shell": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "application_commands": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["capture", "search", "graph_query", "create", "schedule_manage", "skill_manage", "report_generate", "settings_read"]
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "model_requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "vision": { "type": "boolean" },
+        "structured_output": { "type": "boolean" },
+        "tool_calling": { "type": "boolean" },
+        "minimum_context_tokens": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "workflow": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "kind": { "type": "string", "enum": ["prompt", "skill", "processor", "approval", "commit"] },
+          "ref": { "type": ["string", "null"] },
+          "when": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "timeout_seconds": { "type": "integer", "minimum": 1 },
+    "retry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_attempts": { "type": "integer", "minimum": 1 },
+        "backoff_seconds": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "side_effects": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["vault_write", "structured_write", "network", "shell", "notification", "external_delivery"] },
+      "uniqueItems": true
+    },
+    "approval": { "type": "string", "enum": ["never", "policy", "always"] },
+    "created_at": { "type": "string", "format": "date-time" }
+  }
+}

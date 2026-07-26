@@ -1,5 +1,5 @@
 Yunspire / 云枢
-Copyright (c) 2026 leochang. All rights reserved.
+Copyright (c) 2026 Leo Chang. All rights reserved.
 
 中文
 
@@ -12,7 +12,8 @@ Copyright (c) 2026 leochang. All rights reserved.
 
 Windows 安装包包含 Python Software Foundation 发布的官方 CPython
 3.13.7 x64 嵌入式运行时，用于执行云枢自研的第一方处理脚本。该运行时
-不是我的原创实现，适用其随包 `LICENSE.txt` 中的 PSF 许可。
+不是我的原创实现，适用其随包 `LICENSE.txt` 中的 PSF 许可；构建时会对
+官方归档执行固定 SHA-256 和发布校验值验证。
 
 任何商业使用均须事先取得我的书面商业授权。
 联系邮箱：leochang210@gmail.com
@@ -32,6 +33,8 @@ The Windows installer contains the official CPython 3.13.7 x64 embeddable
 runtime published by the Python Software Foundation solely to execute
 Yunspire's first-party processing scripts. The runtime is not claimed as my
 work and remains governed by the PSF terms in its bundled `LICENSE.txt`.
+The build verifies the official archive with a pinned SHA-256 and release
+checksum before packaging it.
 
 Every commercial use requires my prior written commercial authorization.
 Contact: leochang210@gmail.com

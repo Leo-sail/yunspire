@@ -620,7 +620,7 @@ def local_transcription(audio_path, output_dir, locale):
                 "errors": ["windows_speech_adapter_missing"],
             }
         progress_checkpoint(f"speech-analysis-started:{locale}")
-        result = run([str(program), audio_path, locale], None)
+        result = run([str(program), audio_path, locale], 720)
         progress_checkpoint(f"speech-analysis-finished:{locale}")
         try:
             if result.returncode == 0:

@@ -3,8 +3,7 @@ name: Windows x64 Installer
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
 
 permissions:
@@ -45,31 +44,29 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Audit release source tree
+        run: npm run audit:release
+
       - name: Install locked JavaScript dependencies
         run: npm ci
 
       - name: Build Windows runtime and native helpers
         run: |
           npm run build:windows-python-runtime
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/build-windows-native.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run build:windows-media-helper
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run complete product verification
+        run: npm run verify
+
+      - name: Verify official Python runtime and native helpers
+        run: node scripts/verify-windows-release.mjs helpers
 
       - name: Build unsigned Windows x64 NSIS installer
         run: npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis --no-sign --ci
 
-      - name: Collect unsigned installer
-        shell: pwsh
-        run: |
-          $artifactDirectory = Join-Path $PWD "artifacts/windows"
-          New-Item -ItemType Directory -Force $artifactDirectory | Out-Null
-          $installer = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis" -Filter "*-setup.exe" -File | Select-Object -First 1
-          if ($null -eq $installer) { throw "NSIS installer was not produced" }
-          Copy-Item $installer.FullName (Join-Path $artifactDirectory $installer.Name)
-          $hash = Get-FileHash (Join-Path $artifactDirectory $installer.Name) -Algorithm SHA256
-          "$($hash.Hash.ToLowerInvariant())  $($installer.Name)" | Set-Content (Join-Path $artifactDirectory "SHA256SUMS.txt") -Encoding ascii
+      - name: Verify installed Unicode PDF, media, speech, and prepare checksums
+        run: node scripts/verify-windows-release.mjs bundle
 
       - name: Upload unsigned installer and checksums
         uses: actions/upload-artifact@v4

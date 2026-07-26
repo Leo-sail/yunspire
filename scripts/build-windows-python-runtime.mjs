@@ -124,10 +124,30 @@ async function configureRuntime() {
   }, null, 2) + '\n', 'utf8');
 }
 
+async function smokeTest() {
+  const result = spawnSync(pythonExecutable, [
+    '-c',
+    'import hashlib,json,urllib.request,zipfile;print(json.dumps({"runtime":"ok","sha":hashlib.sha256(b"yunspire").hexdigest()}))',
+  ], {
+    cwd: runtimeDirectory,
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 30_000,
+  });
+  if (result.status !== 0) {
+    throw new Error(`Python 嵌入式运行时冒烟失败\n${result.stdout || ''}\n${result.stderr || ''}`.trim());
+  }
+  const payload = JSON.parse(result.stdout);
+  if (payload.runtime !== 'ok' || typeof payload.sha !== 'string' || payload.sha.length !== 64) {
+    throw new Error(`Python 嵌入式运行时冒烟输出无效：${result.stdout}`);
+  }
+}
+
 await mkdir(outputRoot, { recursive: true });
 if (!await runtimeIsCurrent()) {
   await downloadArchive();
   await extractArchive();
   await configureRuntime();
 }
+await smokeTest();
 console.log(`WINDOWS_PYTHON_RUNTIME_OK version=${PYTHON_VERSION} sha256=${EXPECTED_SHA256}`);

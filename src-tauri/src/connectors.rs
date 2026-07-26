@@ -447,3 +447,32 @@ pub async fn send_external_message(
         .map_err(|error| format!("无法提交外部发送回执：{error}"))?;
     Ok(receipt)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connector_endpoint_requires_clean_https_url() {
+        assert!(validate_endpoint("https://example.com/hooks/1?token=abc").is_ok());
+        assert!(validate_endpoint("http://example.com/hooks/1").is_err());
+        assert!(validate_endpoint("https://user:pass@example.com/hooks/1").is_err());
+        assert!(validate_endpoint("https://example.com/hooks/1#fragment").is_err());
+    }
+
+    #[test]
+    fn connector_payload_matches_target_contract() {
+        assert_eq!(
+            connector_payload("feishu", "主题", "正文"),
+            serde_json::json!({"msg_type": "text", "content": {"text": "正文"}})
+        );
+        assert_eq!(
+            connector_payload("wechat", "主题", "正文"),
+            serde_json::json!({"msgtype": "text", "text": {"content": "正文"}})
+        );
+        assert_eq!(
+            connector_payload("email_webhook", "主题", "正文"),
+            serde_json::json!({"subject": "主题", "text": "正文"})
+        );
+    }
+}

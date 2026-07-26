@@ -1,14 +1,14 @@
 # Yunspire Non-Commercial Source License 1.0
 # 云枢非商业源代码许可协议 1.0
 
-Copyright (c) 2026 leochang. All rights reserved.
+Copyright (c) 2026 Leo Chang. All rights reserved.
 Contact: leochang210@gmail.com
 
 ## 中文条款
 
 ### 1. 定义
 
-“本软件”指本仓库中由 leochang 创作并享有权利的云枢第一方源代码、系统架构、交互设计、算法实现、产品文档、品牌资产及其修改版本，不包括第三方组件。
+“本软件”指本仓库中由 Leo Chang 创作并享有权利的云枢第一方源代码、系统架构、交互设计、算法实现、产品文档、品牌资产及其修改版本，不包括第三方组件。
 
 “非商业用途”指不以直接或间接获得收入、商业利益、竞争优势或为营利性组织提供经营支持为目的的个人学习、非营利研究、教学、评估和内部实验。
 
@@ -29,7 +29,7 @@ Contact: leochang210@gmail.com
 
 ### 4. 禁止事项
 
-未经 leochang 事先书面授权，您不得：
+未经 Leo Chang 事先书面授权，您不得：
 
 1. 将本软件全部或部分用于任何直接或间接商业用途；
 2. 销售、出租、托管、再许可、商业部署或商业集成本软件；
@@ -40,7 +40,7 @@ Contact: leochang210@gmail.com
 
 ### 5. 商业授权
 
-任何商业用途均须在使用前取得 leochang 单独签署的书面商业许可。询价或申请商业授权，请联系 `leochang210@gmail.com`。未回复、口头交流、代码可公开访问或接受贡献均不构成商业授权。
+任何商业用途均须在使用前取得 Leo Chang 单独签署的书面商业许可。询价或申请商业授权，请联系 `leochang210@gmail.com`。未回复、口头交流、代码可公开访问或接受贡献均不构成商业授权。
 
 ### 6. 第三方组件
 
@@ -48,7 +48,7 @@ Contact: leochang210@gmail.com
 
 ### 7. 权利保留与终止
 
-除本协议明确授予的权利外，所有权利均由 leochang 保留。违反本协议时，授权自动立即终止；您必须停止使用和分发本软件，并删除受本协议约束的副本。终止不影响著作权人追究既有违约、侵权或损害责任。
+除本协议明确授予的权利外，所有权利均由 Leo Chang 保留。违反本协议时，授权自动立即终止；您必须停止使用和分发本软件，并删除受本协议约束的副本。终止不影响著作权人追究既有违约、侵权或损害责任。
 
 ### 8. 无担保与责任限制
 
@@ -62,7 +62,7 @@ Contact: leochang210@gmail.com
 
 ### 1. Definitions
 
-"Software" means the first-party Yunspire source code, system architecture, interaction design, algorithm implementations, product documentation, brand assets, and modifications owned by leochang in this repository. It excludes Third-Party Components.
+"Software" means the first-party Yunspire source code, system architecture, interaction design, algorithm implementations, product documentation, brand assets, and modifications owned by Leo Chang in this repository. It excludes Third-Party Components.
 
 "Non-Commercial Use" means personal study, nonprofit research, teaching, evaluation, or internal experimentation that is not intended to obtain direct or indirect revenue, commercial benefit, competitive advantage, or operational support for a for-profit organization.
 
@@ -78,11 +78,11 @@ You may redistribute modified or unmodified copies solely for Non-Commercial Use
 
 ### 4. Prohibited Uses
 
-Without prior written authorization from leochang, you may not use any part of the Software for Commercial Use; sell, rent, host, sublicense, commercially deploy, or commercially integrate it; use its code, architecture, interaction design, algorithms, or documentation in a commercial or competing product or service; remove or obscure legal notices; imply endorsement or authorization; or assist another party in doing so.
+Without prior written authorization from Leo Chang, you may not use any part of the Software for Commercial Use; sell, rent, host, sublicense, commercially deploy, or commercially integrate it; use its code, architecture, interaction design, algorithms, or documentation in a commercial or competing product or service; remove or obscure legal notices; imply endorsement or authorization; or assist another party in doing so.
 
 ### 5. Commercial License
 
-Every Commercial Use requires a separate written commercial license signed by leochang before use begins. Contact `leochang210@gmail.com`. Silence, oral communications, public source availability, or acceptance of contributions does not grant commercial rights.
+Every Commercial Use requires a separate written commercial license signed by Leo Chang before use begins. Contact `leochang210@gmail.com`. Silence, oral communications, public source availability, or acceptance of contributions does not grant commercial rights.
 
 ### 6. Third-Party Components
 
@@ -90,7 +90,7 @@ Tauri, Rust crates, Vite, Lucide, Obsidian, operating-system frameworks, standar
 
 ### 7. Reservation and Termination
 
-All rights not expressly granted are reserved by leochang. Any breach terminates this License immediately. Upon termination, you must stop using and distributing the Software and delete copies governed by this License. Termination does not waive claims arising from prior breach or infringement.
+All rights not expressly granted are reserved by Leo Chang. Any breach terminates this License immediately. Upon termination, you must stop using and distributing the Software and delete copies governed by this License. Termination does not waive claims arising from prior breach or infringement.
 
 ### 8. Disclaimer and Limitation of Liability
 
