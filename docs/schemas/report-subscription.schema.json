@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yunspire.local/schemas/report-subscription.schema.json",
+  "title": "ReportSubscription",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "revision", "name", "period", "enabled", "timezone", "delivery_time", "sections", "local_destination", "delivery", "approval"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "period": { "type": "string", "enum": ["daily", "weekly", "monthly", "annual"] },
+    "enabled": { "type": "boolean" },
+    "timezone": { "type": "string", "minLength": 1 },
+    "delivery_time": { "type": "string", "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$" },
+    "week_start": { "type": "string", "enum": ["monday", "sunday"] },
+    "sections": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "enum": ["task_outcomes", "new_knowledge", "knowledge_health", "open_reviews", "skill_quality", "goals", "growth", "next_actions", "costs"] },
+      "uniqueItems": true
+    },
+    "local_destination": { "type": "string", "pattern": "^\\.yunspire/reports/|^60 Reviews/" },
+    "delivery": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "destination_ref"],
+        "properties": {
+          "type": { "type": "string", "enum": ["local_notification", "wechat", "feishu", "approved_channel"] },
+          "destination_ref": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "approval": { "type": "string", "enum": ["local_auto_external_review", "preapproved_destinations", "always_review"] },
+    "quiet_hours": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "type": "string", "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$" },
+        "end": { "type": "string", "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$" }
+      }
+    }
+  }
+}

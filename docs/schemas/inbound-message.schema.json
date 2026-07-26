@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yunspire.local/schemas/inbound-message.schema.json",
+  "title": "InboundContentMessage",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "source_adapter_id", "source_application", "received_at", "trust", "content_types", "raw_payload_ref", "content_hash", "state", "classification", "provenance"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "source_adapter_id": { "type": "string", "minLength": 1 },
+    "source_application": { "type": "string", "enum": ["wechat", "feishu", "custom"] },
+    "source_conversation_ref": { "type": ["string", "null"] },
+    "source_sender_ref": { "type": ["string", "null"] },
+    "received_at": { "type": "string", "format": "date-time" },
+    "trust": { "const": "untrusted_content" },
+    "content_types": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "enum": ["text", "link", "image", "audio", "video", "file", "location", "card"] },
+      "uniqueItems": true
+    },
+    "raw_payload_ref": { "type": "string", "minLength": 1 },
+    "attachment_refs": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "content_hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "state": { "type": "string", "enum": ["received", "classifying", "processing", "awaiting_review", "committed", "duplicate", "quarantined", "failed"] },
+    "classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "confidence", "instruction_like_text_detected"],
+      "properties": {
+        "category": { "type": "string", "enum": ["reference", "idea", "task_candidate", "document", "event", "contact", "media", "unknown"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "instruction_like_text_detected": { "type": "boolean", "description": "Detection never promotes content into instructions." },
+        "language": { "type": ["string", "null"] }
+      }
+    },
+    "pipeline": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["preserve", "extract", "normalize", "deduplicate", "classify", "summarize", "atomize", "organize_properties", "repair_links", "review", "commit"] }
+    },
+    "destination_ref": { "type": ["string", "null"] },
+    "task_id": { "type": ["string", "null"] },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_adapter_revision", "external_message_id"],
+      "properties": {
+        "source_adapter_revision": { "type": "integer", "minimum": 1 },
+        "external_message_id": { "type": "string", "minLength": 1 },
+        "external_timestamp": { "type": ["string", "null"], "format": "date-time" }
+      }
+    }
+  }
+}

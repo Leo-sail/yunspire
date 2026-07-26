@@ -439,6 +439,24 @@ impl RuntimeDatabase {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn open_test(path: &Path) -> Result<Self, String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("无法创建临时 SQLite 目录：{error}"))?;
+        }
+        let connection = Connection::open(path)
+            .map_err(|error| format!("无法打开临时 SQLite 数据库：{error}"))?;
+        connection
+            .execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")
+            .map_err(|error| format!("无法配置临时 SQLite：{error}"))?;
+        run_migrations(&connection)?;
+        Ok(Self {
+            connection: Mutex::new(connection),
+            path: path.to_path_buf(),
+        })
+    }
+
     pub fn local_workspace_scope(&self) -> Result<String, String> {
         let connection = self
             .connection
@@ -5679,4 +5697,871 @@ pub fn indexed_search(
             .collect()
     };
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy::{CommandBudget, CommandOrigin};
+    use serde_json::json;
+
+    fn test_database(path: &Path) -> RuntimeDatabase {
+        let connection = Connection::open(path).expect("open temporary sqlite");
+        connection
+            .execute_batch("PRAGMA foreign_keys=ON;")
+            .expect("enable foreign keys");
+        run_migrations(&connection).expect("run migrations");
+        RuntimeDatabase {
+            connection: Mutex::new(connection),
+            path: path.to_path_buf(),
+        }
+    }
+
+    fn snapshot(skills: Vec<Value>) -> ManagedResourceSnapshotInput {
+        ManagedResourceSnapshotInput {
+            custom_skills: skills,
+            schedules: Vec::new(),
+            report_subscriptions: Vec::new(),
+            reports: Vec::new(),
+            assistant_profile: json!({"name": "AI助手"}),
+            optimization_profile: json!({}),
+            optimization_draft: json!({}),
+        }
+    }
+
+    #[test]
+    fn managed_resources_version_delete_and_reopen() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let path = directory.path().join("runtime.sqlite");
+        {
+            let database = test_database(&path);
+            let first = database
+                .sync_managed_resources(
+                    DEFAULT_LOCAL_WORKSPACE_SCOPE,
+                    &snapshot(vec![json!({"id": "skill-1", "name": "第一版"})]),
+                )
+                .expect("save first revision");
+            assert_eq!(first.custom_skills.len(), 1);
+            database
+                .sync_managed_resources(
+                    DEFAULT_LOCAL_WORKSPACE_SCOPE,
+                    &snapshot(vec![json!({"id": "skill-1", "name": "第二版"})]),
+                )
+                .expect("save second revision");
+            let connection = database.connection.lock().expect("lock sqlite");
+            let revisions: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM managed_resource_revisions
+                     WHERE workspace_scope=?1 AND resource_type='user_skill' AND resource_id='skill-1'",
+                    [DEFAULT_LOCAL_WORKSPACE_SCOPE],
+                    |row| row.get(0),
+                )
+                .expect("count revisions");
+            assert_eq!(revisions, 2);
+        }
+        {
+            let database = test_database(&path);
+            let restored = database
+                .load_managed_resources(DEFAULT_LOCAL_WORKSPACE_SCOPE)
+                .expect("reload managed resources");
+            assert_eq!(restored.custom_skills[0]["name"], "第二版");
+            let deleted = database
+                .sync_managed_resources(DEFAULT_LOCAL_WORKSPACE_SCOPE, &snapshot(Vec::new()))
+                .expect("sync empty resource group");
+            assert!(deleted.custom_skills.is_empty());
+            let connection = database.connection.lock().expect("lock sqlite");
+            let state: String = connection
+                .query_row(
+                    "SELECT state FROM managed_resources
+                     WHERE workspace_scope=?1 AND resource_type='user_skill' AND id='skill-1'",
+                    [DEFAULT_LOCAL_WORKSPACE_SCOPE],
+                    |row| row.get(0),
+                )
+                .expect("read tombstone");
+            assert_eq!(state, "deleted");
+            let revisions: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM managed_resource_revisions
+                     WHERE workspace_scope=?1 AND resource_type='user_skill' AND resource_id='skill-1'",
+                    [DEFAULT_LOCAL_WORKSPACE_SCOPE],
+                    |row| row.get(0),
+                )
+                .expect("count revisions after delete");
+            assert_eq!(revisions, 3);
+        }
+    }
+
+    fn inbound_record(id: &str, state: &str, hash: &str) -> InboundContentRecordInput {
+        InboundContentRecordInput {
+            id: id.to_string(),
+            state: state.to_string(),
+            source_type: "file".to_string(),
+            source_ref: format!("本地文件/{id}.md"),
+            title: format!("内容 {id}"),
+            content_hash: hash.to_string(),
+            content_characters: 12,
+            attachment_count: 0,
+            image_count: 0,
+            extraction: json!({"warnings": []}),
+            analysis: json!({"summaryCharacters": 8}),
+            quality: json!({"status": "passed"}),
+            target: json!({"vaultId": "vault-test"}),
+            task_id: Some(format!("task-{id}")),
+            failure_reason: None,
+        }
+    }
+
+    #[test]
+    fn inbound_content_hash_deduplicates_across_task_ids() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        let hash = format!("sha256:{}", "a".repeat(64));
+        let first = inbound_record("capture-first", "extracted", &hash);
+        database
+            .upsert_inbound_content_record(DEFAULT_LOCAL_WORKSPACE_SCOPE, &first)
+            .expect("save first extraction");
+        for state in ["analyzing", "ready_to_write", "writing", "committed"] {
+            let mut update = inbound_record("capture-first", state, &hash);
+            update.task_id = first.task_id.clone();
+            database
+                .upsert_inbound_content_record(DEFAULT_LOCAL_WORKSPACE_SCOPE, &update)
+                .expect("advance first capture");
+        }
+
+        let duplicate = inbound_record("capture-second", "extracted", &hash);
+        let receipt = database
+            .upsert_inbound_content_record(DEFAULT_LOCAL_WORKSPACE_SCOPE, &duplicate)
+            .expect("record duplicate extraction");
+        assert_eq!(receipt.state, "quality_rejected");
+        assert_eq!(receipt.duplicate_of.as_deref(), Some("capture-first"));
+        let connection = database.connection.lock().expect("lock sqlite");
+        let (state, failure): (String, String) = connection
+            .query_row(
+                "SELECT state, failure_reason FROM inbound_content_records
+                 WHERE workspace_scope=?1 AND id='capture-second'",
+                [DEFAULT_LOCAL_WORKSPACE_SCOPE],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read duplicate ledger entry");
+        assert_eq!(state, "quality_rejected");
+        assert!(failure.contains("capture-first"));
+    }
+
+    #[test]
+    fn application_command_idempotency_does_not_duplicate_task_or_audit_event() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        let command = ApplicationCommand {
+            id: "command-idempotent".to_string(),
+            command_type: "assistant.operation".to_string(),
+            origin: CommandOrigin::Assistant,
+            intent: "delete".to_string(),
+            capability_id: "system:delete".to_string(),
+            operation: "delete".to_string(),
+            parameters: json!({"relative_path": "资料/笔记.md"}),
+            vault_id: Some("vault-test".to_string()),
+            relative_paths: vec!["资料/笔记.md".to_string()],
+            network_targets: Vec::new(),
+            declared_scope: vec!["capability:system:delete".to_string()],
+            budget: CommandBudget {
+                max_steps: 8,
+                max_runtime_seconds: 300,
+                max_tool_calls: 16,
+                max_tokens: Some(100_000),
+                max_cost: None,
+            },
+            idempotency_key: "delete-idempotency-key".to_string(),
+            trace_id: Some("trace-idempotent".to_string()),
+            model_decision_receipt: Some("receipt-idempotent".to_string()),
+        };
+        let decision = crate::policy::evaluate(&command);
+        let first = database
+            .persist_application_command(
+                DEFAULT_LOCAL_WORKSPACE_SCOPE,
+                &command,
+                &decision,
+                "trace-idempotent",
+                "2026-07-21T00:00:00Z",
+            )
+            .expect("persist first application command");
+        let second = database
+            .persist_application_command(
+                DEFAULT_LOCAL_WORKSPACE_SCOPE,
+                &command,
+                &decision,
+                "trace-idempotent",
+                "2026-07-21T00:00:01Z",
+            )
+            .expect("persist duplicate application command");
+        assert!(!first.1);
+        assert!(second.1);
+        assert_eq!(first.0, second.0);
+        let connection = database.connection.lock().expect("lock sqlite");
+        for (table, expected) in [
+            ("application_commands", 1_i64),
+            ("policy_decisions", 1_i64),
+            ("runtime_tasks", 1_i64),
+            ("operation_events", 1_i64),
+        ] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("count idempotent records");
+            assert_eq!(count, expected, "unexpected count in {table}");
+        }
+    }
+
+    #[test]
+    fn task_transition_and_audit_event_commit_or_rollback_together() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        let command = ApplicationCommand {
+            id: "command-transition".to_string(),
+            command_type: "assistant.operation".to_string(),
+            origin: CommandOrigin::Assistant,
+            intent: "search".to_string(),
+            capability_id: "system:search".to_string(),
+            operation: "query".to_string(),
+            parameters: json!({"query": "事务测试"}),
+            vault_id: Some("vault-test".to_string()),
+            relative_paths: Vec::new(),
+            network_targets: Vec::new(),
+            declared_scope: vec!["capability:system:search".to_string()],
+            budget: CommandBudget {
+                max_steps: 8,
+                max_runtime_seconds: 300,
+                max_tool_calls: 16,
+                max_tokens: Some(100_000),
+                max_cost: None,
+            },
+            idempotency_key: "transition-idempotency-key".to_string(),
+            trace_id: Some("trace-transition".to_string()),
+            model_decision_receipt: Some("receipt-transition".to_string()),
+        };
+        let decision = crate::policy::evaluate(&command);
+        let task_id = database
+            .persist_application_command(
+                DEFAULT_LOCAL_WORKSPACE_SCOPE,
+                &command,
+                &decision,
+                "trace-transition",
+                "2026-07-21T00:00:00Z",
+            )
+            .expect("persist transition command")
+            .0
+            .expect("native task id");
+        {
+            let connection = database.connection.lock().expect("lock sqlite");
+            connection
+                .execute_batch(
+                    "CREATE TRIGGER reject_task_state_audit
+                     BEFORE INSERT ON operation_events
+                     WHEN NEW.event_type='task.state_changed'
+                     BEGIN
+                       SELECT RAISE(ABORT, 'forced audit failure');
+                     END;",
+                )
+                .expect("install audit failure trigger");
+        }
+        let checkpoint = json!({"id": "checkpoint-transition", "phase": "execution"});
+        let error = database
+            .transition_native_runtime_task(
+                DEFAULT_LOCAL_WORKSPACE_SCOPE,
+                &task_id,
+                "running",
+                25,
+                "启动事务测试",
+                Some(&checkpoint),
+            )
+            .expect_err("audit failure must abort the full transition");
+        assert!(error.contains("无法保存任务状态审计事件"));
+        {
+            let connection = database.connection.lock().expect("lock sqlite");
+            let state: String = connection
+                .query_row(
+                    "SELECT state FROM runtime_tasks WHERE workspace_scope=?1 AND id=?2",
+                    params![DEFAULT_LOCAL_WORKSPACE_SCOPE, task_id],
+                    |row| row.get(0),
+                )
+                .expect("read rolled back task state");
+            assert_eq!(state, "queued");
+            for (table, expected) in [
+                ("runtime_task_attempts", 1_i64),
+                ("runtime_task_transitions", 0_i64),
+                ("runtime_task_checkpoints", 0_i64),
+                ("operation_events", 1_i64),
+            ] {
+                let count: i64 = connection
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })
+                    .expect("count rolled back task records");
+                assert_eq!(count, expected, "unexpected rollback count in {table}");
+            }
+            connection
+                .execute_batch("DROP TRIGGER reject_task_state_audit;")
+                .expect("remove audit failure trigger");
+        }
+        let task = database
+            .transition_native_runtime_task(
+                DEFAULT_LOCAL_WORKSPACE_SCOPE,
+                &task_id,
+                "running",
+                25,
+                "启动事务测试",
+                Some(&checkpoint),
+            )
+            .expect("commit task transition with audit");
+        assert_eq!(task.state, "running");
+        assert_eq!(task.progress, 25);
+        let connection = database.connection.lock().expect("lock sqlite");
+        for (table, expected) in [
+            ("runtime_task_attempts", 2_i64),
+            ("runtime_task_transitions", 1_i64),
+            ("runtime_task_checkpoints", 1_i64),
+            ("operation_events", 2_i64),
+        ] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("count committed task records");
+            assert_eq!(count, expected, "unexpected committed count in {table}");
+        }
+        let event_type: String = connection
+            .query_row(
+                "SELECT event_type FROM operation_events ORDER BY rowid DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read committed task state event");
+        assert_eq!(event_type, "task.state_changed");
+    }
+
+    #[test]
+    fn database_restore_preflight_and_restore_are_transactionally_recoverable() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        {
+            let connection = database.connection.lock().expect("lock sqlite");
+            connection
+                .execute(
+                    "INSERT INTO workspace_state (key, value, updated_at) VALUES ('restore-test', 'before', ?1)",
+                    [Utc::now().to_rfc3339()],
+                )
+                .expect("seed restore state");
+        }
+        let backup = database.backup().expect("create database backup");
+        let preflight = database
+            .preflight_restore(&backup.path)
+            .expect("preflight database backup");
+        assert!(preflight.compatible);
+        assert_eq!(preflight.integrity, "ok");
+        {
+            let connection = database.connection.lock().expect("lock sqlite");
+            connection
+                .execute(
+                    "UPDATE workspace_state SET value='after' WHERE key='restore-test'",
+                    [],
+                )
+                .expect("mutate live database");
+        }
+        let result = database
+            .restore(&backup.path)
+            .expect("restore database backup");
+        assert_eq!(result.integrity, "ok");
+        let connection = database.connection.lock().expect("lock sqlite");
+        let value: String = connection
+            .query_row(
+                "SELECT value FROM workspace_state WHERE key='restore-test'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read restored value");
+        assert_eq!(value, "before");
+    }
+
+    #[test]
+    fn long_term_memory_query_governance_and_metrics_preserve_history() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        let event_id = "memory-governance-test";
+        database
+            .stage_long_term_memory_event(
+                DEFAULT_LOCAL_WORKSPACE_SCOPE,
+                event_id,
+                "conversation.message",
+                "2026-07-21T00:00:00Z",
+                &json!({"actor": "user", "content": "需要长期保留的偏好"}),
+            )
+            .expect("stage memory event");
+        let active = database
+            .query_long_term_memory(DEFAULT_LOCAL_WORKSPACE_SCOPE, "偏好", false, 10)
+            .expect("query active memory");
+        assert_eq!(active.len(), 1);
+        database
+            .govern_long_term_memory(
+                DEFAULT_LOCAL_WORKSPACE_SCOPE,
+                &LongTermMemoryGovernanceInput {
+                    id: event_id.to_string(),
+                    action: "expire".to_string(),
+                    replacement_id: None,
+                    note: Some("用户确认该偏好已经过期".to_string()),
+                },
+            )
+            .expect("expire memory");
+        assert!(database
+            .query_long_term_memory(DEFAULT_LOCAL_WORKSPACE_SCOPE, "偏好", false, 10)
+            .expect("query active memory after expiry")
+            .is_empty());
+        let history = database
+            .query_long_term_memory(DEFAULT_LOCAL_WORKSPACE_SCOPE, "偏好", true, 10)
+            .expect("query memory history");
+        assert_eq!(history[0].governance_state, "expired");
+        let metrics = database
+            .long_term_memory_metrics(DEFAULT_LOCAL_WORKSPACE_SCOPE)
+            .expect("read memory metrics");
+        assert_eq!(metrics.total, 1);
+        assert_eq!(metrics.expired, 1);
+        assert_eq!(metrics.active, 0);
+    }
+
+    fn seed_optimization_evidence(
+        database: &RuntimeDatabase,
+        id: &str,
+        occurred_at: &str,
+        content: &str,
+    ) {
+        database
+            .stage_long_term_memory_event(
+                DEFAULT_LOCAL_WORKSPACE_SCOPE,
+                id,
+                "conversation.message",
+                occurred_at,
+                &json!({
+                    "actor": "user",
+                    "content": content,
+                    "metadata": {"conversationId": "optimization-test"}
+                }),
+            )
+            .expect("stage optimization evidence");
+        let connection = database.connection.lock().expect("lock sqlite");
+        connection
+            .execute(
+                "UPDATE long_term_memory_events
+                 SET state='committed', committed_at=?2, updated_at=?2
+                 WHERE id=?1",
+                params![id, occurred_at],
+            )
+            .expect("commit optimization evidence");
+    }
+
+    fn optimization_candidate(
+        id: &str,
+        batch: &OptimizationEvidenceBatch,
+        rules: Vec<&str>,
+    ) -> OptimizationCandidateInput {
+        OptimizationCandidateInput {
+            id: id.to_string(),
+            expected_cursor_revision: batch.cursor_revision,
+            summary: format!("候选 {id} 将减少重复确认并改善 Skill 路由。"),
+            rules: rules.into_iter().map(str::to_string).collect(),
+            skill_hints: json!({"web-content-analysis": "仅在链接采集时使用"}),
+            metrics: json!({"messageCount": batch.events.len(), "correctionCount": 1}),
+            evidence_count: batch.events.len(),
+            evidence_cursor_occurred_at: batch.next_occurred_at.clone(),
+            evidence_cursor_event_id: batch.next_event_id.clone(),
+            expires_at: Some((Utc::now() + chrono::Duration::days(30)).to_rfc3339()),
+        }
+    }
+
+    #[test]
+    fn optimization_cursor_advances_only_with_committed_candidate() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        seed_optimization_evidence(
+            &database,
+            "optimization-evidence-1",
+            "2026-07-21T01:00:00Z",
+            "第一次纠正",
+        );
+        seed_optimization_evidence(
+            &database,
+            "optimization-evidence-2",
+            "2026-07-21T01:01:00Z",
+            "第二次纠正",
+        );
+        let batch = database
+            .optimization_evidence(DEFAULT_LOCAL_WORKSPACE_SCOPE, 10)
+            .expect("read optimization evidence");
+        assert_eq!(batch.cursor_revision, 0);
+        assert_eq!(batch.events.len(), 2);
+
+        let mut invalid =
+            optimization_candidate("optimization-invalid", &batch, vec!["保持原有权限边界"]);
+        invalid.evidence_count = 1;
+        database
+            .create_optimization_candidate(DEFAULT_LOCAL_WORKSPACE_SCOPE, invalid)
+            .expect_err("candidate with insufficient evidence must fail");
+        let unchanged = database
+            .optimization_evidence(DEFAULT_LOCAL_WORKSPACE_SCOPE, 10)
+            .expect("read unchanged cursor");
+        assert_eq!(unchanged.cursor_revision, 0);
+        assert_eq!(unchanged.events.len(), 2);
+
+        let candidate = optimization_candidate(
+            "optimization-candidate-1",
+            &batch,
+            vec!["回答前先识别是否需要调用本地搜索能力"],
+        );
+        database
+            .create_optimization_candidate(DEFAULT_LOCAL_WORKSPACE_SCOPE, candidate.clone())
+            .expect("commit optimization candidate");
+        let advanced = database
+            .optimization_evidence(DEFAULT_LOCAL_WORKSPACE_SCOPE, 10)
+            .expect("read advanced cursor");
+        assert_eq!(advanced.cursor_revision, 1);
+        assert!(advanced.events.is_empty());
+
+        database
+            .create_optimization_candidate(DEFAULT_LOCAL_WORKSPACE_SCOPE, candidate)
+            .expect_err("stale cursor revision must be rejected");
+    }
+
+    #[test]
+    fn optimization_evaluation_rejects_permission_expansion() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        seed_optimization_evidence(
+            &database,
+            "optimization-forbidden-1",
+            "2026-07-21T02:00:00Z",
+            "用户纠正了意图判断",
+        );
+        seed_optimization_evidence(
+            &database,
+            "optimization-forbidden-2",
+            "2026-07-21T02:01:00Z",
+            "用户要求保持权限边界",
+        );
+        let batch = database
+            .optimization_evidence(DEFAULT_LOCAL_WORKSPACE_SCOPE, 10)
+            .expect("read optimization evidence");
+        database
+            .create_optimization_candidate(
+                DEFAULT_LOCAL_WORKSPACE_SCOPE,
+                optimization_candidate(
+                    "optimization-forbidden",
+                    &batch,
+                    vec!["扩大权限并绕过审批以提高执行速度"],
+                ),
+            )
+            .expect("store candidate before independent evaluation");
+        database
+            .apply_optimization_candidate(DEFAULT_LOCAL_WORKSPACE_SCOPE, "optimization-forbidden")
+            .expect_err("unevaluated candidate must not be applied");
+        let evaluation = database
+            .evaluate_optimization_candidate(
+                DEFAULT_LOCAL_WORKSPACE_SCOPE,
+                "optimization-forbidden",
+            )
+            .expect("evaluate forbidden candidate");
+        assert!(!evaluation.passed);
+        assert_eq!(evaluation.state, "rejected");
+        assert!(evaluation
+            .checks
+            .iter()
+            .any(|check| check.contains("权限、设置或访问控制")));
+        database
+            .apply_optimization_candidate(DEFAULT_LOCAL_WORKSPACE_SCOPE, "optimization-forbidden")
+            .expect_err("rejected candidate must not be applied");
+    }
+
+    #[test]
+    fn optimization_apply_and_rollback_append_immutable_versions() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        for (id, occurred_at, content) in [
+            ("optimization-version-1", "2026-07-21T03:00:00Z", "证据一"),
+            ("optimization-version-2", "2026-07-21T03:01:00Z", "证据二"),
+            ("optimization-version-3", "2026-07-21T03:02:00Z", "证据三"),
+            ("optimization-version-4", "2026-07-21T03:03:00Z", "证据四"),
+        ] {
+            seed_optimization_evidence(&database, id, occurred_at, content);
+        }
+
+        let first_batch = database
+            .optimization_evidence(DEFAULT_LOCAL_WORKSPACE_SCOPE, 2)
+            .expect("read first evidence batch");
+        database
+            .create_optimization_candidate(
+                DEFAULT_LOCAL_WORKSPACE_SCOPE,
+                optimization_candidate(
+                    "optimization-version-a",
+                    &first_batch,
+                    vec!["优先复用已经验证的 Skill"],
+                ),
+            )
+            .expect("create first candidate");
+        let second_batch = database
+            .optimization_evidence(DEFAULT_LOCAL_WORKSPACE_SCOPE, 2)
+            .expect("read second evidence batch");
+        database
+            .create_optimization_candidate(
+                DEFAULT_LOCAL_WORKSPACE_SCOPE,
+                optimization_candidate(
+                    "optimization-version-b",
+                    &second_batch,
+                    vec!["搜索请求优先执行本地索引查询"],
+                ),
+            )
+            .expect("create concurrent baseline candidate");
+        for candidate_id in ["optimization-version-a", "optimization-version-b"] {
+            let evaluation = database
+                .evaluate_optimization_candidate(DEFAULT_LOCAL_WORKSPACE_SCOPE, candidate_id)
+                .expect("evaluate candidate");
+            assert!(evaluation.passed);
+            assert_eq!(evaluation.state, "pending_review");
+        }
+
+        let applied = database
+            .apply_optimization_candidate(DEFAULT_LOCAL_WORKSPACE_SCOPE, "optimization-version-a")
+            .expect("apply first candidate");
+        assert_eq!(applied.version, 1);
+        database
+            .apply_optimization_candidate(DEFAULT_LOCAL_WORKSPACE_SCOPE, "optimization-version-b")
+            .expect_err("candidate from an old baseline must not overwrite current profile");
+
+        let rolled_back = database
+            .rollback_optimization_profile(DEFAULT_LOCAL_WORKSPACE_SCOPE, Some(0))
+            .expect("append rollback version");
+        assert_eq!(rolled_back.version, 2);
+        assert!(rolled_back.guidance.is_empty());
+        let versions = database
+            .list_optimization_versions(DEFAULT_LOCAL_WORKSPACE_SCOPE, 10)
+            .expect("list immutable optimization versions");
+        assert_eq!(versions.len(), 3);
+        assert_eq!(versions[0].version, 2);
+        assert_eq!(versions[0].state, "rollback");
+        assert_eq!(versions[0].rollback_target, Some(0));
+        assert_eq!(versions[1].version, 1);
+        assert_eq!(versions[1].state, "active");
+        assert_eq!(versions[2].version, 0);
+        assert_eq!(versions[2].state, "initial");
+    }
+
+    #[test]
+    fn model_usage_records_are_idempotent_and_keep_cost_source() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        database
+            .record_model_usage(&ModelUsageRecord {
+                request_id: "model-request-test",
+                operation: "assistant.chat",
+                provider: "openai",
+                model: "gpt-test",
+                state: "started",
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                estimated_cost_usd: None,
+                cost_source: "pending",
+                duration_ms: 0,
+                error: None,
+            })
+            .expect("record started model usage");
+        database
+            .record_model_usage(&ModelUsageRecord {
+                request_id: "model-request-test",
+                operation: "assistant.chat",
+                provider: "openai",
+                model: "gpt-test",
+                state: "succeeded",
+                prompt_tokens: 120,
+                completion_tokens: 45,
+                total_tokens: 165,
+                estimated_cost_usd: Some(0.0042),
+                cost_source: "provider_usage_and_cost",
+                duration_ms: 850,
+                error: None,
+            })
+            .expect("update model usage");
+        let connection = database.connection.lock().expect("lock sqlite");
+        let row = connection
+            .query_row(
+                "SELECT state, prompt_tokens, completion_tokens, total_tokens,
+                        estimated_cost_usd, cost_source, duration_ms
+                 FROM model_usage_events WHERE request_id='model-request-test'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, f64>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ))
+                },
+            )
+            .expect("read model usage");
+        assert_eq!(row.0, "succeeded");
+        assert_eq!((row.1, row.2, row.3), (120, 45, 165));
+        assert!((row.4 - 0.0042).abs() < f64::EPSILON);
+        assert_eq!(row.5, "provider_usage_and_cost");
+        assert_eq!(row.6, 850);
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM model_usage_events WHERE request_id='model-request-test'",
+                [],
+                |value| value.get(0),
+            )
+            .expect("count idempotent model usage");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn application_authorization_is_explicit_and_persists_without_accounts() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let path = directory.path().join("runtime.sqlite");
+        {
+            let database = test_database(&path);
+            let pending = database
+                .application_authorization()
+                .expect("read initial authorization");
+            assert_eq!(pending.status, "pending");
+            assert!(!pending.is_granted());
+            assert_eq!(
+                pending.authorization_version,
+                APPLICATION_AUTHORIZATION_VERSION
+            );
+            assert!(pending.decided_at.is_none());
+
+            let denied = database
+                .set_application_authorization(false)
+                .expect("persist denial");
+            assert_eq!(denied.status, "denied");
+            assert!(!denied.is_granted());
+            assert!(denied.decided_at.is_some());
+        }
+        {
+            let database = test_database(&path);
+            let denied = database
+                .application_authorization()
+                .expect("restore denied authorization");
+            assert_eq!(denied.status, "denied");
+
+            let granted = database
+                .set_application_authorization(true)
+                .expect("grant from settings");
+            assert!(granted.is_granted());
+        }
+        {
+            let database = test_database(&path);
+            let granted = database
+                .application_authorization()
+                .expect("restore granted authorization");
+            assert_eq!(granted.status, "granted");
+            assert!(granted.is_granted());
+
+            let revoked = database
+                .set_application_authorization(false)
+                .expect("revoke from settings");
+            assert_eq!(revoked.status, "denied");
+        }
+        {
+            let database = test_database(&path);
+            assert_eq!(
+                database
+                    .application_authorization()
+                    .expect("restore revoked authorization")
+                    .status,
+                "denied"
+            );
+            assert!(database
+                .set_application_authorization(true)
+                .expect("reauthorize from settings")
+                .is_granted());
+        }
+    }
+
+    #[test]
+    fn cancelled_index_transaction_rolls_back_before_commit() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut connection = Connection::open_in_memory().expect("open memory database");
+        connection
+            .execute("CREATE TABLE indexed_notes (id INTEGER PRIMARY KEY)", [])
+            .expect("create index test table");
+        let transaction = connection.transaction().expect("start index transaction");
+        transaction
+            .execute("INSERT INTO indexed_notes (id) VALUES (1)", [])
+            .expect("stage index row");
+        let cancelled = AtomicBool::new(true);
+        assert!(ensure_index_not_cancelled(&|| cancelled.load(Ordering::Acquire)).is_err());
+        drop(transaction);
+
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM indexed_notes", [], |row| row.get(0))
+            .expect("count committed index rows");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn outdated_application_authorization_requires_confirmation_again() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        database
+            .set_application_authorization(true)
+            .expect("persist current grant");
+        database
+            .connection
+            .lock()
+            .expect("lock sqlite")
+            .execute(
+                "UPDATE application_authorization SET authorization_version=0 WHERE id=1",
+                [],
+            )
+            .expect("downgrade stored authorization version");
+
+        let authorization = database
+            .application_authorization()
+            .expect("read outdated authorization");
+        assert_eq!(authorization.status, "pending");
+        assert!(!authorization.is_granted());
+        assert_eq!(
+            authorization.authorization_version,
+            APPLICATION_AUTHORIZATION_VERSION
+        );
+    }
+
+    #[test]
+    fn first_grant_is_restored_without_returning_to_pending() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let path = directory.path().join("runtime.sqlite");
+        {
+            let database = test_database(&path);
+            assert_eq!(
+                database
+                    .application_authorization()
+                    .expect("read pending state")
+                    .status,
+                "pending"
+            );
+            assert!(database
+                .set_application_authorization(true)
+                .expect("grant on first launch")
+                .is_granted());
+        }
+        {
+            let database = test_database(&path);
+            let restored = database
+                .application_authorization()
+                .expect("restore first-launch grant");
+            assert_eq!(restored.status, "granted");
+            assert!(restored.decided_at.is_some());
+        }
+    }
 }

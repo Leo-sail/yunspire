@@ -149,6 +149,11 @@ impl ModelAnalysisState {
         });
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn issue(&self, workspace_scope: &str) -> Result<String, String> {
+        self.issue_with_digest(workspace_scope, None)
+    }
+
     fn issue_with_analysis(
         &self,
         workspace_scope: &str,
@@ -2244,7 +2249,7 @@ async fn chat_with_assistant_inner(
     let model = model.trim();
     let key = api_key.trim();
     if model.is_empty() {
-        return Err("尚未选择模型".to_string());
+        return Err("尚未选择真实模型".to_string());
     }
     if provider != "ollama" && key.is_empty() {
         return Err("AI助手对话需要本地 API 密钥，请在设置中保存一次".to_string());
@@ -2797,7 +2802,7 @@ pub async fn analyze_capture_content(
     let model = model.trim();
     let key = api_key.trim();
     if model.is_empty() {
-        return Err("尚未选择模型".to_string());
+        return Err("尚未选择真实模型".to_string());
     }
     if content.trim().is_empty() && image_urls.is_empty() && image_data_urls.is_empty() {
         return Err("没有可供模型分析的正文或图片".to_string());
@@ -3055,4 +3060,357 @@ pub async fn fetch_provider_models(
     }
 
     Err(format!("无法读取模型列表。{}", failures.join("；")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_capture_image_binding(
+        asset_id: &str,
+        reference_ids: &[&str],
+        bytes: &[u8],
+        mime_type: &str,
+    ) -> CaptureImageBinding {
+        let sha256 = format!("{:x}", Sha256::digest(bytes));
+        CaptureImageBinding {
+            asset_id: asset_id.to_string(),
+            reference_ids: reference_ids
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
+            original_sha256: sha256.clone(),
+            analysis_sha256: sha256,
+            original_byte_length: bytes.len() as u64,
+            analysis_byte_length: bytes.len() as u64,
+            analysis_mime_type: mime_type.to_string(),
+            derived: false,
+        }
+    }
+
+    #[test]
+    fn streamed_usage_and_text_are_parsed_without_exposing_raw_events() {
+        let body = r#"data: {"choices":[{"delta":{"content":"{"}}]}
+
+data: {"choices":[{"delta":{"content":"\"reply\":\"完成\"}"}}],"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19,"cost":0.0012}}
+
+data: [DONE]
+"#;
+        let bytes = body.as_bytes();
+        assert_eq!(
+            model_response_text(bytes).expect("parse streamed text"),
+            "{\"reply\":\"完成\"}"
+        );
+        let usage = assistant_usage_summary("request-test", bytes, 100, 100, 42);
+        assert_eq!(usage.prompt_tokens, 12);
+        assert_eq!(usage.completion_tokens, 7);
+        assert_eq!(usage.total_tokens, 19);
+        assert_eq!(usage.estimated_cost_usd, Some(0.0012));
+        assert_eq!(usage.source, "provider_usage_and_cost");
+        assert_eq!(usage.duration_ms, 42);
+    }
+
+    #[test]
+    fn usage_falls_back_to_local_estimate_when_provider_omits_usage() {
+        let bytes = br#"data: {"choices":[{"delta":{"content":"{}"}}]}
+data: [DONE]
+"#;
+        let usage = assistant_usage_summary("request-estimate", bytes, 33, 9, 7);
+        assert_eq!(usage.prompt_tokens, 33);
+        assert_eq!(usage.completion_tokens, 9);
+        assert_eq!(usage.total_tokens, 42);
+        assert_eq!(usage.estimated_cost_usd, None);
+        assert_eq!(usage.source, "local_estimate_cost_unavailable");
+    }
+
+    #[test]
+    fn provider_endpoints_cover_chat_models_and_images_without_role_leakage() {
+        let openai_models =
+            model_endpoints("openai", "https://api.example.com/v1").expect("openai model endpoint");
+        assert_eq!(
+            openai_models[0].as_str(),
+            "https://api.example.com/v1/models"
+        );
+        assert_eq!(
+            analysis_endpoint("openai", "https://api.example.com/v1")
+                .expect("openai chat endpoint")
+                .as_str(),
+            "https://api.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            image_endpoint("openai", "https://api.example.com/v1", "generations")
+                .expect("openai image endpoint")
+                .as_str(),
+            "https://api.example.com/v1/images/generations"
+        );
+        assert_eq!(
+            image_endpoint(
+                "custom",
+                "https://gateway.example.com/openai/chat/completions",
+                "edits"
+            )
+            .expect("custom image endpoint")
+            .as_str(),
+            "https://gateway.example.com/openai/images/edits"
+        );
+        assert_eq!(
+            analysis_endpoint("anthropic", "https://api.anthropic.com/v1")
+                .expect("anthropic message endpoint")
+                .as_str(),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            analysis_endpoint("ollama", "http://127.0.0.1:11434")
+                .expect("ollama chat endpoint")
+                .as_str(),
+            "http://127.0.0.1:11434/api/chat"
+        );
+    }
+
+    #[test]
+    fn provider_model_payloads_are_normalized_and_deduplicated() {
+        let openai = parse_models(
+            "openrouter",
+            &serde_json::json!({
+                "data": [
+                    {"id": "model-b", "name": "模型 B"},
+                    {"id": "model-a", "display_name": "模型 A"},
+                    {"id": "model-a", "display_name": "重复模型 A"}
+                ]
+            }),
+        )
+        .expect("parse openai-compatible models");
+        assert_eq!(openai.len(), 2);
+        assert_eq!(openai[0].id, "model-a");
+        assert_eq!(openai[0].name, "模型 A");
+
+        let ollama = parse_models(
+            "ollama",
+            &serde_json::json!({"models": [{"name": "qwen-local"}]}),
+        )
+        .expect("parse ollama models");
+        assert_eq!(ollama[0].id, "qwen-local");
+    }
+
+    #[test]
+    fn capture_analysis_requires_explicit_image_ids_and_reports_missing_assets() {
+        let normalized = normalize_capture_analysis(
+            serde_json::json!({
+                "summary": "摘要",
+                "analysis_markdown": "# 结构化原文",
+                "image_observations": [
+                    {"observation": "不能按数组序号猜配"},
+                    {"asset_id": "asset-b", "observation": "第二张图", "confidence": 0.8}
+                ],
+                "relations": []
+            }),
+            &["asset-a".to_string(), "asset-b".to_string()],
+            &[],
+        )
+        .expect("normalize model analysis");
+        let observations = normalized["image_observations"]
+            .as_array()
+            .expect("normalized observations");
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0]["asset_id"], "asset-b");
+        assert_eq!(observations[0]["reference_id"], "asset-b");
+        let warnings = normalized["warnings"]
+            .as_array()
+            .expect("normalization warnings")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(warnings.contains("缺少 asset_id"));
+        assert!(warnings.contains("asset_id=asset-a"));
+    }
+
+    #[test]
+    fn capture_analysis_keeps_all_explicit_image_observations() {
+        let observations = (0..32)
+            .map(|index| {
+                serde_json::json!({
+                    "asset_id": format!("frame-{index}"),
+                    "reference_id": format!("frame-ref-{index}"),
+                    "observation": format!("关键画面 {index}"),
+                    "confidence": 0.75
+                })
+            })
+            .collect::<Vec<_>>();
+        let expected_asset_ids = (0..32)
+            .map(|index| format!("frame-{index}"))
+            .collect::<Vec<_>>();
+        let normalized = normalize_capture_analysis(
+            serde_json::json!({
+                "summary": "视频分析",
+                "analysis_markdown": "全部关键画面",
+                "image_observations": observations,
+                "relations": []
+            }),
+            &expected_asset_ids,
+            &[],
+        )
+        .expect("normalize unbounded consolidated observations");
+        assert_eq!(
+            normalized["image_observations"].as_array().unwrap().len(),
+            32
+        );
+    }
+
+    #[test]
+    fn capture_image_binding_validates_analysis_hash_length_and_mime() {
+        let bytes = b"\x89PNG\r\n\x1a\nlocal-analysis-image";
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        );
+        let binding = test_capture_image_binding("asset-a", &["ref-a"], bytes, "image/png");
+        let prepared = prepare_capture_analysis_images(
+            std::slice::from_ref(&data_url),
+            Some(vec![binding.clone()]),
+        )
+        .expect("accept matching image binding");
+        assert_eq!(prepared.bindings, vec![binding.clone()]);
+
+        let mut wrong_hash = binding.clone();
+        wrong_hash.analysis_sha256 = "0".repeat(64);
+        wrong_hash.derived = true;
+        assert!(prepare_capture_analysis_images(
+            std::slice::from_ref(&data_url),
+            Some(vec![wrong_hash])
+        )
+        .unwrap_err()
+        .contains("analysisSha256"));
+
+        let mut wrong_length = binding.clone();
+        wrong_length.analysis_byte_length += 1;
+        wrong_length.derived = true;
+        assert!(prepare_capture_analysis_images(
+            std::slice::from_ref(&data_url),
+            Some(vec![wrong_length]),
+        )
+        .unwrap_err()
+        .contains("analysisByteLength"));
+
+        let mut wrong_mime = binding;
+        wrong_mime.analysis_mime_type = "image/jpeg".to_string();
+        assert!(prepare_capture_analysis_images(
+            std::slice::from_ref(&data_url),
+            Some(vec![wrong_mime])
+        )
+        .unwrap_err()
+        .contains("MIME"));
+    }
+
+    #[test]
+    fn capture_analysis_normalizes_unbound_reference_id() {
+        let bytes = b"bound-image";
+        let binding = test_capture_image_binding(
+            "asset-a",
+            &["ref-primary", "ref-secondary"],
+            bytes,
+            "image/png",
+        );
+        let normalized = normalize_capture_analysis(
+            serde_json::json!({
+                "summary": "摘要",
+                "analysis_markdown": "# 结构化原文",
+                "image_observations": [{
+                    "asset_id": "asset-a",
+                    "reference_id": "model-invented-reference",
+                    "observation": "图片观察"
+                }, {
+                    "asset_id": "remote-asset",
+                    "reference_id": "remote-asset",
+                    "observation": "远程图片观察"
+                }],
+                "relations": []
+            }),
+            &["remote-asset".to_string()],
+            &[binding],
+        )
+        .expect("normalize constrained image observation");
+        assert_eq!(
+            normalized["image_observations"]
+                .as_array()
+                .expect("image observations")
+                .len(),
+            2
+        );
+        assert_eq!(
+            normalized["image_observations"][0]["reference_id"],
+            "ref-primary"
+        );
+        assert!(normalized["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|warning| warning.contains("未绑定的 reference_id")));
+    }
+
+    #[test]
+    fn capture_analysis_keeps_structured_image_bindings_in_result() {
+        let bytes = b"derived-analysis-image";
+        let mut binding =
+            test_capture_image_binding("asset-a", &["ref-a", "ref-b"], bytes, "image/jpeg");
+        binding.original_sha256 = "1".repeat(64);
+        binding.original_byte_length = 9_000_000;
+        binding.derived = true;
+        let prepared = prepare_capture_analysis_images(&[], Some(vec![binding.clone()]))
+            .expect("allow bindings in an image-free consolidation request");
+        assert!(prepared.images.is_empty());
+        let normalized = normalize_capture_analysis(
+            serde_json::json!({
+                "summary": "摘要",
+                "analysis_markdown": "# 结构化原文",
+                "image_observations": [],
+                "relations": []
+            }),
+            &[],
+            &prepared.bindings,
+        )
+        .expect("keep binding in normalized result");
+        assert_eq!(normalized["image_bindings"][0]["assetId"], "asset-a");
+        assert_eq!(
+            normalized["image_bindings"][0]["referenceIds"],
+            serde_json::json!(["ref-a", "ref-b"])
+        );
+        assert_eq!(
+            normalized["image_bindings"][0]["originalSha256"],
+            binding.original_sha256
+        );
+        assert_eq!(
+            normalized["image_bindings"][0]["analysisSha256"],
+            binding.analysis_sha256
+        );
+        assert_eq!(
+            normalized["image_bindings"][0]["analysisByteLength"],
+            bytes.len() as u64
+        );
+        assert_eq!(normalized["image_bindings"][0]["derived"], true);
+    }
+
+    #[test]
+    fn analysis_receipt_is_bound_to_normalized_model_result() {
+        let state = ModelAnalysisState::default();
+        let analysis = serde_json::json!({
+            "summary": "可信摘要",
+            "analysis_markdown": "# 结构化原文",
+            "tags": ["知识管理"]
+        });
+        let receipt = state
+            .issue_with_analysis("local", &analysis)
+            .expect("issue bound analysis receipt");
+        let mut client_copy = analysis.clone();
+        client_copy["analysisReceipt"] = Value::String(receipt.clone());
+        client_copy["yunspireBatchMeta"] = serde_json::json!({"completed": true});
+        state
+            .validate_analysis("local", &receipt, &client_copy)
+            .expect("ignore transport-only receipt metadata");
+        client_copy["summary"] = Value::String("已被替换".to_string());
+        assert!(state
+            .validate_analysis("local", &receipt, &client_copy)
+            .is_err());
+    }
 }

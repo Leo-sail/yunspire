@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yunspire.local/schemas/long-term-memory-event.schema.json",
+  "title": "LongTermMemoryEvent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "eventType", "occurredAt", "actor", "content", "metadata"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,160}$" },
+    "eventType": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,80}$" },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "actor": { "type": "string", "enum": ["user", "assistant", "system"] },
+    "content": { "type": "string", "minLength": 1, "maxLength": 1048576 },
+    "conversationId": { "type": ["string", "null"], "maxLength": 160 },
+    "taskId": { "type": ["string", "null"], "maxLength": 160 },
+    "traceId": { "type": ["string", "null"], "maxLength": 160 },
+    "metadata": { "type": "object", "additionalProperties": true, "maxProperties": 80 }
+  }
+}

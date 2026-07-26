@@ -1,8 +1,8 @@
 {
   "name": "yunspire-desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "云枢：以本地 Obsidian 为知识数据库的中文桌面 Agent 系统",
-  "author": "leochang <leochang210@gmail.com>",
+  "author": "Leo Chang <leochang210@gmail.com>",
   "license": "SEE LICENSE IN LICENSE",
   "repository": "https://github.com/Leo-sail/yunspire.git",
   "engines": {
@@ -17,6 +17,13 @@
     "native:check": "cargo check --manifest-path src-tauri/Cargo.toml",
     "native:fmt:check": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
     "native:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "native:test": "cargo test --manifest-path src-tauri/Cargo.toml --all-targets",
+    "validate:schemas": "node scripts/validate-schemas.mjs",
+    "validate:first-party-skills": "node scripts/validate-first-party-skills.mjs",
+    "test:assistant-requests": "node --test scripts/assistant-request-coordinator.test.mjs",
+    "audit:release": "node scripts/audit-release.mjs",
+    "quality:gates": "node scripts/quality-gates.mjs",
+    "verify": "npm run validate:schemas && npm run validate:first-party-skills && npm run test:assistant-requests && npm run build && npm run quality:gates && npm run native:fmt:check && npm run native:clippy && npm run native:test",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
@@ -29,6 +36,8 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
     "esbuild": "^0.27.2",
     "vite": "^8.1.5"
   }

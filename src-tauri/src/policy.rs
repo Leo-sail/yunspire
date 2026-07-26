@@ -274,3 +274,132 @@ pub fn evaluate(command: &ApplicationCommand) -> PolicyDecision {
         approval_type,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn command(operation: &str) -> ApplicationCommand {
+        ApplicationCommand {
+            id: "command-1".to_string(),
+            command_type: "assistant.operation".to_string(),
+            origin: CommandOrigin::Assistant,
+            intent: "search".to_string(),
+            capability_id: "system:search".to_string(),
+            operation: operation.to_string(),
+            parameters: Value::Object(Default::default()),
+            vault_id: Some("vault-1".to_string()),
+            relative_paths: vec!["资料/笔记.md".to_string()],
+            network_targets: vec![],
+            declared_scope: vec!["vault:read".to_string()],
+            budget: CommandBudget {
+                max_steps: 8,
+                max_runtime_seconds: 300,
+                max_tool_calls: 16,
+                max_tokens: Some(100_000),
+                max_cost: None,
+            },
+            idempotency_key: "turn-1".to_string(),
+            trace_id: Some("trace-1".to_string()),
+            model_decision_receipt: Some("receipt-1".to_string()),
+        }
+    }
+
+    #[test]
+    fn allows_scoped_read() {
+        assert_eq!(
+            evaluate(&command("note.read")).outcome,
+            PolicyOutcome::Allow
+        );
+    }
+
+    #[test]
+    fn requires_approval_for_delete() {
+        let decision = evaluate(&command("note.delete"));
+        assert_eq!(decision.outcome, PolicyOutcome::RequireApproval);
+        assert!(decision.requires_checkpoint);
+    }
+
+    #[test]
+    fn delete_capability_requires_approval_even_when_model_operation_is_generic() {
+        let mut value = command("run");
+        value.intent = "delete".to_string();
+        value.capability_id = "system:delete".to_string();
+        let decision = evaluate(&value);
+        assert_eq!(decision.outcome, PolicyOutcome::RequireApproval);
+        assert_eq!(
+            decision.approval_type.as_deref(),
+            Some("destructive_change")
+        );
+    }
+
+    #[test]
+    fn report_subscription_delete_is_runtime_configuration() {
+        let mut value = command("delete");
+        value.intent = "reports".to_string();
+        value.capability_id = "system:reports".to_string();
+        value.vault_id = None;
+        value.relative_paths.clear();
+        let decision = evaluate(&value);
+        assert_eq!(decision.outcome, PolicyOutcome::Allow);
+        assert_eq!(decision.approval_type, None);
+        assert!(!decision.requires_checkpoint);
+    }
+
+    #[test]
+    fn denies_settings_and_traversal() {
+        let mut value = command("settings.write");
+        value.relative_paths = vec!["../secret.md".to_string()];
+        let decision = evaluate(&value);
+        assert_eq!(decision.outcome, PolicyOutcome::Deny);
+        assert!(decision
+            .reason_codes
+            .contains(&"assistant_settings_forbidden".to_string()));
+        assert!(decision
+            .reason_codes
+            .contains(&"invalid_relative_path".to_string()));
+    }
+
+    #[test]
+    fn allows_direct_user_settings_changes() {
+        let mut value = command("settings.write");
+        value.origin = CommandOrigin::DirectUser;
+        value.capability_id = "system:settings".to_string();
+        value.relative_paths.clear();
+        value.vault_id = None;
+        value.model_decision_receipt = None;
+        let decision = evaluate(&value);
+        assert_eq!(decision.outcome, PolicyOutcome::Allow);
+        assert!(!decision
+            .reason_codes
+            .contains(&"assistant_settings_forbidden".to_string()));
+    }
+
+    #[test]
+    fn allows_runtime_configuration_without_vault_scope() {
+        let mut value = command("create");
+        value.intent = "schedule".to_string();
+        value.capability_id = "system:schedule".to_string();
+        value.vault_id = None;
+        value.relative_paths.clear();
+        assert_eq!(evaluate(&value).outcome, PolicyOutcome::Allow);
+    }
+
+    #[test]
+    fn rejects_public_plain_http_targets() {
+        let mut value = command("capture.run");
+        value.network_targets = vec!["http://example.com/article".to_string()];
+        let decision = evaluate(&value);
+        assert_eq!(decision.outcome, PolicyOutcome::Deny);
+        assert!(decision
+            .reason_codes
+            .contains(&"invalid_network_target".to_string()));
+    }
+
+    #[test]
+    fn allows_local_plain_http_targets() {
+        let mut value = command("capture.run");
+        value.network_targets = vec!["http://127.0.0.1:4173/health".to_string()];
+        assert_eq!(evaluate(&value).outcome, PolicyOutcome::Allow);
+    }
+}

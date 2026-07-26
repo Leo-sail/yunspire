@@ -66,10 +66,6 @@ class MediaFoundationScope {
 
 namespace fs = std::filesystem;
 
-constexpr DWORD kMediaSourceStream = static_cast<DWORD>(MF_SOURCE_READER_MEDIASOURCE);
-constexpr DWORD kFirstVideoStream = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
-constexpr DWORD kFirstAudioStream = static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM);
-
 static std::string utf8(const std::wstring& value) {
   if (value.empty()) return "";
   if (value.size() > static_cast<size_t>(std::numeric_limits<int>::max())) return "";
@@ -98,17 +94,6 @@ static std::string json_escape(const std::string& value) {
   return out.str();
 }
 
-static void progress_checkpoint(const std::string& label) {
-  const DWORD required = GetEnvironmentVariableW(L"YUNSPIRE_PROGRESS_FILE", nullptr, 0);
-  if (required == 0) return;
-  std::vector<wchar_t> path(required);
-  const DWORD copied = GetEnvironmentVariableW(
-    L"YUNSPIRE_PROGRESS_FILE", path.data(), static_cast<DWORD>(path.size()));
-  if (copied == 0 || copied >= path.size()) return;
-  std::ofstream stream(fs::path(path.data()), std::ios::binary | std::ios::app);
-  if (stream) stream << GetTickCount64() << '\t' << label << '\n';
-}
-
 static void emit_failure(const std::string& warning, const std::string& error) {
   std::cout << "{\"schema\":\"yunspire.windows-media.v1\",\"duration_seconds\":0,\"audio_path\":\"\",\"frames\":[],\"frame_timestamps_ms\":[],\"frame_difference_scores\":[],\"frame_candidate_count\":0,\"frame_selection_method\":\"yunspire-windows-mediafoundation-v1\",\"warnings\":[\""
             << json_escape(warning) << "\"],\"errors\":[\"" << json_escape(error) << "\"]}";
@@ -133,7 +118,8 @@ static double media_duration_seconds(const std::wstring& path) {
   if (FAILED(create_reader(path, false, reader.Put()))) return 0.0;
   PROPVARIANT duration;
   PropVariantInit(&duration);
-  const HRESULT hr = reader->GetPresentationAttribute(kMediaSourceStream, MF_PD_DURATION, &duration);
+  const HRESULT hr = reader->GetPresentationAttribute(
+    static_cast<DWORD>(MF_SOURCE_READER_MEDIASOURCE), MF_PD_DURATION, &duration);
   const double seconds = SUCCEEDED(hr) && duration.vt == VT_UI8
     ? static_cast<double>(duration.uhVal.QuadPart) / 10000000.0
     : 0.0;
@@ -243,7 +229,8 @@ static bool extract_video_frames(const std::wstring& path, const std::wstring& o
     warnings->push_back("Windows Media Foundation 无法打开视频流");
     return false;
   }
-  if (FAILED(reader->SetStreamSelection(kFirstAudioStream, FALSE))) {
+  if (FAILED(reader->SetStreamSelection(
+        static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), FALSE))) {
     warnings->push_back("无法禁用视频读取器的音轨");
   }
   ComPtr<IMFMediaType> requested;
@@ -252,7 +239,8 @@ static bool extract_video_frames(const std::wstring& path, const std::wstring& o
       || FAILED(requested->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32))) {
     warnings->push_back("无法配置视频解码类型"); return false;
   }
-  hr = reader->SetCurrentMediaType(kFirstVideoStream, nullptr, requested.Get());
+  hr = reader->SetCurrentMediaType(
+    static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, requested.Get());
   if (FAILED(hr)) {
     *codec_unavailable = true;
     warnings->push_back("Windows Media Foundation 缺少可将该视频流解码为 RGB32 的本地编解码器");
@@ -260,7 +248,10 @@ static bool extract_video_frames(const std::wstring& path, const std::wstring& o
   }
   ComPtr<IMFMediaType> current;
   UINT32 width = 0, height = 0;
-  if (FAILED(reader->GetCurrentMediaType(kFirstVideoStream, current.Put())) || FAILED(MFGetAttributeSize(current.Get(), MF_MT_FRAME_SIZE, &width, &height)) || width == 0 || height == 0) {
+  if (FAILED(reader->GetCurrentMediaType(
+        static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), current.Put()))
+      || FAILED(MFGetAttributeSize(current.Get(), MF_MT_FRAME_SIZE, &width, &height))
+      || width == 0 || height == 0) {
     warnings->push_back("无法读取视频画面尺寸"); return false;
   }
   UINT32 raw_stride = MFGetAttributeUINT32(current.Get(), MF_MT_DEFAULT_STRIDE, width * 4);
@@ -270,12 +261,13 @@ static bool extract_video_frames(const std::wstring& path, const std::wstring& o
   std::vector<BYTE> previous;
   bool has_video = false;
   bool completed = true;
-  ULONGLONG last_checkpoint = GetTickCount64();
   for (;;) {
     DWORD flags = 0;
     LONGLONG timestamp = 0;
     ComPtr<IMFSample> sample;
-    hr = reader->ReadSample(kFirstVideoStream, 0, nullptr, &flags, &timestamp, sample.Put());
+    hr = reader->ReadSample(
+      static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0, nullptr,
+      &flags, &timestamp, sample.Put());
     if (FAILED(hr)) {
       *codec_unavailable = *codec_unavailable || codec_unavailable_hresult(hr);
       warnings->push_back("视频解码在读取画面时失败"); completed = false; break;
@@ -288,11 +280,6 @@ static bool extract_video_frames(const std::wstring& path, const std::wstring& o
     if (sample.Get() == nullptr || timestamp < next_candidate) continue;
     next_candidate = timestamp + candidate_interval;
     ++*candidates;
-    const ULONGLONG now = GetTickCount64();
-    if (now - last_checkpoint >= 5000) {
-      progress_checkpoint("windows-video-decoded:" + std::to_string(timestamp / 10000));
-      last_checkpoint = now;
-    }
     ComPtr<IMFMediaBuffer> buffer;
     if (FAILED(sample->ConvertToContiguousBuffer(buffer.Put()))) continue;
     BYTE* data = nullptr;
@@ -333,7 +320,6 @@ static bool extract_video_frames(const std::wstring& path, const std::wstring& o
       break;
     }
   }
-  progress_checkpoint("windows-video-finished:" + std::to_string(*candidates));
   if (!has_video) warnings->push_back("媒体没有可解码的视频画面");
   return has_video && completed;
 }
@@ -357,7 +343,8 @@ static bool extract_audio(const std::wstring& path, const std::wstring& output,
     warnings->push_back("Windows Media Foundation 无法打开音轨");
     return false;
   }
-  if (FAILED(reader->SetStreamSelection(kFirstVideoStream, FALSE))) {
+  if (FAILED(reader->SetStreamSelection(
+        static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), FALSE))) {
     warnings->push_back("无法禁用音轨读取器的视频流");
   }
   ComPtr<IMFMediaType> requested;
@@ -369,11 +356,13 @@ static bool extract_audio(const std::wstring& path, const std::wstring& output,
       || FAILED(requested->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 1))) {
     warnings->push_back("无法配置本地 PCM 音轨格式"); return false;
   }
-  if (FAILED(reader->SetCurrentMediaType(kFirstAudioStream, nullptr, requested.Get()))) {
+  if (FAILED(reader->SetCurrentMediaType(
+        static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), nullptr, requested.Get()))) {
     requested->DeleteAllItems();
     requested->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
     requested->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-    hr = reader->SetCurrentMediaType(kFirstAudioStream, nullptr, requested.Get());
+    hr = reader->SetCurrentMediaType(
+      static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), nullptr, requested.Get());
     if (FAILED(hr)) {
       *codec_unavailable = true;
       warnings->push_back("Windows Media Foundation 缺少可将该音轨解码为 PCM 的本地编解码器");
@@ -383,7 +372,8 @@ static bool extract_audio(const std::wstring& path, const std::wstring& output,
   }
   ComPtr<IMFMediaType> current;
   UINT32 rate = 0, channels = 0, bits = 0, media_block_align = 0;
-  if (FAILED(reader->GetCurrentMediaType(kFirstAudioStream, current.Put()))) return false;
+  if (FAILED(reader->GetCurrentMediaType(
+        static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), current.Put()))) return false;
   if (FAILED(current->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &rate))
       || FAILED(current->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &channels))
       || FAILED(current->GetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, &bits))
@@ -407,11 +397,12 @@ static bool extract_audio(const std::wstring& path, const std::wstring& output,
   if (!stream) { warnings->push_back("无法创建本地语音 WAV 文件"); return false; }
   stream.write(reinterpret_cast<const char*>(&header), sizeof(header));
   uint64_t pcm_size = 0;
-  ULONGLONG last_checkpoint = GetTickCount64();
   for (;;) {
     DWORD flags = 0;
     ComPtr<IMFSample> sample;
-    hr = reader->ReadSample(kFirstAudioStream, 0, nullptr, &flags, nullptr, sample.Put());
+    hr = reader->ReadSample(
+      static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), 0, nullptr,
+      &flags, nullptr, sample.Put());
     if (FAILED(hr)) {
       *codec_unavailable = *codec_unavailable || codec_unavailable_hresult(hr);
       stream.close(); _wremove(output.c_str()); warnings->push_back("音轨解码在读取样本时失败"); return false;
@@ -433,11 +424,6 @@ static bool extract_audio(const std::wstring& path, const std::wstring& output,
       }
       stream.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(length));
       pcm_size += length;
-      const ULONGLONG now = GetTickCount64();
-      if (now - last_checkpoint >= 5000) {
-        progress_checkpoint("windows-audio-decoded:" + std::to_string(pcm_size));
-        last_checkpoint = now;
-      }
     }
     buffer->Unlock();
     if (!stream) { stream.close(); _wremove(output.c_str()); warnings->push_back("写入本地语音 WAV 文件失败"); return false; }
@@ -450,7 +436,6 @@ static bool extract_audio(const std::wstring& path, const std::wstring& output,
   stream.flush();
   if (!stream.good()) { stream.close(); _wremove(output.c_str()); warnings->push_back("写入本地语音 WAV 文件失败"); return false; }
   *audio_path = output;
-  progress_checkpoint("windows-audio-finished:" + std::to_string(pcm_size));
   return true;
 }
 
@@ -462,7 +447,6 @@ int wmain(int argc, wchar_t** argv) {
   HRESULT startup = MFStartup(MF_VERSION);
   if (FAILED(startup)) { emit_failure("Windows Media Foundation 初始化失败", "windows_mediafoundation_unavailable"); return 0; }
   MediaFoundationScope media_foundation_scope(startup);
-  progress_checkpoint("windows-media-started");
   const std::wstring media = argv[1];
   const std::wstring output = argv[2];
   std::error_code directory_error;
@@ -475,8 +459,10 @@ int wmain(int argc, wchar_t** argv) {
   std::vector<std::string> warnings;
   uint64_t candidates = 0;
   const double duration_seconds = media_duration_seconds(media);
-  const bool video_stream_present = source_has_stream(media, kFirstVideoStream, MFMediaType_Video);
-  const bool audio_stream_present = source_has_stream(media, kFirstAudioStream, MFMediaType_Audio);
+  const bool video_stream_present = source_has_stream(
+    media, static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), MFMediaType_Video);
+  const bool audio_stream_present = source_has_stream(
+    media, static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), MFMediaType_Audio);
   bool video_codec_unavailable = false;
   bool audio_codec_unavailable = false;
   const bool video_extraction_completed = !video_stream_present || extract_video_frames(
@@ -505,6 +491,5 @@ int wmain(int argc, wchar_t** argv) {
   std::cout << "],\"errors\":[";
   for (size_t index = 0; index < errors.size(); ++index) { if (index) std::cout << ','; std::cout << '\"' << json_escape(errors[index]) << '\"'; }
   std::cout << "]}";
-  progress_checkpoint("windows-media-finished");
   return 0;
 }

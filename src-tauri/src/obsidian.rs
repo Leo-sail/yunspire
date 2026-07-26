@@ -17,12 +17,16 @@ use std::{
     fs::{self, File},
     io::{BufReader, Read, Write},
     path::{Component, Path, PathBuf},
+    process::Command,
     sync::{Mutex, OnceLock},
     time::{Duration, SystemTime},
 };
 use tauri::{AppHandle, Manager, State};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
+
+#[cfg(test)]
+pub(crate) static TEST_ENVIRONMENT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 const MAX_MARKDOWN_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULT_SEARCH_LIMIT: usize = 50;
@@ -296,6 +300,7 @@ pub struct CaptureVaultWritePreview {
     agent_vault_id: String,
     raw_relative_path: String,
     agent_relative_path: String,
+    raw_note_included: bool,
     note_previews: Vec<WritePreview>,
     asset_previews: Vec<AssetWritePreview>,
     agent_markdown: String,
@@ -1821,6 +1826,51 @@ pub fn read_vault_note(vault_id: String, relative_path: String) -> Result<VaultN
     })
 }
 
+fn note_path_without_markdown_extension(relative_path: &str) -> String {
+    Path::new(relative_path)
+        .with_extension("")
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn open_obsidian_uri(uri: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("/usr/bin/open");
+    #[cfg(target_os = "windows")]
+    let mut command = Command::new("rundll32.exe");
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let mut command = Command::new("xdg-open");
+
+    #[cfg(target_os = "macos")]
+    command.arg("--").arg(uri);
+    #[cfg(target_os = "windows")]
+    command.arg("url.dll,FileProtocolHandler").arg(uri);
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    command.arg(uri);
+
+    let status = command
+        .status()
+        .map_err(|error| format!("无法调用系统打开 Obsidian：{error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("系统未能打开 Obsidian 链接".to_string())
+    }
+}
+
+#[tauri::command]
+pub fn open_vault_note_in_obsidian(
+    vault_id: String,
+    relative_path: String,
+) -> Result<String, String> {
+    let (vault_name, root) = resolve_vault(&vault_id)?;
+    let (_, normalized_relative) = resolve_note_target(&root, &relative_path, false)?;
+    let obsidian_file = note_path_without_markdown_extension(&normalized_relative);
+    let uri = obsidian_open_uri(&vault_name, &obsidian_file)?;
+    open_obsidian_uri(&uri)?;
+    Ok(uri)
+}
+
 #[tauri::command]
 pub fn list_vault_notes(
     vault_id: Option<String>,
@@ -2794,8 +2844,7 @@ fn build_agent_capture_markdown(
     source_url: Option<&str>,
     source_type: &str,
     raw_vault_name: &str,
-    raw_relative_path: &str,
-    raw_markdown: &str,
+    raw_relative_path: Option<&str>,
     analysis: &Value,
     attachments: &[CaptureVaultAttachmentInput],
     related_notes: &[String],
@@ -2811,7 +2860,7 @@ fn build_agent_capture_markdown(
     }
     let image_bindings = validate_capture_image_bindings(analysis, attachments)?;
     let observations = capture_image_observations(analysis)?;
-    let mut understood_source = strip_markdown_frontmatter(raw_markdown).to_string();
+    let mut agent_body = strip_markdown_frontmatter(&analysis_markdown).to_string();
     let mut observations_placed = HashSet::new();
     for attachment in attachments {
         let asset_id = capture_reference_id(&attachment.asset_id)?;
@@ -2840,11 +2889,8 @@ fn build_agent_capture_markdown(
                     attachment,
                     std::slice::from_ref(reference_id),
                 )?;
-                placed |= replace_attachment_reference_key(
-                    &mut understood_source,
-                    reference_id,
-                    &replacement,
-                )?;
+                placed |=
+                    replace_attachment_reference_key(&mut agent_body, reference_id, &replacement)?;
             }
 
             // Older extractors used a shared attachment name for every occurrence. Preserve
@@ -2867,7 +2913,7 @@ fn build_agent_capture_markdown(
                     continue;
                 }
                 placed |= replace_attachment_reference_key(
-                    &mut understood_source,
+                    &mut agent_body,
                     legacy_key,
                     &legacy_replacement,
                 )?;
@@ -2884,7 +2930,7 @@ fn build_agent_capture_markdown(
                 .filter(|value| !value.is_empty())
                 .unwrap_or(&asset_id);
             let replacement = format!("[原始附件：{label}]({link})");
-            if replace_attachment_reference(&mut understood_source, attachment, &replacement)? {
+            if replace_attachment_reference(&mut agent_body, attachment, &replacement)? {
                 observations_placed.insert(asset_id);
             }
         }
@@ -2940,7 +2986,9 @@ fn build_agent_capture_markdown(
     let tags = capture_analysis_strings(analysis, "tags", "tags");
     let entities = capture_analysis_strings(analysis, "entities", "entities");
     let key_points = capture_analysis_strings(analysis, "key_points", "keyPoints");
-    let source_note_uri = obsidian_open_uri(raw_vault_name, raw_relative_path)?;
+    let source_note_uri = raw_relative_path
+        .map(|path| obsidian_open_uri(raw_vault_name, path))
+        .transpose()?;
     let mut markdown = String::new();
     markdown.push_str("---\n");
     markdown.push_str("yunspire_schema: yunspire.agent-understood-source.v1\n");
@@ -2955,11 +3003,13 @@ fn build_agent_capture_markdown(
             serde_json::to_string(source_url).unwrap_or_else(|_| "\"\"".to_string())
         ));
     }
-    markdown.push_str(&format!(
-        "raw_vault: {}\nraw_note: {}\n",
-        serde_json::to_string(raw_vault_name).unwrap_or_else(|_| "\"\"".to_string()),
-        serde_json::to_string(raw_relative_path).unwrap_or_else(|_| "\"\"".to_string())
-    ));
+    if let Some(raw_relative_path) = raw_relative_path {
+        markdown.push_str(&format!(
+            "raw_vault: {}\nraw_note: {}\n",
+            serde_json::to_string(raw_vault_name).unwrap_or_else(|_| "\"\"".to_string()),
+            serde_json::to_string(raw_relative_path).unwrap_or_else(|_| "\"\"".to_string())
+        ));
+    }
     markdown.push_str("knowledge_association: obsidian-tags-and-wikilinks\n");
     markdown.push_str("tags:\n");
     if tags.is_empty() {
@@ -2975,22 +3025,22 @@ fn build_agent_capture_markdown(
     markdown.push_str("---\n\n");
     markdown.push_str(&format!("# {title}\n\n"));
     markdown.push_str("## 来源证据\n\n");
-    markdown.push_str(&format!(
-        "- 忠实原文：[在 {raw_vault_name} 中打开]({source_note_uri})\n"
-    ));
+    if let Some(source_note_uri) = source_note_uri {
+        markdown.push_str(&format!(
+            "- 忠实原文：[在 {raw_vault_name} 中打开]({source_note_uri})\n"
+        ));
+    }
     if let Some(source_url) = source_url.map(str::trim).filter(|value| !value.is_empty()) {
         markdown.push_str(&format!("- 原始来源：<{source_url}>\n"));
     }
-    markdown.push_str("\n## 模型理解后的原文\n\n");
-    markdown.push_str(understood_source.trim());
+    markdown.push_str("\n## 分析内容\n\n");
+    markdown.push_str(agent_body.trim());
     if !unplaced_image_observations.is_empty() {
         markdown.push_str("\n\n### 逐图理解\n");
         for block in unplaced_image_observations {
             markdown.push_str(&block);
         }
     }
-    markdown.push_str("\n\n## 综合分析\n\n");
-    markdown.push_str(&analysis_markdown);
     markdown.push('\n');
     if !key_points.is_empty() {
         markdown.push_str("\n## 关键点\n\n");
@@ -3484,17 +3534,6 @@ pub fn prepare_capture_vault_writes(
     )
 }
 
-fn same_vault_capture_raw_relative_path(requested_raw_path: &str, title: &str) -> String {
-    let file_name = requested_raw_path
-        .rsplit('/')
-        .next()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{}.md", capture_safe_title(title)));
-    format!("资料库/来源原文/{file_name}")
-}
-
 fn prepare_capture_vault_writes_inner(
     analysis_state: &ModelAnalysisState,
     state: &ObsidianAdapterState,
@@ -3525,17 +3564,8 @@ fn prepare_capture_vault_writes_inner(
     let requested_raw_path = validate_relative_markdown_path(&input.raw_relative_path)?
         .to_string_lossy()
         .replace('\\', "/");
-    let raw_relative_path = if raw_root == agent_root
-        && (requested_raw_path == agent_relative_path
-            || requested_raw_path.starts_with("资料库/原文/"))
-    {
-        same_vault_capture_raw_relative_path(&requested_raw_path, &title)
-    } else {
-        requested_raw_path
-    };
-    if raw_root == agent_root && raw_relative_path == agent_relative_path {
-        return Err("忠实原文与 Agent 理解稿不能写入同一文件".to_string());
-    }
+    let raw_note_included = raw_root != agent_root;
+    let raw_relative_path = requested_raw_path;
 
     let mut asset_ids = HashSet::new();
     let mut asset_paths = HashSet::new();
@@ -3592,8 +3622,7 @@ fn prepare_capture_vault_writes_inner(
         input.source_url.as_deref(),
         input.source_type.trim(),
         &raw_vault_name,
-        &raw_relative_path,
-        &input.raw_markdown,
+        raw_note_included.then_some(raw_relative_path.as_str()),
         &input.analysis,
         &input.attachments,
         &related_notes,
@@ -3604,24 +3633,26 @@ fn prepare_capture_vault_writes_inner(
     let mut asset_previews = Vec::new();
     let operation_context = input.operation_context.clone();
     let preparation = (|| -> Result<(), String> {
-        let raw_preview = prepare_note_write_inner(
-            analysis_state,
-            state,
-            database,
-            input.raw_vault_id.clone(),
-            raw_relative_path.clone(),
-            raw_markdown,
-            input.analysis_receipt.clone(),
-            None,
-            operation_context.clone(),
-        )?;
-        let raw_is_new_file = raw_preview.is_new_file;
-        let raw_conflict_path = raw_preview.relative_path.clone();
-        note_previews.push(raw_preview);
-        if !raw_is_new_file {
-            return Err(format!(
-                "采集目标已存在，已阻止覆盖忠实原文：{raw_conflict_path}"
-            ));
+        if raw_note_included {
+            let raw_preview = prepare_note_write_inner(
+                analysis_state,
+                state,
+                database,
+                input.raw_vault_id.clone(),
+                raw_relative_path.clone(),
+                raw_markdown,
+                input.analysis_receipt.clone(),
+                None,
+                operation_context.clone(),
+            )?;
+            let raw_is_new_file = raw_preview.is_new_file;
+            let raw_conflict_path = raw_preview.relative_path.clone();
+            note_previews.push(raw_preview);
+            if !raw_is_new_file {
+                return Err(format!(
+                    "采集目标已存在，已阻止覆盖忠实原文：{raw_conflict_path}"
+                ));
+            }
         }
 
         let agent_preview = prepare_note_write_inner(
@@ -3716,6 +3747,7 @@ fn prepare_capture_vault_writes_inner(
         agent_vault_id: input.agent_vault_id,
         raw_relative_path,
         agent_relative_path,
+        raw_note_included,
         note_previews,
         asset_previews,
         agent_markdown,
@@ -3980,4 +4012,942 @@ pub fn list_operation_events(
     limit: Option<usize>,
 ) -> Result<Vec<OperationEvent>, String> {
     database.list_native_operation_events(limit.unwrap_or(100))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    struct EnvironmentGuard(Vec<(&'static str, Option<OsString>)>);
+
+    impl EnvironmentGuard {
+        fn set(values: &[(&'static str, &Path)]) -> Self {
+            let previous = values
+                .iter()
+                .map(|(key, _)| (*key, env::var_os(key)))
+                .collect::<Vec<_>>();
+            for (key, value) in values {
+                env::set_var(key, value);
+            }
+            Self(previous)
+        }
+    }
+
+    impl Drop for EnvironmentGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.0.drain(..) {
+                if let Some(value) = value {
+                    env::set_var(key, value);
+                } else {
+                    env::remove_var(key);
+                }
+            }
+        }
+    }
+
+    fn image_attachment(
+        asset_id: &str,
+        name: &str,
+        relative_path: &str,
+        placement_required: bool,
+    ) -> CaptureVaultAttachmentInput {
+        CaptureVaultAttachmentInput {
+            asset_id: asset_id.to_string(),
+            reference_id: Some(format!("ref-{asset_id}")),
+            reference_ids: Vec::new(),
+            relative_path: relative_path.to_string(),
+            mime_type: "image/png".to_string(),
+            name: Some(name.to_string()),
+            content_base64: Some(
+                base64::engine::general_purpose::STANDARD.encode(b"image fixture"),
+            ),
+            staged_attachment_id: None,
+            expected_sha256: None,
+            placement_required,
+        }
+    }
+
+    fn image_binding(
+        asset_id: &str,
+        reference_ids: &[&str],
+        original_bytes: &[u8],
+        analysis_bytes: &[u8],
+        analysis_mime_type: &str,
+        derived: bool,
+    ) -> Value {
+        serde_json::json!({
+            "assetId": asset_id,
+            "referenceIds": reference_ids,
+            "originalSha256": hash_bytes(original_bytes),
+            "analysisSha256": hash_bytes(analysis_bytes),
+            "originalByteLength": original_bytes.len() as u64,
+            "analysisByteLength": analysis_bytes.len() as u64,
+            "analysisMimeType": analysis_mime_type,
+            "derived": derived,
+        })
+    }
+
+    #[test]
+    fn capture_sha256_normalization_accepts_case_insensitive_prefix_and_hex() {
+        let digest = hash_bytes(b"normalized capture hash");
+        assert_eq!(
+            normalize_capture_sha256(
+                &format!("  SHA256:{}  ", digest.to_ascii_uppercase()),
+                "fixture"
+            )
+            .expect("normalize case-insensitive SHA-256"),
+            digest
+        );
+        assert!(normalize_capture_sha256("sha256:abc", "fixture")
+            .unwrap_err()
+            .contains("完整的 SHA-256"));
+    }
+
+    #[test]
+    fn obsidian_note_uri_keeps_unicode_vault_and_path_components() {
+        assert_eq!(
+            note_path_without_markdown_extension("资料库/原文/示例.MD"),
+            "资料库/原文/示例"
+        );
+        let uri =
+            obsidian_open_uri("Agent 库", "资料库/原文/示例").expect("build encoded Obsidian URI");
+        let parsed = Url::parse(&uri).expect("parse encoded Obsidian URI");
+        let query = parsed.query_pairs().into_owned().collect::<HashMap<_, _>>();
+        assert_eq!(parsed.scheme(), "obsidian");
+        assert_eq!(parsed.host_str(), Some("open"));
+        assert_eq!(query.get("vault").map(String::as_str), Some("Agent 库"));
+        assert_eq!(
+            query.get("file").map(String::as_str),
+            Some("资料库/原文/示例")
+        );
+    }
+
+    #[test]
+    fn same_named_assets_use_stable_references_and_reject_ambiguous_legacy_names() {
+        let first = image_attachment(
+            "asset-first",
+            "figure.png",
+            "资料库/附件/采集/first.png",
+            true,
+        );
+        let second = image_attachment(
+            "asset-second",
+            "figure.png",
+            "资料库/附件/采集/second.png",
+            true,
+        );
+        let attachments = vec![first, second];
+        validate_capture_attachment_reference_owners(
+            "![第一张](attachment://ref-asset-first)\n\n![第二张](attachment://ref-asset-second)",
+            &attachments,
+        )
+        .expect("same file names remain valid with unique stable references");
+
+        assert!(validate_capture_attachment_reference_owners(
+            "![旧式歧义引用](attachment://figure.png)",
+            &attachments,
+        )
+        .unwrap_err()
+        .contains("同时指向多个 asset_id"));
+    }
+
+    #[test]
+    fn faithful_source_materializes_name_encoded_name_and_repeated_asset_references() {
+        let attachment =
+            image_attachment("asset-1", "插图 1.png", "资料库/附件/采集/插图-1.png", true);
+        let encoded_name = encode_uri_component("插图 1.png");
+        let source = format!(
+            "第一段\n\n![图一](attachment://{encoded_name})\n\n第二段\n\n![重复](attachment://asset-1)\n\n第三段\n\n![[attachment://{encoded_name}]]\n\n第四段\n\n![带标题](<attachment://{encoded_name}> \"原图标题\")"
+        );
+        let (materialized, referenced) =
+            materialize_capture_raw_markdown(&source, &[attachment], "file")
+                .expect("materialize original image positions");
+        assert_eq!(
+            materialized
+                .matches("![[资料库/附件/采集/插图-1.png]]")
+                .count(),
+            4
+        );
+        assert!(referenced.contains("asset-1"));
+        assert!(!materialized.contains("attachment://"));
+        assert!(materialized.find("第一段").unwrap() < materialized.find("第二段").unwrap());
+        assert!(materialized.find("第二段").unwrap() < materialized.find("第三段").unwrap());
+        assert!(materialized.find("第三段").unwrap() < materialized.find("第四段").unwrap());
+    }
+
+    #[test]
+    fn faithful_source_materializes_every_reference_id_for_one_asset() {
+        let mut attachment = image_attachment(
+            "asset-shared",
+            "shared.png",
+            "资料库/附件/采集/shared.png",
+            true,
+        );
+        attachment.reference_id = Some("ref-first".to_string());
+        attachment.reference_ids = vec!["ref-first".to_string(), "ref-second".to_string()];
+        let source = "前文\n\n![第一处](attachment://ref-first)\n\n中间\n\n![第二处](attachment://ref-second)\n\n后文";
+        let (materialized, referenced) =
+            materialize_capture_raw_markdown(source, &[attachment], "file")
+                .expect("materialize all positions for one shared asset");
+        assert_eq!(
+            materialized
+                .matches("![[资料库/附件/采集/shared.png]]")
+                .count(),
+            2
+        );
+        assert!(referenced.contains("asset-shared"));
+        assert!(materialized.find("前文").unwrap() < materialized.find("中间").unwrap());
+        assert!(materialized.find("中间").unwrap() < materialized.find("后文").unwrap());
+
+        let mut incomplete = image_attachment(
+            "asset-shared",
+            "shared.png",
+            "资料库/附件/采集/shared.png",
+            true,
+        );
+        incomplete.reference_id = Some("ref-first".to_string());
+        incomplete.reference_ids = vec!["ref-first".to_string(), "ref-second".to_string()];
+        assert!(materialize_capture_raw_markdown(
+            "前文\n\n![仅第一处](attachment://ref-first)\n\n后文",
+            &[incomplete],
+            "file"
+        )
+        .unwrap_err()
+        .contains("部分图片位置"));
+
+        let mut prefix_collision = image_attachment(
+            "asset-prefix",
+            "prefix.png",
+            "资料库/附件/采集/prefix.png",
+            true,
+        );
+        prefix_collision.reference_id = Some("ref-1".to_string());
+        prefix_collision.reference_ids = vec!["ref-1".to_string(), "ref-10".to_string()];
+        assert!(materialize_capture_raw_markdown(
+            "![仅长引用](attachment://ref-10)",
+            &[prefix_collision],
+            "file"
+        )
+        .unwrap_err()
+        .contains("ref-1"));
+    }
+
+    #[test]
+    fn agent_source_places_one_visual_observation_at_every_exact_reference() {
+        let mut attachment = image_attachment(
+            "asset-shared",
+            "shared.png",
+            "资料库/附件/采集/shared.png",
+            true,
+        );
+        attachment.reference_id = Some("ref-first".to_string());
+        attachment.reference_ids = vec!["ref-first".to_string(), "ref-second".to_string()];
+        let analysis = serde_json::json!({
+            "analysis_markdown": "前文\n\n![第一处](attachment://ref-first)\n\n中间\n\n![第二处](attachment://ref-second)\n\n后文",
+            "tags": ["图片分析"],
+            "image_bindings": [image_binding(
+                "asset-shared",
+                &["ref-first", "ref-second"],
+                b"image fixture",
+                b"image fixture",
+                "image/png",
+                false,
+            )],
+            "image_observations": [{
+                "asset_id": "asset-shared",
+                "reference_id": "ref-first",
+                "observation": "同一张流程图，成本 $100",
+                "confidence": 0.9
+            }]
+        });
+        let markdown = build_agent_capture_markdown(
+            "多位置图片",
+            None,
+            "file",
+            "个人库",
+            Some("资料库/原文/多位置图片.md"),
+            &analysis,
+            &[attachment],
+            &[],
+        )
+        .expect("place one analyzed asset at every occurrence");
+        assert_eq!(markdown.matches("同一张流程图，成本 $100").count(), 2);
+        assert!(markdown.contains("reference `ref-first`"));
+        assert!(markdown.contains("reference `ref-second`"));
+        assert_eq!(
+            markdown.matches("\"asset_id\": \"asset-shared\"").count(),
+            2
+        );
+        assert_eq!(
+            markdown
+                .matches(&format!(
+                    "\"original_sha256\": \"{}\"",
+                    hash_bytes(b"image fixture")
+                ))
+                .count(),
+            2
+        );
+        assert_eq!(markdown.matches("\"derived\": false").count(), 2);
+        assert_eq!(markdown.matches("\"reference_ids\": [").count(), 2);
+        assert!(markdown.find("前文").unwrap() < markdown.find("中间").unwrap());
+        assert!(markdown.find("中间").unwrap() < markdown.find("后文").unwrap());
+    }
+
+    #[test]
+    fn agent_source_labels_legacy_shared_placeholders_with_all_reference_ids() {
+        let mut attachment = image_attachment(
+            "asset-shared",
+            "shared.png",
+            "资料库/附件/采集/shared.png",
+            true,
+        );
+        attachment.reference_id = Some("ref-first".to_string());
+        attachment.reference_ids = vec!["ref-first".to_string(), "ref-second".to_string()];
+        let analysis = serde_json::json!({
+            "analysis_markdown": "第一处\n\n![图](attachment://shared.png)\n\n第二处\n\n![图](attachment://shared.png)",
+            "image_bindings": [image_binding(
+                "asset-shared",
+                &["ref-first", "ref-second"],
+                b"image fixture",
+                b"image fixture",
+                "image/png",
+                false,
+            )],
+            "image_observations": [{
+                "asset_id": "asset-shared",
+                "observation": "旧格式图片",
+                "confidence": 0.8
+            }]
+        });
+        let markdown = build_agent_capture_markdown(
+            "旧占位图片",
+            None,
+            "file",
+            "个人库",
+            Some("资料库/原文/旧占位图片.md"),
+            &analysis,
+            &[attachment],
+            &[],
+        )
+        .expect("preserve legacy shared placeholder positions");
+        assert_eq!(markdown.matches("旧格式图片").count(), 2);
+        assert_eq!(
+            markdown
+                .matches("references `ref-first`, `ref-second`")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn agent_source_persists_large_derived_image_binding_without_changing_original_bytes() {
+        let original_bytes = vec![0xabu8; 4 * 1024 * 1024 + 1];
+        let analysis_bytes = b"derived jpeg analysis input";
+        let mut attachment = image_attachment(
+            "asset-large",
+            "large.png",
+            "资料库/附件/采集/large.png",
+            true,
+        );
+        attachment.reference_id = Some("ref-large".to_string());
+        attachment.reference_ids = vec!["ref-large".to_string()];
+        attachment.content_base64 =
+            Some(base64::engine::general_purpose::STANDARD.encode(original_bytes.as_slice()));
+        attachment.expected_sha256 = Some(hash_bytes(&original_bytes));
+        let original_base64 = attachment.content_base64.clone();
+        let analysis = serde_json::json!({
+            "analysis_markdown": "模型已通过派生输入理解大图。\n\n![大图](attachment://ref-large)",
+            "image_bindings": [image_binding(
+                "asset-large",
+                &["ref-large"],
+                &original_bytes,
+                analysis_bytes,
+                "image/jpeg",
+                true,
+            )],
+            "image_observations": [{
+                "asset_id": "asset-large",
+                "reference_id": "ref-large",
+                "observation": "大尺寸原图的有效内容",
+                "confidence": 0.93
+            }]
+        });
+        let markdown = build_agent_capture_markdown(
+            "大图派生分析",
+            None,
+            "file",
+            "个人库",
+            Some("资料库/原文/大图派生分析.md"),
+            &analysis,
+            std::slice::from_ref(&attachment),
+            &[],
+        )
+        .expect("persist a verified derived-image binding");
+        assert!(markdown.contains("\"derived\": true"));
+        assert!(markdown.contains(&format!(
+            "\"original_sha256\": \"{}\"",
+            hash_bytes(&original_bytes)
+        )));
+        assert!(markdown.contains(&format!(
+            "\"analysis_input_sha256\": \"{}\"",
+            hash_bytes(analysis_bytes)
+        )));
+        assert!(markdown.contains(&format!(
+            "\"original_byte_length\": {}",
+            original_bytes.len()
+        )));
+        assert!(markdown.contains(&format!(
+            "\"analysis_byte_length\": {}",
+            analysis_bytes.len()
+        )));
+        assert_eq!(attachment.content_base64, original_base64);
+    }
+
+    #[test]
+    fn agent_source_rejects_missing_or_conflicting_structured_image_bindings() {
+        let mut attachment = image_attachment(
+            "asset-required",
+            "required.png",
+            "资料库/附件/采集/required.png",
+            true,
+        );
+        attachment.reference_id = Some("ref-required".to_string());
+        attachment.reference_ids = vec!["ref-required".to_string()];
+        let missing = serde_json::json!({
+            "analysis_markdown": "自由文本声称 image_bindings 已完成，但没有结构化字段。",
+            "image_observations": [{
+                "asset_id": "asset-required",
+                "reference_id": "ref-required",
+                "observation": "图片内容",
+                "confidence": 0.9
+            }]
+        });
+        let missing_error = build_agent_capture_markdown(
+            "缺失 binding",
+            None,
+            "file",
+            "个人库",
+            Some("资料库/原文/缺失-binding.md"),
+            &missing,
+            std::slice::from_ref(&attachment),
+            &[],
+        )
+        .unwrap_err();
+        assert!(missing_error.contains("缺少结构化 image binding"));
+
+        let conflicting = serde_json::json!({
+            "analysis_markdown": "结构化 binding 的允许位置与附件冲突。",
+            "image_bindings": [image_binding(
+                "asset-required",
+                &["ref-not-allowed"],
+                b"image fixture",
+                b"image fixture",
+                "image/png",
+                false,
+            )],
+            "image_observations": [{
+                "asset_id": "asset-required",
+                "reference_id": "ref-required",
+                "observation": "图片内容",
+                "confidence": 0.9
+            }]
+        });
+        let conflict_error = build_agent_capture_markdown(
+            "冲突 binding",
+            None,
+            "file",
+            "个人库",
+            Some("资料库/原文/冲突-binding.md"),
+            &conflicting,
+            &[attachment],
+            &[],
+        )
+        .unwrap_err();
+        assert!(conflict_error.contains("允许位置与 image binding reference_ids 冲突"));
+    }
+
+    #[test]
+    fn dual_vault_gate_rejects_external_image_failures() {
+        let failure = serde_json::json!({
+            "url": "https://example.com/image.png",
+            "reason_code": "not_image_mime"
+        });
+        assert!(validate_external_image_localization("正文", &[failure])
+            .unwrap_err()
+            .contains("尚未完整本地化"));
+        assert!(validate_external_image_localization(
+            "正文\n\n[外链图片本地化失败：插图；响应不是图片]",
+            &[]
+        )
+        .unwrap_err()
+        .contains("尚未完整本地化"));
+        validate_external_image_localization("正文", &[])
+            .expect("complete source passes external image gate");
+    }
+
+    #[test]
+    fn faithful_source_rejects_unresolved_or_required_unplaced_images() {
+        let attachment = image_attachment(
+            "asset-required",
+            "required.png",
+            "资料库/附件/采集/required.png",
+            true,
+        );
+        assert!(
+            materialize_capture_raw_markdown("没有图片占位", &[attachment], "file")
+                .unwrap_err()
+                .contains("没有找到")
+        );
+        assert!(materialize_capture_raw_markdown(
+            "![未知](attachment://unknown-image)",
+            &[],
+            "url"
+        )
+        .unwrap_err()
+        .contains("未解析"));
+    }
+
+    #[test]
+    fn dual_vault_capture_prepares_and_atomically_commits_faithful_and_understood_notes() {
+        let _environment = TEST_ENVIRONMENT_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temporary = tempfile::tempdir().expect("create isolated dual-vault directory");
+        let home = temporary.path().join("home");
+        let vault_root = home.join("Yunspire/vault");
+        let agent_path = vault_root.join("Agent 库");
+        let personal_path = vault_root.join("个人库");
+        let app_data = temporary.path().join("app-data");
+        let config_path = temporary.path().join("obsidian.json");
+        for path in [&agent_path, &personal_path] {
+            fs::create_dir_all(path.join(".obsidian")).expect("create isolated Obsidian vault");
+        }
+        fs::create_dir_all(agent_path.join("知识库")).expect("create agent knowledge directory");
+        fs::write(
+            agent_path.join("知识库/既有知识.md"),
+            "# 既有知识\n\n知识管理与本地优先。\n",
+        )
+        .expect("write related note fixture");
+        let agent = agent_path.canonicalize().expect("canonicalize agent vault");
+        let personal = personal_path
+            .canonicalize()
+            .expect("canonicalize personal vault");
+        fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({
+                "vaults": {
+                    "vault-agent": {"path": agent.to_string_lossy(), "open": false},
+                    "vault-personal": {"path": personal.to_string_lossy(), "open": false}
+                }
+            }))
+            .expect("serialize dual-vault config"),
+        )
+        .expect("write dual-vault config");
+        let _variables = EnvironmentGuard::set(&[
+            ("YUNSPIRE_OBSIDIAN_CONFIG_PATH", &config_path),
+            ("YUNSPIRE_HOME_DIR", &home),
+        ]);
+        let database = RuntimeDatabase::open_test(&app_data.join("runtime.sqlite"))
+            .expect("open isolated runtime database");
+        let analysis_state = ModelAnalysisState::default();
+        let receipt = analysis_state
+            .issue("local")
+            .expect("issue model analysis receipt");
+        let state = ObsidianAdapterState::default();
+        let encoded_name = encode_uri_component("figure 1.png");
+        let analysis = serde_json::json!({
+            "summary": "本地知识管理资料",
+            "analysis_markdown": "这份资料说明了本地优先的知识管理方法。",
+            "tags": ["知识管理", "本地优先"],
+            "entities": ["Obsidian"],
+            "key_points": ["忠实原文与理解稿分离"],
+            "image_bindings": [image_binding(
+                "asset-figure-1",
+                &["ref-asset-figure-1"],
+                b"image fixture",
+                b"image fixture",
+                "image/png",
+                false,
+            )],
+            "image_observations": [{
+                "asset_id": "asset-figure-1",
+                "reference_id": "ref-asset-figure-1",
+                "observation": "一张双库信息流示意图",
+                "text": "个人库 -> Agent 库",
+                "context": "正文第一段之后",
+                "evidence": "图中箭头和库名",
+                "confidence": 0.94
+            }],
+            "relations": [{
+                "source_id": "paragraph-1",
+                "target_id": "asset-figure-1",
+                "relation": "图示说明",
+                "evidence": "正文明确引用该图",
+                "confidence": 0.91
+            }]
+        });
+        let preview = prepare_capture_vault_writes_inner(
+            &analysis_state,
+            &state,
+            &database,
+            CaptureVaultWriteInput {
+                raw_vault_id: "vault-personal".to_string(),
+                agent_vault_id: "vault-agent".to_string(),
+                raw_relative_path: "资料库/原文/双库资料.md".to_string(),
+                agent_relative_path: None,
+                title: "双库资料".to_string(),
+                source_url: Some("https://example.com/source".to_string()),
+                source_type: "file".to_string(),
+                raw_markdown: format!(
+                    "第一段原文。\n\n![原图](attachment://{encoded_name})\n\n第二段原文。"
+                ),
+                analysis: analysis.clone(),
+                attachments: vec![image_attachment(
+                    "asset-figure-1",
+                    "figure 1.png",
+                    "资料库/附件/采集/双库资料-1.png",
+                    true,
+                )],
+                external_image_failures: Vec::new(),
+                analysis_receipt: receipt.clone(),
+                operation_context: Some(OperationContext {
+                    task_id: Some("capture-task".to_string()),
+                    trace_id: Some("capture-trace".to_string()),
+                }),
+            },
+        )
+        .expect("prepare dual-vault capture");
+        assert!(preview.raw_note_included);
+        assert_eq!(preview.note_previews.len(), 2);
+        assert_eq!(preview.asset_previews.len(), 1);
+        assert_eq!(preview.agent_relative_path, "资料库/原文/双库资料.md");
+        assert!(preview
+            .agent_markdown
+            .contains("yunspire.agent-understood-source.v1"));
+        assert!(preview
+            .agent_markdown
+            .contains("content_role: analyzed_original"));
+        assert!(preview.agent_markdown.contains("asset-figure-1"));
+        assert!(preview.agent_markdown.contains("一张双库信息流示意图"));
+        assert!(preview.agent_markdown.contains("[[知识管理]]"));
+        assert!(preview
+            .related_notes
+            .iter()
+            .any(|path| path == "知识库/既有知识"));
+
+        let results = commit_capture_batch_inner(
+            &app_data,
+            &analysis_state,
+            &state,
+            &database,
+            preview
+                .note_previews
+                .iter()
+                .map(|item| item.approval_id.clone())
+                .collect(),
+            preview
+                .asset_previews
+                .iter()
+                .map(|item| item.approval_id.clone())
+                .collect(),
+            Some("capture".to_string()),
+        )
+        .expect("commit dual-vault capture atomically");
+        assert_eq!(results.len(), 3);
+        let raw_note = fs::read_to_string(personal.join("资料库/原文/双库资料.md"))
+            .expect("read faithful source note");
+        assert!(raw_note.contains("yunspire.faithful-source.v1"));
+        assert!(raw_note.contains("![[资料库/附件/采集/双库资料-1.png]]"));
+        assert!(raw_note.find("第一段原文").unwrap() < raw_note.find("第二段原文").unwrap());
+        assert!(!raw_note.contains("analysis_input_sha256"));
+        assert!(!raw_note.contains("这份资料说明了本地优先的知识管理方法。"));
+        let agent_note = fs::read_to_string(agent.join("资料库/原文/双库资料.md"))
+            .expect("read agent understood note");
+        assert!(agent_note.contains("knowledge_association: obsidian-tags-and-wikilinks"));
+        assert!(agent_note.contains("obsidian://open?"));
+        assert!(agent_note.contains("analysis_input_sha256"));
+        assert!(!agent_note.contains("第一段原文。"));
+        assert!(!agent_note.contains("第二段原文。"));
+        assert!(!agent_note.contains("## 模型理解后的原文"));
+        assert!(!agent_note.contains("## 综合分析"));
+        assert_eq!(agent_note.matches("## 分析内容").count(), 1);
+        assert_eq!(
+            agent_note
+                .matches("这份资料说明了本地优先的知识管理方法。")
+                .count(),
+            1
+        );
+        assert!(personal.join("资料库/附件/采集/双库资料-1.png").is_file());
+        assert_eq!(
+            fs::read(personal.join("资料库/附件/采集/双库资料-1.png"))
+                .expect("read unchanged faithful image bytes"),
+            b"image fixture"
+        );
+        assert!(!agent.join("资料库/附件/采集/双库资料-1.png").exists());
+        assert!(analysis_state.validate("local", &receipt).is_err());
+
+        let same_vault_receipt = analysis_state
+            .issue("local")
+            .expect("issue same-vault analysis receipt");
+        let same_vault_preview = prepare_capture_vault_writes_inner(
+            &analysis_state,
+            &state,
+            &database,
+            CaptureVaultWriteInput {
+                raw_vault_id: "vault-agent".to_string(),
+                agent_vault_id: "vault-agent".to_string(),
+                raw_relative_path: "资料库/原文/Agent单稿.md".to_string(),
+                agent_relative_path: None,
+                title: "Agent单稿".to_string(),
+                source_url: Some("https://example.com/agent-only".to_string()),
+                source_type: "url".to_string(),
+                raw_markdown: "只用于构建理解稿的源内容。".to_string(),
+                analysis: serde_json::json!({
+                    "summary": "Agent 单稿分析",
+                    "analysis_markdown": "这是应当保留的 Agent 分析内容。",
+                    "tags": ["单稿"],
+                    "entities": [],
+                    "key_points": ["同库不重复保存忠实原文"],
+                    "image_bindings": [],
+                    "image_observations": [],
+                    "relations": []
+                }),
+                attachments: Vec::new(),
+                external_image_failures: Vec::new(),
+                analysis_receipt: same_vault_receipt,
+                operation_context: None,
+            },
+        )
+        .expect("prepare one Agent note for a same-vault capture");
+        assert!(!same_vault_preview.raw_note_included);
+        assert_eq!(same_vault_preview.note_previews.len(), 1);
+        assert_eq!(same_vault_preview.asset_previews.len(), 0);
+        assert!(!same_vault_preview.agent_markdown.contains("raw_vault:"));
+        assert!(!same_vault_preview.agent_markdown.contains("raw_note:"));
+        assert!(!same_vault_preview.agent_markdown.contains("- 忠实原文："));
+        assert!(!same_vault_preview
+            .agent_markdown
+            .contains("只用于构建理解稿的源内容。"));
+        assert_eq!(
+            same_vault_preview
+                .agent_markdown
+                .matches("这是应当保留的 Agent 分析内容。")
+                .count(),
+            1
+        );
+
+        let same_vault_results = commit_capture_batch_inner(
+            &app_data,
+            &analysis_state,
+            &state,
+            &database,
+            same_vault_preview
+                .note_previews
+                .iter()
+                .map(|item| item.approval_id.clone())
+                .collect(),
+            Vec::new(),
+            Some("capture".to_string()),
+        )
+        .expect("commit one same-vault Agent note");
+        assert_eq!(same_vault_results.len(), 1);
+        let same_vault_agent_note = fs::read_to_string(agent.join("资料库/原文/Agent单稿.md"))
+            .expect("read same-vault Agent analysis note");
+        assert!(same_vault_agent_note.contains("yunspire.agent-understood-source.v1"));
+        assert!(!agent.join("资料库/来源原文/Agent单稿.md").exists());
+
+        let missing_binding_receipt = analysis_state
+            .issue("local")
+            .expect("issue missing-binding analysis receipt");
+        let mut missing_binding_analysis = analysis.clone();
+        missing_binding_analysis
+            .as_object_mut()
+            .expect("analysis object")
+            .remove("image_bindings");
+        let missing_binding = match prepare_capture_vault_writes_inner(
+            &analysis_state,
+            &state,
+            &database,
+            CaptureVaultWriteInput {
+                raw_vault_id: "vault-personal".to_string(),
+                agent_vault_id: "vault-agent".to_string(),
+                raw_relative_path: "资料库/原文/缺失 binding.md".to_string(),
+                agent_relative_path: None,
+                title: "缺失 binding".to_string(),
+                source_url: Some("https://example.com/missing-binding".to_string()),
+                source_type: "file".to_string(),
+                raw_markdown: format!("![原图](attachment://{encoded_name})"),
+                analysis: missing_binding_analysis,
+                attachments: vec![image_attachment(
+                    "asset-figure-1",
+                    "figure 1.png",
+                    "资料库/附件/采集/缺失-binding-1.png",
+                    true,
+                )],
+                external_image_failures: Vec::new(),
+                analysis_receipt: missing_binding_receipt,
+                operation_context: None,
+            },
+        ) {
+            Ok(_) => panic!("dual-vault preparation must reject a missing image binding"),
+            Err(error) => error,
+        };
+        assert!(missing_binding.contains("缺少结构化 image binding"));
+        assert!(state.pending_writes.lock().unwrap().is_empty());
+        assert!(state.pending_assets.lock().unwrap().is_empty());
+
+        let conflict_receipt = analysis_state
+            .issue("local")
+            .expect("issue replacement analysis receipt");
+        let conflict = match prepare_capture_vault_writes_inner(
+            &analysis_state,
+            &state,
+            &database,
+            CaptureVaultWriteInput {
+                raw_vault_id: "vault-personal".to_string(),
+                agent_vault_id: "vault-agent".to_string(),
+                raw_relative_path: "资料库/原文/双库资料.md".to_string(),
+                agent_relative_path: None,
+                title: "双库资料".to_string(),
+                source_url: Some("https://example.com/changed-source".to_string()),
+                source_type: "file".to_string(),
+                raw_markdown: format!("同标题但内容不同。\n\n![原图](attachment://{encoded_name})"),
+                analysis,
+                attachments: vec![image_attachment(
+                    "asset-figure-1",
+                    "figure 1.png",
+                    "资料库/附件/采集/双库资料-1.png",
+                    true,
+                )],
+                external_image_failures: Vec::new(),
+                analysis_receipt: conflict_receipt,
+                operation_context: None,
+            },
+        ) {
+            Ok(_) => panic!("capture preparation must never overwrite an existing source"),
+            Err(error) => error,
+        };
+        assert!(conflict.contains("已阻止覆盖忠实原文"));
+        assert!(state.pending_writes.lock().unwrap().is_empty());
+        assert!(state.pending_assets.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn capture_batch_commits_markdown_asset_checkpoint_and_operation_event() {
+        let _environment = TEST_ENVIRONMENT_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temporary = tempfile::tempdir().expect("create isolated directory");
+        let vault_path = temporary.path().join("vault");
+        let app_data = temporary.path().join("app-data");
+        let config_path = temporary.path().join("obsidian.json");
+        fs::create_dir_all(vault_path.join(".obsidian")).expect("create isolated vault");
+        let vault = vault_path
+            .canonicalize()
+            .expect("canonicalize isolated vault");
+        fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({
+                "vaults": {
+                    "vault-capture": {
+                        "path": vault.to_string_lossy(),
+                        "open": false
+                    }
+                }
+            }))
+            .expect("serialize isolated Obsidian config"),
+        )
+        .expect("write isolated Obsidian config");
+        let _variables = EnvironmentGuard::set(&[("YUNSPIRE_OBSIDIAN_CONFIG_PATH", &config_path)]);
+        let database = RuntimeDatabase::open_test(&app_data.join("runtime.sqlite"))
+            .expect("open isolated runtime database");
+        let analysis_state = ModelAnalysisState::default();
+        let receipt = analysis_state
+            .issue("local")
+            .expect("issue model analysis receipt");
+        let state = ObsidianAdapterState::default();
+        let note_approval = "note-approval".to_string();
+        let asset_approval = "asset-approval".to_string();
+        let note_path = vault.join("资料库/网页/原文.md");
+        let asset_path = vault.join("资料库/附件/source.json");
+        state
+            .pending_writes
+            .lock()
+            .expect("lock pending notes")
+            .insert(
+                note_approval.clone(),
+                PendingWrite {
+                    task_id: Some("capture-task".to_string()),
+                    trace_id: Some("capture-trace".to_string()),
+                    vault_id: "vault-capture".to_string(),
+                    vault_path: vault.clone(),
+                    relative_path: "资料库/网页/原文.md".to_string(),
+                    target_path: note_path.clone(),
+                    content: "---\ntags: [\"采集\"]\n---\n\n# 原文\n\n模型分析已完成。\n"
+                        .to_string(),
+                    expected_hash: None,
+                    previous_hash: None,
+                    analysis_receipt: receipt.clone(),
+                    created_at: SystemTime::now(),
+                },
+            );
+        state
+            .pending_assets
+            .lock()
+            .expect("lock pending assets")
+            .insert(
+                asset_approval.clone(),
+                PendingAssetWrite {
+                    task_id: Some("capture-task".to_string()),
+                    trace_id: Some("capture-trace".to_string()),
+                    vault_id: "vault-capture".to_string(),
+                    vault_path: vault.clone(),
+                    relative_path: "资料库/附件/source.json".to_string(),
+                    target_path: asset_path.clone(),
+                    source: PendingAssetSource::Bytes(
+                        br#"{"schema":"yunspire.capture.verification.v1"}"#.to_vec(),
+                    ),
+                    content_hash: hash_bytes(br#"{"schema":"yunspire.capture.verification.v1"}"#),
+                    previous_hash: None,
+                    analysis_receipt: receipt.clone(),
+                    created_at: SystemTime::now(),
+                },
+            );
+
+        let results = commit_capture_batch_inner(
+            &app_data,
+            &analysis_state,
+            &state,
+            &database,
+            vec![note_approval],
+            vec![asset_approval],
+            Some("capture".to_string()),
+        )
+        .expect("commit isolated capture batch");
+
+        assert_eq!(results.len(), 2);
+        assert!(fs::read_to_string(&note_path)
+            .expect("read committed note")
+            .contains("模型分析已完成"));
+        assert_eq!(
+            fs::read_to_string(&asset_path).expect("read committed asset"),
+            r#"{"schema":"yunspire.capture.verification.v1"}"#
+        );
+        assert!(results
+            .iter()
+            .all(|result| Path::new(&result.checkpoint_path).is_file()));
+        assert!(analysis_state.validate("local", &receipt).is_err());
+        assert!(state.pending_writes.lock().unwrap().is_empty());
+        assert!(state.pending_assets.lock().unwrap().is_empty());
+        let events = database
+            .list_native_operation_events(10)
+            .expect("read operation events");
+        assert_eq!(
+            events.last().map(|event| event.event_type.as_str()),
+            Some("vault.capture.batch.write")
+        );
+    }
 }

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yunspire.local/schemas/inbound-content-record.schema.json",
+  "title": "InboundContentRecord",
+  "description": "A durable, local-workspace processing ledger for untrusted captured content. Raw body, credentials, and ephemeral analysis receipts are intentionally excluded.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "state", "source_type", "source_ref", "title", "content_hash", "content_characters", "attachment_count", "image_count", "extraction", "analysis", "quality", "target"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 180 },
+    "state": {
+      "type": "string",
+      "enum": ["extracted", "analyzing", "analysis_pending", "quality_rejected", "ready_to_write", "writing", "committed", "failed", "cancelled"]
+    },
+    "source_type": { "type": "string", "minLength": 1, "maxLength": 32 },
+    "source_ref": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+    "content_hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "content_characters": { "type": "integer", "minimum": 0, "maximum": 4194304 },
+    "attachment_count": { "type": "integer", "minimum": 0, "maximum": 100000 },
+    "image_count": { "type": "integer", "minimum": 0, "maximum": 200000 },
+    "extraction": { "type": "object" },
+    "analysis": {
+      "type": "object",
+      "description": "Contains only structural analysis evidence, selected model identity, and batch completeness. It never contains an analysisReceipt."
+    },
+    "quality": {
+      "type": "object",
+      "description": "The deterministic pre-write gate decision, score, and failed checks."
+    },
+    "target": {
+      "type": "object",
+      "description": "Resolved Vault identifier and planned relative paths; no absolute filesystem path is stored."
+    },
+    "task_id": { "type": ["string", "null"], "maxLength": 180 },
+    "failure_reason": { "type": ["string", "null"], "maxLength": 4000 }
+  }
+}

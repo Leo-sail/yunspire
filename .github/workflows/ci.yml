@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  verify:
     runs-on: macos-14
     timeout-minutes: 45
     steps:
@@ -22,6 +22,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - run: npm run audit:release
       - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt, clippy
@@ -29,7 +30,5 @@ jobs:
         with:
           workspaces: src-tauri
       - run: npm ci
-      - run: npm run build
-      - run: npm run native:fmt:check
-      - run: npm run native:clippy
+      - run: npm run verify
       - run: npm run tauri:build:debug

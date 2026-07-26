@@ -241,6 +241,10 @@ PageResult render_model_ready_page(
 }  // namespace
 
 int wmain(int argc, wchar_t* argv[]) {
+    if (argc == 2 && std::wstring(argv[1]) == L"--self-test") {
+        emit_result(0, {}, {"native_adapter_ready"}, {});
+        return 0;
+    }
     if (argc < 2) {
         emit_result(0, {}, {}, {"pdf_path_missing"});
         return 0;

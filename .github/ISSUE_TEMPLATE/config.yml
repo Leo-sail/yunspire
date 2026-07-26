@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: 安全问题 / Security
+  - name: 安全问题 / Security issue
     url: mailto:leochang210@gmail.com
-    about: 涉及数据、凭据或权限的问题请先通过邮件报告 / Report security issues privately
+    about: 请按 SECURITY.md 私下报告 / Report privately under SECURITY.md
   - name: 商业授权 / Commercial licensing
     url: mailto:leochang210@gmail.com
-    about: 商业使用前请联系授权 / Contact me before any commercial use
+    about: 商业使用必须事先取得书面授权 / Commercial use requires prior written authorization

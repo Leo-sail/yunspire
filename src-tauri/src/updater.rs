@@ -367,3 +367,44 @@ pub fn rollback_update_backup(
         completed_at: Utc::now().to_rfc3339(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semantic_versions_compare_without_accepting_invalid_input() {
+        assert!(version_is_newer("v0.2.0", "0.1.9"));
+        assert!(version_is_newer("1.0.1", "1.0"));
+        assert!(!version_is_newer("1.0.0", "1.0.0"));
+        assert!(!version_is_newer("latest", "1.0.0"));
+    }
+
+    #[test]
+    fn snapshot_copy_preserves_files_and_skips_symlinks() {
+        let temporary = tempfile::tempdir().expect("create temporary root");
+        let source = temporary.path().join("vault");
+        let destination = temporary.path().join("snapshot");
+        fs::create_dir_all(source.join("资料")).expect("create source directory");
+        fs::write(source.join("资料/笔记.md"), "# 内容").expect("write source note");
+        let mut files = 0;
+        let mut bytes = 0;
+        let mut symlinks = 0;
+        copy_snapshot_tree(
+            &source,
+            &source,
+            &destination,
+            &mut files,
+            &mut bytes,
+            &mut symlinks,
+        )
+        .expect("copy snapshot");
+        assert_eq!(files, 1);
+        assert!(bytes > 0);
+        assert_eq!(symlinks, 0);
+        assert_eq!(
+            fs::read_to_string(destination.join("资料/笔记.md")).expect("read snapshot"),
+            "# 内容"
+        );
+    }
+}

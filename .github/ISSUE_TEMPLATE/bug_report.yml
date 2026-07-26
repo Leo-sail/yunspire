@@ -1,33 +1,32 @@
 name: 缺陷报告 / Bug report
-description: 报告可复现的问题 / Report a reproducible problem
+description: 向我报告可复现的云枢问题 / Report a reproducible Yunspire problem
 title: "[Bug] "
-labels: ["bug"]
+labels: ["bug", "needs-triage"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你帮助我改进云枢。请移除密钥、私人 Vault 内容和本机绝对路径。
+        Thank you for helping me improve Yunspire. Remove keys, private Vault content, and machine-specific absolute paths.
   - type: input
     id: version
     attributes:
-      label: 云枢版本 / Version
-      placeholder: 0.1.0
+      label: 云枢版本 / Yunspire version
+      placeholder: 0.1.1
     validations:
       required: true
   - type: input
     id: environment
     attributes:
-      label: 系统环境 / Environment
-      placeholder: macOS or Windows version, device architecture, and Obsidian version
+      label: 环境 / Environment
+      description: macOS 版本、芯片、Obsidian 版本 / macOS version, chip, and Obsidian version
     validations:
       required: true
   - type: textarea
     id: steps
     attributes:
-      label: 复现步骤 / Steps to reproduce
-      placeholder: 从打开云枢开始，按顺序写清每一步 / List each step from launch
-    validations:
-      required: true
-  - type: textarea
-    id: result
-    attributes:
-      label: 实际结果 / Actual result
+      label: 复现步骤 / Reproduction steps
+      description: 使用最小、可重复的步骤 / Provide minimal repeatable steps
     validations:
       required: true
   - type: textarea
@@ -37,7 +36,24 @@ body:
     validations:
       required: true
   - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果 / Actual result
+    validations:
+      required: true
+  - type: textarea
     id: evidence
     attributes:
-      label: 补充信息 / Additional context
-      description: 可附脱敏日志或截图。不要提交 API 密钥、私人 Vault 内容或本机绝对路径。Attach sanitized logs or screenshots only.
+      label: 脱敏证据 / Sanitized evidence
+      description: 可提供日志、截图或 trace ID，但不要包含私人内容 / Logs, screenshots, or trace IDs without private content
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交确认 / Submission checks
+      options:
+        - label: 我已搜索现有 Issue / I searched existing Issues
+          required: true
+        - label: 我已删除密钥、Cookie、私人内容和本机绝对路径 / I removed secrets, private content, and machine paths
+          required: true
+        - label: 这不是应通过 SECURITY.md 私下报告的安全漏洞 / This is not a vulnerability requiring private reporting under SECURITY.md
+          required: true

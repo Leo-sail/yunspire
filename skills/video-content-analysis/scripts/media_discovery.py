@@ -9,7 +9,7 @@ from urllib.parse import unquote, urljoin, urlparse, urlunparse
 
 
 MEDIA_SUFFIXES = (
-    ".mp4", ".mov", ".m4v", ".webm", ".mp3", ".m4a", ".aac", ".wav", ".aif",
+    ".mp4", ".mov", ".m4v", ".webm", ".avi", ".mp3", ".m4a", ".aac", ".wav", ".aif",
     ".aiff", ".caf", ".flac", ".ogg", ".ts",
 )
 SUBTITLE_SUFFIXES = (".vtt", ".srt", ".ass", ".ttml")
