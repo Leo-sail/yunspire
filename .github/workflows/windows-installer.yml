@@ -33,6 +33,9 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Audit release source tree
+        run: npm run audit:release
+
       - name: Set up Rust 1.88 x64 MSVC
         uses: dtolnay/rust-toolchain@1.88.0
         with:
@@ -43,9 +46,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-
-      - name: Audit release source tree
-        run: npm run audit:release
 
       - name: Install locked JavaScript dependencies
         run: npm ci

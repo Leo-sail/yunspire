@@ -22,13 +22,13 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - run: npm run audit:release
       - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - run: npm run audit:release
       - run: npm ci
       - run: npm run verify
       - run: npm run tauri:build:debug
