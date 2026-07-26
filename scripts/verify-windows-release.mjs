@@ -109,6 +109,39 @@ function runJson(path, args = [], options = {}) {
   }
 }
 
+function gitRevision(revision) {
+  const result = spawnSync('git', ['rev-parse', revision], {
+    cwd: root,
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 30_000,
+  });
+  const value = result.stdout?.trim().toLowerCase();
+  if (result.error || result.status !== 0 || !/^[0-9a-f]{40}$/u.test(value || '')) {
+    throw new Error(`无法解析发布源码版本 ${revision}：${result.error || result.stderr || value || 'unknown'}`);
+  }
+  return value;
+}
+
+function githubRunValue(name) {
+  const value = process.env[name]?.trim() || null;
+  if (value && !/^\d+$/u.test(value)) {
+    throw new Error(`无效的 GitHub Actions ${name}：${value}`);
+  }
+  if (process.env.GITHUB_ACTIONS === 'true' && !value) {
+    throw new Error(`GitHub Actions 发布缺少 ${name}`);
+  }
+  return value;
+}
+
+function workflowGate(name) {
+  const outcome = process.env[name]?.trim().toLowerCase() || null;
+  if (process.env.GITHUB_ACTIONS === 'true' && outcome !== 'success') {
+    throw new Error(`GitHub Actions 发布门禁未通过 ${name}：${outcome || 'missing'}`);
+  }
+  return outcome === 'success' ? true : null;
+}
+
 function pythonUtf8Environment() {
   return {
     ...process.env,
@@ -691,7 +724,14 @@ async function verifyInstalledBundle(installer) {
     if (installedRuntimeManifest.schema !== 'yunspire.windows-python-runtime.v1') {
       throw new Error('安装后的 Python 运行时清单无效');
     }
-    return await smokeInstalledResources(installDirectory, installedPython);
+    return {
+      unicodeSilentInstall: true,
+      applicationPortableExecutable: true,
+      applicationAuthenticodeStatus: 'NotSigned',
+      installedResourceIntegrity: true,
+      installedRuntimeIntegrity: true,
+      ...await smokeInstalledResources(installDirectory, installedPython),
+    };
   } finally {
     const entries = await readdir(installDirectory, { withFileTypes: true }).catch(() => []);
     const uninstaller = entries.find((entry) => entry.isFile() && /^uninstall.*\.exe$/iu.test(entry.name));
@@ -736,21 +776,44 @@ async function packageBundle() {
       sha256: await sha256(file.path),
     });
   }
-  await writeFile(
-    join(artifactDirectory, 'SHA256SUMS.txt'),
-    `${installerSha256}  ${artifactName}\n`,
-    'utf8',
-  );
-  await writeFile(join(artifactDirectory, 'windows-build-manifest.json'), JSON.stringify({
+  const sourceSha = gitRevision('HEAD');
+  const githubSha = process.env.GITHUB_SHA?.trim().toLowerCase() || null;
+  if (githubSha && githubSha !== sourceSha) {
+    throw new Error(`GitHub Actions 源码 SHA 与检出版本不一致：${githubSha} != ${sourceSha}`);
+  }
+  const sourceTree = gitRevision('HEAD^{tree}');
+  const manifestPath = join(artifactDirectory, 'windows-build-manifest.json');
+  await writeFile(manifestPath, JSON.stringify({
     schema: 'yunspire.windows-installer.v1',
     version: packageJson.version,
     architecture: 'x64',
     runner: process.env.RUNNER_NAME || 'local-windows',
+    sourceSha,
+    sourceTree,
+    workflowRunId: githubRunValue('GITHUB_RUN_ID'),
+    workflowRunAttempt: githubRunValue('GITHUB_RUN_ATTEMPT'),
     unsigned: true,
     installer: { name: artifactName, byteLength: installerSize, sha256: installerSha256 },
     resources: resourceManifest,
+    buildVerification: {
+      releaseAudit: workflowGate('YUNSPIRE_RELEASE_AUDIT_OUTCOME'),
+      lockedDependencies: workflowGate('YUNSPIRE_LOCKED_DEPENDENCIES_OUTCOME'),
+      pythonRuntime: true,
+      nativeHelpers: true,
+      mediaAndSpeechHelpers: true,
+      productVerification: workflowGate('YUNSPIRE_PRODUCT_VERIFICATION_OUTCOME'),
+      helperVerification: true,
+      nsisInstaller: true,
+      installerAuthenticodeStatus: 'NotSigned',
+    },
     installedVerification,
   }, null, 2) + '\n', 'utf8');
+  const manifestSha256 = await sha256(manifestPath);
+  await writeFile(
+    join(artifactDirectory, 'SHA256SUMS.txt'),
+    `${installerSha256}  ${artifactName}\n${manifestSha256}  windows-build-manifest.json\n`,
+    'utf8',
+  );
   console.log(`WINDOWS_NSIS_ARTIFACT_OK path=${artifactInstaller} sha256=${installerSha256}`);
 }
 

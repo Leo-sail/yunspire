@@ -34,6 +34,7 @@ jobs:
           cache: npm
 
       - name: Audit release source tree
+        id: release_audit
         run: npm run audit:release
 
       - name: Set up Rust 1.88 x64 MSVC
@@ -48,6 +49,7 @@ jobs:
           workspaces: src-tauri
 
       - name: Install locked JavaScript dependencies
+        id: locked_dependencies
         run: npm ci
 
       - name: Build Windows Python runtime
@@ -60,6 +62,7 @@ jobs:
         run: npm run build:windows-media-helper
 
       - name: Run complete product verification
+        id: product_verification
         run: npm run verify
 
       - name: Verify official Python runtime and native helpers
@@ -69,6 +72,10 @@ jobs:
         run: npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis --no-sign --ci
 
       - name: Verify installed Unicode PDF, media, speech, and prepare checksums
+        env:
+          YUNSPIRE_RELEASE_AUDIT_OUTCOME: ${{ steps.release_audit.outcome }}
+          YUNSPIRE_LOCKED_DEPENDENCIES_OUTCOME: ${{ steps.locked_dependencies.outcome }}
+          YUNSPIRE_PRODUCT_VERIFICATION_OUTCOME: ${{ steps.product_verification.outcome }}
         run: node scripts/verify-windows-release.mjs bundle
 
       - name: Upload unsigned installer and checksums
