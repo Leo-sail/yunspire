@@ -174,7 +174,7 @@ if (mediaSampleNullChecks.length !== 2) failures.push(`Windows media COM sample 
 if (windowsPdfHelper.includes('fs::u8path(')) failures.push('Windows PDF helper still uses deprecated C++20 filesystem::u8path');
 const wholePhraseCasts = windowsSpeechHelper.match(/static_cast<ULONG>\(SP_GETWHOLEPHRASE\)/gu) || [];
 if (wholePhraseCasts.length !== 2) failures.push(`Windows speech whole-phrase indexes are not type-safe: ${wholePhraseCasts.length}/2`);
-for (const windowsSignatureProbePrimitive of ['$ErrorActionPreference = "Stop"', '-ErrorAction Stop', 'Authenticode signature probe returned no result', 'ConvertTo-Json -InputObject ([string]$status)', 'rejectStderr: true']) {
+for (const windowsSignatureProbePrimitive of ["runJson('pwsh.exe'", '$ErrorActionPreference = "Stop"', '-ErrorAction Stop', 'Authenticode signature probe returned no result', 'ConvertTo-Json -InputObject ([string]$status)', 'rejectStderr: true']) {
   if (!windowsReleaseVerifier.includes(windowsSignatureProbePrimitive)) {
     failures.push(`Windows Authenticode probe is not fail-closed: ${windowsSignatureProbePrimitive}`);
   }

@@ -61,7 +61,7 @@ async function assertPortableExecutable(path) {
 
 function assertAuthenticodeNotSigned(path, label) {
   const signaturePathVariable = 'YUNSPIRE_AUTHENTICODE_PATH';
-  const signature = runJson('powershell.exe', [
+  const signature = runJson('pwsh.exe', [
     '-NoLogo',
     '-NoProfile',
     '-NonInteractive',
