@@ -209,7 +209,10 @@ int wmain(int argc, wchar_t** argv) {
       if (event.eEventId == SPEI_RECOGNITION && event.lParam) {
         ISpRecoResult* result = reinterpret_cast<ISpRecoResult*>(event.lParam);
         LPWSTR text = nullptr;
-        if (SUCCEEDED(result->GetText(SP_GETWHOLEPHRASE, SP_GETWHOLEPHRASE, TRUE, &text, nullptr)) && text) {
+        if (SUCCEEDED(result->GetText(
+              static_cast<ULONG>(SP_GETWHOLEPHRASE),
+              static_cast<ULONG>(SP_GETWHOLEPHRASE),
+              TRUE, &text, nullptr)) && text) {
           SPRECORESULTTIMES times = {};
           if (SUCCEEDED(result->GetResultTimes(&times))) {
             segments.push_back({times.ullStart / 10000, (times.ullStart + times.ullLength) / 10000, utf8(text)});

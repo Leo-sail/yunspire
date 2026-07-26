@@ -163,6 +163,9 @@ const mediaStreamIndexCasts = windowsMediaHelper.match(/static_cast<DWORD>\(MF_S
 if (mediaStreamIndexCasts.length < 12) failures.push(`Windows media stream indexes are not type-safe: ${mediaStreamIndexCasts.length}/12`);
 const mediaSampleNullChecks = windowsMediaHelper.match(/sample\.Get\(\) == nullptr/gu) || [];
 if (mediaSampleNullChecks.length !== 2) failures.push(`Windows media COM sample checks are incomplete: ${mediaSampleNullChecks.length}/2`);
+if (windowsPdfHelper.includes('fs::u8path(')) failures.push('Windows PDF helper still uses deprecated C++20 filesystem::u8path');
+const wholePhraseCasts = windowsSpeechHelper.match(/static_cast<ULONG>\(SP_GETWHOLEPHRASE\)/gu) || [];
+if (wholePhraseCasts.length !== 2) failures.push(`Windows speech whole-phrase indexes are not type-safe: ${wholePhraseCasts.length}/2`);
 if (!videoExtractor.includes('yunspire-media.exe') || !videoExtractor.includes('yunspire-speech.exe')) failures.push('Windows packaged media helpers are not dispatched by the video extractor');
 if (!appSource.includes('function resolveHistoricalImageReferences(')) failures.push('historical image reference resolver is missing');
 if (!appSource.includes("mode === 'initial' ? `图片记忆")) failures.push('first image analysis memory path is missing');

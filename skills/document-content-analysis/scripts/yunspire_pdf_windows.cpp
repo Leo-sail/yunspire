@@ -204,7 +204,7 @@ PageResult render_model_ready_page(
     }
     std::ostringstream name;
     name << "pdf-page-" << std::setw(5) << std::setfill('0') << page_number << ".jpg";
-    const fs::path destination = output_directory / fs::u8path(name.str());
+    const fs::path destination = output_directory / fs::path(name.str());
 
     std::uint32_t long_edge = kInitialLongEdgePixels;
     auto [width, height] = render_dimensions(size.Width, size.Height, long_edge);
