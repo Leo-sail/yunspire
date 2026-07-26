@@ -66,14 +66,21 @@ function assertAuthenticodeNotSigned(path, label) {
     '-NoProfile',
     '-NonInteractive',
     '-Command',
-    `$signature = Get-AuthenticodeSignature -LiteralPath $env:${signaturePathVariable}; `
-      + '[PSCustomObject]@{ status = [string]$signature.Status } | ConvertTo-Json -Compress',
+    '$ErrorActionPreference = "Stop"; '
+      + `$signature = Get-AuthenticodeSignature -LiteralPath $env:${signaturePathVariable} -ErrorAction Stop; `
+      + 'if ($null -eq $signature) { throw "Authenticode signature probe returned no result" }; '
+      + '$status = $signature.Status; '
+      + 'if ($null -eq $status) { throw "Authenticode signature probe returned no status" }; '
+      + '$status = $status.ToString(); '
+      + 'if ([string]::IsNullOrWhiteSpace($status)) { throw "Authenticode signature probe returned an empty status" }; '
+      + 'ConvertTo-Json -InputObject ([string]$status) -Compress',
   ], {
     env: { ...process.env, [signaturePathVariable]: path },
     timeout: 60_000,
+    rejectStderr: true,
   });
-  if (signature.status !== 'NotSigned') {
-    throw new Error(`${label} Authenticode 状态不是 NotSigned：${signature.status || 'unknown'}；${path}`);
+  if (signature !== 'NotSigned') {
+    throw new Error(`${label} Authenticode 状态不是 NotSigned：${signature || 'unknown'}；${path}`);
   }
 }
 
@@ -91,6 +98,9 @@ function runJson(path, args = [], options = {}) {
   }
   if (options.stdoutIncludes && !result.stdout.includes(options.stdoutIncludes)) {
     throw new Error(`执行器没有原样输出预期的 UTF-8 文本“${options.stdoutIncludes}”：${path}`);
+  }
+  if (options.rejectStderr && result.stderr.trim()) {
+    throw new Error(`执行器写入了 stderr：${path}\n${result.stderr}`.trim());
   }
   try {
     return JSON.parse(result.stdout);

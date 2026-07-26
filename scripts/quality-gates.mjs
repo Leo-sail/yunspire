@@ -42,6 +42,7 @@ const videoExtractor = await readText('skills/video-content-analysis/scripts/ext
 const windowsMediaHelper = await readText('skills/video-content-analysis/scripts/yunspire_media_windows.cpp');
 const windowsSpeechHelper = await readText('skills/video-content-analysis/scripts/yunspire_speech_windows.cpp');
 const windowsMediaBuild = await readText('scripts/build-windows-media-helper.mjs');
+const windowsReleaseVerifier = await readText('scripts/verify-windows-release.mjs');
 const officeParsers = Object.fromEntries(await Promise.all(['ooxml_word.py', 'ooxml_excel.py', 'ooxml_ppt.py'].map(async (fileName) => [
   fileName,
   await readText('skills/document-content-analysis/scripts', fileName),
@@ -173,6 +174,11 @@ if (mediaSampleNullChecks.length !== 2) failures.push(`Windows media COM sample 
 if (windowsPdfHelper.includes('fs::u8path(')) failures.push('Windows PDF helper still uses deprecated C++20 filesystem::u8path');
 const wholePhraseCasts = windowsSpeechHelper.match(/static_cast<ULONG>\(SP_GETWHOLEPHRASE\)/gu) || [];
 if (wholePhraseCasts.length !== 2) failures.push(`Windows speech whole-phrase indexes are not type-safe: ${wholePhraseCasts.length}/2`);
+for (const windowsSignatureProbePrimitive of ['$ErrorActionPreference = "Stop"', '-ErrorAction Stop', 'Authenticode signature probe returned no result', 'ConvertTo-Json -InputObject ([string]$status)', 'rejectStderr: true']) {
+  if (!windowsReleaseVerifier.includes(windowsSignatureProbePrimitive)) {
+    failures.push(`Windows Authenticode probe is not fail-closed: ${windowsSignatureProbePrimitive}`);
+  }
+}
 if (!videoExtractor.includes('yunspire-media.exe') || !videoExtractor.includes('yunspire-speech.exe')) failures.push('Windows packaged media helpers are not dispatched by the video extractor');
 if (!appSource.includes('function resolveHistoricalImageReferences(')) failures.push('historical image reference resolver is missing');
 if (!appSource.includes("mode === 'initial' ? `图片记忆")) failures.push('first image analysis memory path is missing');
