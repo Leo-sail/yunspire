@@ -113,6 +113,7 @@ async function compile(helper, vcvars) {
   const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', command], {
     cwd: root,
     encoding: 'utf8',
+    windowsVerbatimArguments: true,
     windowsHide: true,
   });
   if (result.status !== 0) {

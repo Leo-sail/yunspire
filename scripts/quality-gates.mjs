@@ -141,6 +141,11 @@ for (const windowsSpeechPrimitive of ['CLSID_SpInprocRecognizer', 'LoadDictation
 for (const windowsBuildPrimitive of ['VsDevCmd.bat', 'yunspire-media.exe', 'yunspire-speech.exe', 'mfreadwrite.lib', 'sapi.lib']) {
   if (!windowsMediaBuild.includes(windowsBuildPrimitive)) failures.push(`Windows media packaging primitive is missing: ${windowsBuildPrimitive}`);
 }
+for (const [label, buildScript] of [['document/image', windowsNativeBuild], ['media/speech', windowsMediaBuild]]) {
+  if (!buildScript.includes('windowsVerbatimArguments: true')) {
+    failures.push(`Windows ${label} helper build must preserve cmd.exe quoting for Visual Studio paths`);
+  }
+}
 if (!videoExtractor.includes('yunspire-media.exe') || !videoExtractor.includes('yunspire-speech.exe')) failures.push('Windows packaged media helpers are not dispatched by the video extractor');
 if (!appSource.includes('function resolveHistoricalImageReferences(')) failures.push('historical image reference resolver is missing');
 if (!appSource.includes("mode === 'initial' ? `图片记忆")) failures.push('first image analysis memory path is missing');

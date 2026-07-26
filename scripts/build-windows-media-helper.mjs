@@ -42,7 +42,11 @@ for (const [sourceName, outputName, libraries] of targets) {
   await rm(output, { force: true });
   await rm(object, { force: true });
   const command = `call "${developerCommand}" -arch=x64 -host_arch=x64 >nul && cl.exe /nologo /std:c++17 /O2 /EHsc /MT /utf-8 /permissive- /W4 /WX /external:W0 /external:anglebrackets /DUNICODE /D_UNICODE /Fo:"${object}" "${source}" /Fe:"${output}" /link ${libraries}`;
-  const result = spawnSync('cmd.exe', ['/d', '/s', '/c', command], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+  const result = spawnSync('cmd.exe', ['/d', '/s', '/c', command], {
+    encoding: 'utf8',
+    maxBuffer: 8 * 1024 * 1024,
+    windowsVerbatimArguments: true,
+  });
   if (result.status !== 0) {
     throw new Error(`构建 ${outputName} 失败：\n${result.stdout}\n${result.stderr}`.trim());
   }
