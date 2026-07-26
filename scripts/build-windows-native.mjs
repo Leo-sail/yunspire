@@ -96,7 +96,7 @@ async function compile(helper, vcvars) {
   const sourceBytes = await readFile(helper.source);
   const sourceHash = createHash('sha256')
     .update(sourceBytes)
-    .update('\0msvc-cxx17-mt-v1\0')
+    .update('\0msvc-cxx20-mt-v2\0')
     .update(helper.libraries.join('\0'))
     .digest('hex');
   const currentHash = await readFile(helper.stamp, 'utf8').catch(() => '');
@@ -104,7 +104,7 @@ async function compile(helper, vcvars) {
 
   const command = [
     'call', quote(vcvars), '>nul', '&&',
-    'cl.exe', '/nologo', '/std:c++17', '/EHsc', '/O2', '/MT', '/utf-8', '/permissive-',
+    'cl.exe', '/nologo', '/std:c++20', '/EHsc', '/O2', '/MT', '/utf-8', '/permissive-',
     '/W4', '/WX', '/external:W0', '/external:anglebrackets',
     '/DUNICODE', '/D_UNICODE', quote(helper.source),
     `/Fo:${quote(helper.object)}`, `/Fe:${quote(helper.output)}`,

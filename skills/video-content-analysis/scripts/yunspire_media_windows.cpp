@@ -1,4 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <mfapi.h>
 #include <mferror.h>
@@ -115,7 +118,8 @@ static double media_duration_seconds(const std::wstring& path) {
   if (FAILED(create_reader(path, false, reader.Put()))) return 0.0;
   PROPVARIANT duration;
   PropVariantInit(&duration);
-  const HRESULT hr = reader->GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE, MF_PD_DURATION, &duration);
+  const HRESULT hr = reader->GetPresentationAttribute(
+    static_cast<DWORD>(MF_SOURCE_READER_MEDIASOURCE), MF_PD_DURATION, &duration);
   const double seconds = SUCCEEDED(hr) && duration.vt == VT_UI8
     ? static_cast<double>(duration.uhVal.QuadPart) / 10000000.0
     : 0.0;
@@ -225,7 +229,8 @@ static bool extract_video_frames(const std::wstring& path, const std::wstring& o
     warnings->push_back("Windows Media Foundation 无法打开视频流");
     return false;
   }
-  if (FAILED(reader->SetStreamSelection(MF_SOURCE_READER_FIRST_AUDIO_STREAM, FALSE))) {
+  if (FAILED(reader->SetStreamSelection(
+        static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), FALSE))) {
     warnings->push_back("无法禁用视频读取器的音轨");
   }
   ComPtr<IMFMediaType> requested;
@@ -234,7 +239,8 @@ static bool extract_video_frames(const std::wstring& path, const std::wstring& o
       || FAILED(requested->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32))) {
     warnings->push_back("无法配置视频解码类型"); return false;
   }
-  hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, requested.Get());
+  hr = reader->SetCurrentMediaType(
+    static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, requested.Get());
   if (FAILED(hr)) {
     *codec_unavailable = true;
     warnings->push_back("Windows Media Foundation 缺少可将该视频流解码为 RGB32 的本地编解码器");
@@ -242,7 +248,10 @@ static bool extract_video_frames(const std::wstring& path, const std::wstring& o
   }
   ComPtr<IMFMediaType> current;
   UINT32 width = 0, height = 0;
-  if (FAILED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, current.Put())) || FAILED(MFGetAttributeSize(current.Get(), MF_MT_FRAME_SIZE, &width, &height)) || width == 0 || height == 0) {
+  if (FAILED(reader->GetCurrentMediaType(
+        static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), current.Put()))
+      || FAILED(MFGetAttributeSize(current.Get(), MF_MT_FRAME_SIZE, &width, &height))
+      || width == 0 || height == 0) {
     warnings->push_back("无法读取视频画面尺寸"); return false;
   }
   UINT32 raw_stride = MFGetAttributeUINT32(current.Get(), MF_MT_DEFAULT_STRIDE, width * 4);
@@ -256,7 +265,9 @@ static bool extract_video_frames(const std::wstring& path, const std::wstring& o
     DWORD flags = 0;
     LONGLONG timestamp = 0;
     ComPtr<IMFSample> sample;
-    hr = reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nullptr, &flags, &timestamp, sample.Put());
+    hr = reader->ReadSample(
+      static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0, nullptr,
+      &flags, &timestamp, sample.Put());
     if (FAILED(hr)) {
       *codec_unavailable = *codec_unavailable || codec_unavailable_hresult(hr);
       warnings->push_back("视频解码在读取画面时失败"); completed = false; break;
@@ -266,7 +277,7 @@ static bool extract_video_frames(const std::wstring& path, const std::wstring& o
     if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
       warnings->push_back("视频中途改变画面格式，已停止提取以避免生成错误画面"); completed = false; break;
     }
-    if (!sample || timestamp < next_candidate) continue;
+    if (sample.Get() == nullptr || timestamp < next_candidate) continue;
     next_candidate = timestamp + candidate_interval;
     ++*candidates;
     ComPtr<IMFMediaBuffer> buffer;
@@ -332,7 +343,8 @@ static bool extract_audio(const std::wstring& path, const std::wstring& output,
     warnings->push_back("Windows Media Foundation 无法打开音轨");
     return false;
   }
-  if (FAILED(reader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, FALSE))) {
+  if (FAILED(reader->SetStreamSelection(
+        static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), FALSE))) {
     warnings->push_back("无法禁用音轨读取器的视频流");
   }
   ComPtr<IMFMediaType> requested;
@@ -344,11 +356,13 @@ static bool extract_audio(const std::wstring& path, const std::wstring& output,
       || FAILED(requested->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 1))) {
     warnings->push_back("无法配置本地 PCM 音轨格式"); return false;
   }
-  if (FAILED(reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, requested.Get()))) {
+  if (FAILED(reader->SetCurrentMediaType(
+        static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), nullptr, requested.Get()))) {
     requested->DeleteAllItems();
     requested->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
     requested->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-    hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, requested.Get());
+    hr = reader->SetCurrentMediaType(
+      static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), nullptr, requested.Get());
     if (FAILED(hr)) {
       *codec_unavailable = true;
       warnings->push_back("Windows Media Foundation 缺少可将该音轨解码为 PCM 的本地编解码器");
@@ -358,7 +372,8 @@ static bool extract_audio(const std::wstring& path, const std::wstring& output,
   }
   ComPtr<IMFMediaType> current;
   UINT32 rate = 0, channels = 0, bits = 0, media_block_align = 0;
-  if (FAILED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, current.Put()))) return false;
+  if (FAILED(reader->GetCurrentMediaType(
+        static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), current.Put()))) return false;
   if (FAILED(current->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &rate))
       || FAILED(current->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &channels))
       || FAILED(current->GetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, &bits))
@@ -385,7 +400,9 @@ static bool extract_audio(const std::wstring& path, const std::wstring& output,
   for (;;) {
     DWORD flags = 0;
     ComPtr<IMFSample> sample;
-    hr = reader->ReadSample(MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, nullptr, &flags, nullptr, sample.Put());
+    hr = reader->ReadSample(
+      static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), 0, nullptr,
+      &flags, nullptr, sample.Put());
     if (FAILED(hr)) {
       *codec_unavailable = *codec_unavailable || codec_unavailable_hresult(hr);
       stream.close(); _wremove(output.c_str()); warnings->push_back("音轨解码在读取样本时失败"); return false;
@@ -393,7 +410,7 @@ static bool extract_audio(const std::wstring& path, const std::wstring& output,
     if (flags & MF_SOURCE_READERF_ERROR) { stream.close(); _wremove(output.c_str()); warnings->push_back("音轨解码器报告流错误"); return false; }
     if (flags & MF_SOURCE_READERF_ENDOFSTREAM) break;
     if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) { stream.close(); _wremove(output.c_str()); warnings->push_back("音轨中途改变格式，无法生成单一 PCM WAV"); return false; }
-    if (!sample) continue;
+    if (sample.Get() == nullptr) continue;
     ComPtr<IMFMediaBuffer> buffer;
     if (FAILED(sample->ConvertToContiguousBuffer(buffer.Put()))) continue;
     BYTE* data = nullptr;
@@ -442,8 +459,10 @@ int wmain(int argc, wchar_t** argv) {
   std::vector<std::string> warnings;
   uint64_t candidates = 0;
   const double duration_seconds = media_duration_seconds(media);
-  const bool video_stream_present = source_has_stream(media, MF_SOURCE_READER_FIRST_VIDEO_STREAM, MFMediaType_Video);
-  const bool audio_stream_present = source_has_stream(media, MF_SOURCE_READER_FIRST_AUDIO_STREAM, MFMediaType_Audio);
+  const bool video_stream_present = source_has_stream(
+    media, static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), MFMediaType_Video);
+  const bool audio_stream_present = source_has_stream(
+    media, static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), MFMediaType_Audio);
   bool video_codec_unavailable = false;
   bool audio_codec_unavailable = false;
   const bool video_extraction_completed = !video_stream_present || extract_video_frames(
