@@ -105,6 +105,9 @@ if (!capturePipeline.includes('stage_capture_attachment') || !capturePipeline.in
 if (!appSource.includes("invokeNative('prepare_capture_image_analysis_input'")) failures.push('frontend image analysis derivation command is missing');
 if (!nativeLibrary.includes('capture_pipeline::prepare_capture_image_analysis_input')) failures.push('native image analysis derivation command is not registered');
 if (!capturePipeline.includes('fn capture_image_analysis_input(') || !capturePipeline.includes('run_sips_derivative')) failures.push('native image analysis derivation flow is incomplete');
+if (!capturePipeline.includes('#[cfg(any(target_os = "macos", target_os = "windows"))]\nconst MODEL_ANALYSIS_IMAGE_DERIVATIVE_TIMEOUT')) {
+  failures.push('model image derivative timeout must be available on macOS and Windows');
+}
 for (const imageIntegrityPrimitive of [
   'read_verified_direct_image_bytes',
   '读取模型图片分析输入期间原始图片发生变化',

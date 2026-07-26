@@ -23,7 +23,7 @@ use uuid::Uuid;
 const MAX_AUTH_SECRET_BYTES: usize = 16 * 1024;
 const MAX_UPLOAD_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 const MODEL_ANALYSIS_IMAGE_TARGET_BYTES: u64 = 3 * 1024 * 1024;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const MODEL_ANALYSIS_IMAGE_DERIVATIVE_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(target_os = "macos")]
 const MODEL_ANALYSIS_IMAGE_RESOURCE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
