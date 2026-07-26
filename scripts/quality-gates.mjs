@@ -179,6 +179,9 @@ for (const windowsSignatureProbePrimitive of ["runJson('pwsh.exe'", '$ErrorActio
     failures.push(`Windows Authenticode probe is not fail-closed: ${windowsSignatureProbePrimitive}`);
   }
 }
+if (!windowsReleaseVerifier.includes("join(root, 'src-tauri', 'target', '云枢-Windows-安装冒烟')")) {
+  failures.push('Windows NSIS smoke install directory must preserve Unicode without spaces in the /D argument');
+}
 if (!videoExtractor.includes('yunspire-media.exe') || !videoExtractor.includes('yunspire-speech.exe')) failures.push('Windows packaged media helpers are not dispatched by the video extractor');
 if (!appSource.includes('function resolveHistoricalImageReferences(')) failures.push('historical image reference resolver is missing');
 if (!appSource.includes("mode === 'initial' ? `图片记忆")) failures.push('first image analysis memory path is missing');

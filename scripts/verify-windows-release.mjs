@@ -657,7 +657,7 @@ async function smokeInstalledResources(installDirectory, installedPython) {
 }
 
 async function verifyInstalledBundle(installer) {
-  const installDirectory = join(root, 'src-tauri', 'target', '云枢 Windows 安装冒烟');
+  const installDirectory = join(root, 'src-tauri', 'target', '云枢-Windows-安装冒烟');
   await rm(installDirectory, { recursive: true, force: true });
   try {
     const installation = spawnSync(installer, ['/S', `/D=${installDirectory}`], {
