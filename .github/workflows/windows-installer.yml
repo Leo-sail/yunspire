@@ -50,11 +50,14 @@ jobs:
       - name: Install locked JavaScript dependencies
         run: npm ci
 
-      - name: Build Windows runtime and native helpers
-        run: |
-          npm run build:windows-python-runtime
-          node scripts/build-windows-native.mjs
-          npm run build:windows-media-helper
+      - name: Build Windows Python runtime
+        run: npm run build:windows-python-runtime
+
+      - name: Build Windows document and image helpers
+        run: node scripts/build-windows-native.mjs
+
+      - name: Build Windows media and speech helpers
+        run: npm run build:windows-media-helper
 
       - name: Run complete product verification
         run: npm run verify

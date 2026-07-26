@@ -141,7 +141,7 @@ for (const windowsSpeechPrimitive of ['CLSID_SpInprocRecognizer', 'LoadDictation
 for (const windowsBuildPrimitive of ['VsDevCmd.bat', 'yunspire-media.exe', 'yunspire-speech.exe', 'mfreadwrite.lib', 'sapi.lib']) {
   if (!windowsMediaBuild.includes(windowsBuildPrimitive)) failures.push(`Windows media packaging primitive is missing: ${windowsBuildPrimitive}`);
 }
-for (const windowsNativeBuildPrimitive of ['/std:c++20', 'msvc-cxx20-mt-v2']) {
+for (const windowsNativeBuildPrimitive of ['/std:c++20', 'msvc-cxx20-mt-v2', 'oleaut32.lib']) {
   if (!windowsNativeBuild.includes(windowsNativeBuildPrimitive)) {
     failures.push(`Windows document/image helper build primitive is missing: ${windowsNativeBuildPrimitive}`);
   }

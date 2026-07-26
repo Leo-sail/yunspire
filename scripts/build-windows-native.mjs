@@ -22,7 +22,7 @@ const helpers = [
   {
     name: 'WIC 图片派生',
     baseName: 'yunspire_image_windows',
-    libraries: ['windowscodecs.lib', 'ole32.lib'],
+    libraries: ['windowscodecs.lib', 'ole32.lib', 'oleaut32.lib'],
   },
 ].map((helper) => ({
   ...helper,
