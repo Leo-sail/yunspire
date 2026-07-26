@@ -38,6 +38,7 @@ const windowsTauri = JSON.parse(await readText('src-tauri/tauri.windows.conf.jso
 const externalImageLocalizer = await readText('skills/document-content-analysis/scripts/external_image_localizer.py');
 const webSkill = await readText('skills/web-content-analysis/SKILL.md');
 const webExtractor = await readText('skills/web-content-analysis/scripts/extract_web.py');
+const mediaDiscovery = await readText('skills/video-content-analysis/scripts/media_discovery.py');
 const videoExtractor = await readText('skills/video-content-analysis/scripts/extract_video.py');
 const windowsMediaHelper = await readText('skills/video-content-analysis/scripts/yunspire_media_windows.cpp');
 const windowsSpeechHelper = await readText('skills/video-content-analysis/scripts/yunspire_speech_windows.cpp');
@@ -130,6 +131,7 @@ if (!obsidianAdapter.includes('claim_staged_capture_attachment') || !obsidianAda
 if (/附件总大小超过\s*128\s*MB/iu.test(appSource)) failures.push('legacy 128 MB assistant attachment rejection remains');
 if (/\bMAX_(?:VIDEO|MEDIA|HLS_OBJECT)_BYTES\b/u.test(`${capturePipeline}\n${videoExtractor}`)) failures.push('product-level video or HLS byte limit remains');
 if (!videoExtractor.includes('def write_hls_object(') || !videoExtractor.includes('output.write(chunk)')) failures.push('HLS media is not streamed directly to disk');
+if (!mediaDiscovery.includes('".avi"')) failures.push('Windows-verified AVI input is missing from media discovery suffixes');
 for (const windowsMediaPrimitive of [
   'MFCreateSourceReaderFromURL',
   'MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING',
