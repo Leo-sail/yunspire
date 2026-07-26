@@ -1344,12 +1344,12 @@ pub fn prepare_capture_image_analysis_input(
     #[cfg(target_os = "windows")]
     {
         let adapter = windows_image_derivative_adapter(&app)?;
-        return capture_image_analysis_input_with_adapter(
+        capture_image_analysis_input_with_adapter(
             &path,
             &mime_type,
             expected_sha256.as_deref(),
             Some(&adapter),
-        );
+        )
     }
     #[cfg(not(target_os = "windows"))]
     {

@@ -108,6 +108,10 @@ if (!capturePipeline.includes('fn capture_image_analysis_input(') || !capturePip
 if (!capturePipeline.includes('#[cfg(any(target_os = "macos", target_os = "windows"))]\nconst MODEL_ANALYSIS_IMAGE_DERIVATIVE_TIMEOUT')) {
   failures.push('model image derivative timeout must be available on macOS and Windows');
 }
+const prepareCaptureImageCommand = capturePipeline.match(/pub fn prepare_capture_image_analysis_input\([\s\S]*?\n\}/u)?.[0] || '';
+if (prepareCaptureImageCommand.includes('return capture_image_analysis_input_with_adapter(')) {
+  failures.push('Windows image preparation command must use its cfg block as the tail expression');
+}
 for (const imageIntegrityPrimitive of [
   'read_verified_direct_image_bytes',
   '读取模型图片分析输入期间原始图片发生变化',
