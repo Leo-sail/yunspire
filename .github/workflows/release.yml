@@ -1,0 +1,353 @@
+name: Release Installers
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag matching package.json, for example v0.1.2
+        required: true
+        type: string
+      publish:
+        description: Publish or update the GitHub Release after both installers pass
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release source
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      tag: ${{ steps.metadata.outputs.tag }}
+    steps:
+      - name: Check out complete source history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked JavaScript dependencies
+        run: npm ci
+
+      - name: Validate version and tag
+        id: metadata
+        run: node scripts/verify-release-artifact.mjs source --tag "$RELEASE_TAG" --require-windows true --github-output "$GITHUB_OUTPUT"
+
+      - name: Audit release source tree
+        run: npm run audit:release
+
+      - name: Require tag release commit on main
+        if: github.event_name == 'push'
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          release_sha=$(git rev-list -n 1 "$RELEASE_TAG")
+          if ! git merge-base --is-ancestor "$release_sha" origin/main; then
+            echo "$RELEASE_TAG points to $release_sha, which is not on main" >&2
+            exit 1
+          fi
+
+      - name: Protect manual publication target
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Manual publication must run from main, not $GITHUB_REF" >&2
+            exit 1
+          fi
+          if git rev-parse --verify "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            tag_sha=$(git rev-list -n 1 "$RELEASE_TAG")
+            if [[ "$tag_sha" != "$EXPECTED_SHA" ]]; then
+              echo "$RELEASE_TAG already points to $tag_sha, not $EXPECTED_SHA" >&2
+              exit 1
+            fi
+          fi
+
+  macos:
+    name: Build macOS universal DMG
+    needs: validate
+    runs-on: macos-14
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: "1"
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust 1.88 universal targets
+        uses: dtolnay/rust-toolchain@39b0b3842c7e8bbf6904c0bfc3d9006fdd4dc4e0 # 1.88.0
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          components: rustfmt, clippy
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install locked JavaScript dependencies
+        run: npm ci
+
+      - name: Run complete product verification
+        run: npm run verify
+
+      - name: Build unsigned universal DMG
+        env:
+          YUNSPIRE_LICENSE_TARGETS: aarch64-apple-darwin,x86_64-apple-darwin
+        run: npm run tauri -- build --target universal-apple-darwin --bundles dmg --no-sign --ci
+
+      - name: Verify mounted application and architecture
+        id: bundle
+        run: |
+          bundle_dir="src-tauri/target/universal-apple-darwin/release/bundle/dmg"
+          count=$(find "$bundle_dir" -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d ' ')
+          if [[ "$count" != "1" ]]; then
+            echo "Expected exactly one DMG, found $count" >&2
+            exit 1
+          fi
+          dmg=$(find "$bundle_dir" -maxdepth 1 -type f -name '*.dmg' -print -quit)
+          hdiutil verify "$dmg"
+          mount_point="$RUNNER_TEMP/yunspire-dmg"
+          mkdir -p "$mount_point"
+          cleanup() { hdiutil detach "$mount_point" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          printf 'Y\n' | hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_point"
+          app="$mount_point/Yunspire.app"
+          test -d "$app"
+          bundle_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")
+          if [[ "$bundle_version" != "$VERSION" ]]; then
+            echo "App version $bundle_version does not match $VERSION" >&2
+            exit 1
+          fi
+          executable=$(find "$app/Contents/MacOS" -maxdepth 1 -type f -print -quit)
+          architectures=$(lipo -archs "$executable")
+          [[ " $architectures " == *" arm64 "* ]]
+          [[ " $architectures " == *" x86_64 "* ]]
+          verify_resource_hash() {
+            source_hash=$(LC_ALL=C shasum -a 256 "$1" | awk '{print $1}')
+            bundled_hash=$(LC_ALL=C shasum -a 256 "$2" | awk '{print $1}')
+            if [[ "$source_hash" != "$bundled_hash" ]]; then
+              echo "Bundled legal resource hash mismatch: $1" >&2
+              exit 1
+            fi
+          }
+          verify_resource_hash LICENSE "$app/Contents/Resources/legal/LICENSE"
+          verify_resource_hash NOTICE "$app/Contents/Resources/legal/NOTICE"
+          verify_resource_hash \
+            src-tauri/target/yunspire-licenses/THIRD_PARTY_NOTICES.txt \
+            "$app/Contents/Resources/legal/THIRD_PARTY_NOTICES.txt"
+          codesign -dv --verbose=2 "$app" 2>&1 || true
+          cleanup
+          trap - EXIT
+          node scripts/verify-release-artifact.mjs artifact \
+            --platform macos \
+            --input "$dmg" \
+            --output artifacts/macos \
+            --signed false \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Upload macOS installer, checksum, and manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Yunspire-${{ needs.validate.outputs.version }}-macOS-universal-unsigned
+          path: artifacts/macos/*
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Build Windows x64 NSIS
+    needs: validate
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
+      RUST_BACKTRACE: "1"
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust 1.88 x64 MSVC
+        uses: dtolnay/rust-toolchain@39b0b3842c7e8bbf6904c0bfc3d9006fdd4dc4e0 # 1.88.0
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install locked JavaScript dependencies
+        id: locked_dependencies
+        run: npm ci
+
+      - name: Audit release source tree
+        id: release_audit
+        run: npm run audit:release
+
+      - name: Run complete product verification
+        id: product_verification
+        run: npm run verify
+
+      - name: Verify Windows runtime and native helpers
+        run: node scripts/verify-windows-release.mjs helpers
+
+      - name: Build unsigned NSIS installer
+        env:
+          YUNSPIRE_LICENSE_TARGETS: x86_64-pc-windows-msvc
+        run: npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis --no-sign --ci
+
+      - name: Verify silent installation and application startup
+        id: bundle
+        shell: pwsh
+        env:
+          YUNSPIRE_RELEASE_AUDIT_OUTCOME: ${{ steps.release_audit.outcome }}
+          YUNSPIRE_LOCKED_DEPENDENCIES_OUTCOME: ${{ steps.locked_dependencies.outcome }}
+          YUNSPIRE_PRODUCT_VERIFICATION_OUTCOME: ${{ steps.product_verification.outcome }}
+        run: |
+          $bundleDirectory = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis"
+          $installers = @(Get-ChildItem -Path $bundleDirectory -Filter "*.exe" -File)
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one NSIS installer, found $($installers.Count)"
+          }
+          $installer = $installers[0]
+          $signature = Get-AuthenticodeSignature -FilePath $installer.FullName
+          if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned) {
+            throw "Unsigned build has unexpected signature status: $($signature.Status)"
+          }
+          $installDirectory = Join-Path $env:RUNNER_TEMP "yunspire-install-smoke"
+          $applicationProcess = $null
+          try {
+            $install = Start-Process -FilePath $installer.FullName -ArgumentList @("/S", "/D=$installDirectory") -Wait -PassThru
+            if ($install.ExitCode -ne 0) { throw "NSIS installer exited with $($install.ExitCode)" }
+            $application = Get-ChildItem -Path $installDirectory -Filter "yunspire.exe" -File -Recurse | Select-Object -First 1
+            if (-not $application) { throw "Installed Yunspire executable was not found" }
+            foreach ($legalFile in @("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.txt")) {
+              $legalPath = Join-Path $installDirectory "legal/$legalFile"
+              if (-not (Test-Path -LiteralPath $legalPath -PathType Leaf)) {
+                throw "Installed legal resource was not found: $legalFile"
+              }
+            }
+            $productVersion = $application.VersionInfo.ProductVersion
+            if (-not $productVersion.StartsWith($env:VERSION)) {
+              throw "Installed version $productVersion does not match $env:VERSION"
+            }
+            $applicationProcess = Start-Process -FilePath $application.FullName -PassThru
+            Start-Sleep -Seconds 8
+            if ($applicationProcess.HasExited) {
+              throw "Installed Yunspire exited during startup with $($applicationProcess.ExitCode)"
+            }
+          } finally {
+            if ($applicationProcess -and -not $applicationProcess.HasExited) {
+              Stop-Process -Id $applicationProcess.Id -Force
+            }
+            $uninstaller = Get-ChildItem -Path $installDirectory -Filter "uninstall*.exe" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($uninstaller) {
+              Start-Process -FilePath $uninstaller.FullName -ArgumentList "/S" -Wait
+            }
+            Remove-Item -Path $installDirectory -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          node scripts/verify-windows-release.mjs bundle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/verify-release-artifact.mjs artifact `
+            --platform windows `
+            --input $installer.FullName `
+            --output artifacts/windows `
+            --signed false `
+            --github-output $env:GITHUB_OUTPUT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload Windows installer, checksum, and manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Yunspire-${{ needs.validate.outputs.version }}-Windows-x64-unsigned
+          path: artifacts/windows/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub Release
+    needs: [validate, macos, windows]
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - name: Download verified installers
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify downloaded checksums
+        run: |
+          for checksum in release-assets/*.sha256; do
+            (cd release-assets && sha256sum --check "$(basename "$checksum")")
+          done
+
+      - name: Create release notes
+        run: |
+          cat > release-notes.md <<EOF
+          Yunspire ${VERSION} desktop installers for macOS universal (Apple Silicon and Intel) and Windows x64.
+
+          These automated artifacts are unsigned. Verify the matching SHA-256 file before installation. macOS Gatekeeper and Windows SmartScreen may require an explicit local override until production signing credentials are configured.
+
+          云枢 ${VERSION} 桌面安装包，包含 macOS 通用版（Apple Silicon 与 Intel）和 Windows x64 版。
+
+          本次自动构建产物未签名。安装前请核对对应的 SHA-256 文件；在配置正式签名证书前，macOS Gatekeeper 或 Windows SmartScreen 可能要求用户明确授权。
+          EOF
+
+      - name: Publish or update release assets
+        env:
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$RELEASE_TAG" release-assets/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$TARGET_SHA" \
+              --title "Yunspire ${VERSION}" \
+              --notes-file release-notes.md
+          fi

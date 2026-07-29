@@ -6,14 +6,16 @@ use crate::policy::{ApplicationCommand, PolicyDecision, PolicyOutcome};
 use crate::task_runtime::NativeRuntimeTask;
 use chrono::Utc;
 use regex::Regex;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
+use rusqlite::{
+    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     io::{ErrorKind, Write},
     path::Path,
@@ -21,6 +23,7 @@ use std::{
     sync::Mutex,
 };
 use tauri::{AppHandle, Manager, State};
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 const MAX_SNAPSHOT_RECORDS: usize = 10_000;
@@ -29,8 +32,17 @@ const MAX_INDEXED_NOTE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SEARCH_QUERY_CHARS: usize = 512;
 const MAX_INBOUND_RECORD_BYTES: usize = 512 * 1024;
 const DEFAULT_LOCAL_WORKSPACE_SCOPE: &str = "local";
-const CURRENT_SCHEMA_VERSION: i64 = 21;
+const CURRENT_SCHEMA_VERSION: i64 = 28;
 const APPLICATION_AUTHORIZATION_VERSION: i64 = 1;
+const VAULT_INDEX_DEBOUNCE_MS: i64 = 300;
+const VAULT_INDEX_MAX_ATTEMPTS: i64 = 5;
+const VAULT_INDEX_RETRY_BASE_MS: i64 = 1_000;
+pub(crate) const VAULT_INDEX_BATCH_SIZE: usize = 32;
+const LOCAL_FEATURE_VECTOR_VERSION: i64 = 1;
+const LOCAL_FEATURE_VECTOR_DIMENSIONS: usize = 384;
+const MAX_LOCAL_VECTOR_CONTENT_CHARS: usize = 250_000;
+const MIN_LOCAL_VECTOR_SIMILARITY: f64 = 0.025;
+const RRF_K: f64 = 60.0;
 
 pub struct RuntimeDatabase {
     pub(crate) connection: Mutex<Connection>,
@@ -39,6 +51,7 @@ pub struct RuntimeDatabase {
 
 pub(crate) struct ModelUsageRecord<'a> {
     pub(crate) request_id: &'a str,
+    pub(crate) trace_id: &'a str,
     pub(crate) operation: &'a str,
     pub(crate) provider: &'a str,
     pub(crate) model: &'a str,
@@ -148,6 +161,48 @@ pub struct IndexBuildResult {
     completed_at: String,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ClaimedVaultIndexChange {
+    pub(crate) id: i64,
+    pub(crate) vault_id: String,
+    pub(crate) canonical_root: PathBuf,
+    pub(crate) relative_path: String,
+    pub(crate) generation: i64,
+    pub(crate) attempt_count: i64,
+    pub(crate) trace_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AppliedVaultIndexChange {
+    pub(crate) vault_id: String,
+    pub(crate) relative_path: String,
+    pub(crate) change_kind: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct VaultIndexReconcileResult {
+    pub(crate) queued_upserts: usize,
+    pub(crate) queued_deletes: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VaultIndexFailureOutcome {
+    pub(crate) updated: bool,
+    pub(crate) terminal: bool,
+}
+
+struct PreparedNoteIndex {
+    relative_path: String,
+    title: String,
+    content_hash: String,
+    modified_at: String,
+    byte_length: u64,
+    tags_json: String,
+    wiki_links_json: String,
+    content: String,
+    feature_vector: Vec<u8>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexedSearchResult {
@@ -157,6 +212,37 @@ pub struct IndexedSearchResult {
     excerpt: String,
     modified_at: String,
     score: f64,
+    tags: Vec<String>,
+    wiki_links: Vec<String>,
+    source_kind: String,
+    ranking_signals: IndexedSearchSignals,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IndexedSearchSignals {
+    lexical_rank: Option<usize>,
+    vector_rank: Option<usize>,
+    lexical_rrf: f64,
+    vector_rrf: f64,
+    vector_similarity: Option<f64>,
+    title_path_bonus: f64,
+    relation_bonus: f64,
+    recency_bonus: f64,
+    vector_kind: &'static str,
+}
+
+#[derive(Clone)]
+struct IndexedSearchCandidate {
+    vault_id: String,
+    relative_path: String,
+    title: String,
+    excerpt: String,
+    modified_at: String,
+    lexical_score: Option<f64>,
+    vector_similarity: Option<f64>,
+    tags: Vec<String>,
+    wiki_links: Vec<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -547,17 +633,37 @@ impl RuntimeDatabase {
 
     pub(crate) fn record_model_usage(&self, record: &ModelUsageRecord<'_>) -> Result<(), String> {
         let workspace_scope = self.local_workspace_scope()?;
-        let connection = self
+        crate::trace::validate_trace_id(record.trace_id)?;
+        let mut connection = self
             .connection
             .lock()
             .map_err(|_| "SQLite 连接锁不可用".to_string())?;
-        connection
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("无法开始模型用量记录事务：{error}"))?;
+        let existing_trace = transaction
+            .query_row(
+                "SELECT trace_id FROM model_usage_events WHERE request_id=?1",
+                [record.request_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(|error| format!("无法校验模型请求 Trace：{error}"))?
+            .flatten();
+        if existing_trace
+            .as_deref()
+            .is_some_and(|trace_id| trace_id != record.trace_id)
+        {
+            return Err("同一模型请求不能重新绑定其他 Trace".to_string());
+        }
+        let now = Utc::now().to_rfc3339();
+        transaction
             .execute(
                 "INSERT INTO model_usage_events
-                 (id, workspace_scope, request_id, operation, provider, model, state,
+                 (id, workspace_scope, request_id, trace_id, operation, provider, model, state,
                   prompt_tokens, completion_tokens, total_tokens, estimated_cost_usd,
                   cost_source, duration_ms, error, created_at, completed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
                  ON CONFLICT(request_id) DO UPDATE SET
                    state=excluded.state,
                    prompt_tokens=excluded.prompt_tokens,
@@ -572,6 +678,7 @@ impl RuntimeDatabase {
                     Uuid::new_v4().to_string(),
                     workspace_scope,
                     record.request_id,
+                    record.trace_id,
                     record.operation,
                     record.provider,
                     record.model,
@@ -583,19 +690,47 @@ impl RuntimeDatabase {
                     record.cost_source,
                     record.duration_ms as i64,
                     record.error,
-                    Utc::now().to_rfc3339(),
+                    now,
                     if record.state == "started" {
                         None
                     } else {
-                        Some(Utc::now().to_rfc3339())
+                        Some(now.clone())
                     },
                 ],
             )
             .map_err(|error| format!("无法记录模型 Token 与费用：{error}"))?;
-        Ok(())
+        crate::trace::record_trace_event_in_connection(
+            &transaction,
+            &workspace_scope,
+            &crate::trace::TraceEventRecord {
+                trace_id: record.trace_id,
+                entity_kind: "model_request",
+                entity_id: record.request_id,
+                event_type: "model.request.state",
+                state: record.state,
+                payload: &serde_json::json!({
+                    "operation": record.operation,
+                    "provider": record.provider,
+                    "model": record.model,
+                    "promptTokens": record.prompt_tokens,
+                    "completionTokens": record.completion_tokens,
+                    "totalTokens": record.total_tokens,
+                    "durationMs": record.duration_ms,
+                    "error": record.error,
+                }),
+                created_at: &now,
+            },
+        )?;
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交模型用量与 Trace：{error}"))
     }
 
     pub fn sync_vault_registry(&self, vaults: &[VaultDescriptor]) -> Result<(), String> {
+        let current_ids = vaults
+            .iter()
+            .map(|vault| vault.id.as_str())
+            .collect::<HashSet<_>>();
         let mut connection = self
             .connection
             .lock()
@@ -603,6 +738,48 @@ impl RuntimeDatabase {
         let transaction = connection
             .transaction()
             .map_err(|error| format!("无法开始 Vault 注册事务：{error}"))?;
+        let stale_ids = {
+            let mut statement = transaction
+                .prepare("SELECT id FROM vault_registry")
+                .map_err(|error| format!("无法读取 Vault 注册表：{error}"))?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| format!("无法枚举 Vault 注册表：{error}"))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("无法解析 Vault 注册表：{error}"))?
+                .into_iter()
+                .filter(|vault_id| !current_ids.contains(vault_id.as_str()))
+                .collect::<Vec<_>>()
+        };
+        for vault_id in stale_ids {
+            transaction
+                .execute("DELETE FROM note_fts WHERE vault_id=?1", [&vault_id])
+                .map_err(|error| format!("无法清理已移除 Vault 的全文索引：{error}"))?;
+            transaction
+                .execute(
+                    "DELETE FROM note_lexical_fts WHERE vault_id=?1",
+                    [&vault_id],
+                )
+                .map_err(|error| format!("无法清理已移除 Vault 的中文词法索引：{error}"))?;
+            transaction
+                .execute(
+                    "DELETE FROM note_feature_vectors WHERE vault_id=?1",
+                    [&vault_id],
+                )
+                .map_err(|error| format!("无法清理已移除 Vault 的本地特征向量：{error}"))?;
+            transaction
+                .execute("DELETE FROM note_index WHERE vault_id=?1", [&vault_id])
+                .map_err(|error| format!("无法清理已移除 Vault 的笔记索引：{error}"))?;
+            transaction
+                .execute(
+                    "DELETE FROM vault_index_changes WHERE vault_id=?1",
+                    [&vault_id],
+                )
+                .map_err(|error| format!("无法清理已移除 Vault 的索引队列：{error}"))?;
+            transaction
+                .execute("DELETE FROM vault_registry WHERE id=?1", [&vault_id])
+                .map_err(|error| format!("无法清理已移除 Vault 的注册记录：{error}"))?;
+        }
         for vault in vaults {
             transaction
                 .execute(
@@ -1043,7 +1220,6 @@ impl RuntimeDatabase {
         snapshot: &ManagedResourceSnapshotInput,
     ) -> Result<ManagedResourceSnapshot, String> {
         let groups = [
-            ("user_skill", snapshot.custom_skills.as_slice()),
             ("schedule", snapshot.schedules.as_slice()),
             (
                 "report_subscription",
@@ -1051,7 +1227,8 @@ impl RuntimeDatabase {
             ),
             ("report", snapshot.reports.as_slice()),
         ];
-        let total = groups.iter().map(|(_, values)| values.len()).sum::<usize>();
+        let total = snapshot.custom_skills.len()
+            + groups.iter().map(|(_, values)| values.len()).sum::<usize>();
         if total > MAX_SNAPSHOT_RECORDS {
             return Err("独立资源数量超过安全上限".to_string());
         }
@@ -1147,7 +1324,17 @@ impl RuntimeDatabase {
                 )
                 .map_err(|error| format!("无法检查独立资源初始化状态：{error}"))?
                 > 0,
-            custom_skills: list("user_skill")?,
+            custom_skills: crate::skill_lifecycle::list_skills_in_connection(
+                &connection,
+                workspace_scope,
+                false,
+            )?
+            .into_iter()
+            .map(|skill| {
+                serde_json::to_value(skill)
+                    .map_err(|error| format!("无法序列化 Skill 生命周期状态：{error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
             schedules: list("schedule")?,
             report_subscriptions: list("report_subscription")?,
             reports: list("report")?,
@@ -1947,20 +2134,33 @@ impl RuntimeDatabase {
     }
 
     pub fn append_operation_event(&self, event: &OperationEvent) -> Result<(), String> {
-        let connection = self
+        let workspace_scope = self.local_workspace_scope()?;
+        let mut event = event.clone();
+        let trace_id = event
+            .trace_id
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(crate::trace::new_trace_id);
+        crate::trace::validate_trace_id(&trace_id)?;
+        event.trace_id = Some(trace_id.clone());
+        let mut connection = self
             .connection
             .lock()
             .map_err(|_| "SQLite 连接锁不可用".to_string())?;
-        let payload = serde_json::to_string(event)
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("无法开始操作事件事务：{error}"))?;
+        let payload = serde_json::to_string(&event)
             .map_err(|error| format!("无法序列化原生操作事件：{error}"))?;
-        connection
+        transaction
             .execute(
                 "INSERT OR IGNORE INTO operation_events
-                 (id, task_id, event_type, state, payload, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 (id, task_id, trace_id, event_type, state, payload, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     event.id,
                     event.task_id,
+                    trace_id,
                     event.event_type,
                     event.state,
                     payload,
@@ -1968,7 +2168,46 @@ impl RuntimeDatabase {
                 ],
             )
             .map_err(|error| format!("无法写入 SQLite 操作日志：{error}"))?;
-        Ok(())
+        crate::trace::record_trace_event_in_connection(
+            &transaction,
+            &workspace_scope,
+            &crate::trace::TraceEventRecord {
+                trace_id: &trace_id,
+                entity_kind: "operation_event",
+                entity_id: &event.id,
+                event_type: &event.event_type,
+                state: &event.state,
+                payload: &serde_json::json!({
+                    "taskId": event.task_id,
+                    "vaultId": event.vault_id,
+                    "relativePath": event.relative_path,
+                    "detail": event.detail,
+                }),
+                created_at: &event.created_at,
+            },
+        )?;
+        if let Some(vault_id) = event.vault_id.as_deref() {
+            crate::trace::record_trace_event_in_connection(
+                &transaction,
+                &workspace_scope,
+                &crate::trace::TraceEventRecord {
+                    trace_id: &trace_id,
+                    entity_kind: "vault_operation",
+                    entity_id: &event.id,
+                    event_type: &event.event_type,
+                    state: &event.state,
+                    payload: &serde_json::json!({
+                        "vaultId": vault_id,
+                        "relativePath": event.relative_path,
+                        "detail": event.detail,
+                    }),
+                    created_at: &event.created_at,
+                },
+            )?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交操作事件与 Trace：{error}"))
     }
 
     pub(crate) fn persist_application_command(
@@ -1979,6 +2218,7 @@ impl RuntimeDatabase {
         trace_id: &str,
         accepted_at: &str,
     ) -> Result<(Option<String>, bool), String> {
+        crate::trace::validate_trace_id(trace_id)?;
         let command_payload = serde_json::to_string(command)
             .map_err(|error| format!("无法序列化应用命令：{error}"))?;
         let decision_payload = serde_json::to_string(decision)
@@ -1992,14 +2232,30 @@ impl RuntimeDatabase {
             .map_err(|error| format!("无法开始应用命令事务：{error}"))?;
         let duplicate = transaction
             .query_row(
-                "SELECT task_id FROM application_commands
+                "SELECT task_id, payload, trace_id FROM application_commands
                  WHERE workspace_scope=?1 AND idempotency_key=?2",
                 params![workspace_scope, command.idempotency_key],
-                |row| row.get::<_, Option<String>>(0),
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|error| format!("无法检查应用命令幂等键：{error}"))?;
-        if let Some(task_id) = duplicate {
+        if let Some((task_id, stored_payload, stored_trace_id)) = duplicate {
+            let stored_command = serde_json::from_str::<ApplicationCommand>(&stored_payload)
+                .map_err(|error| format!("无法解析幂等应用命令：{error}"))?;
+            if crate::policy::command_authorization_binding(&stored_command)
+                != crate::policy::command_authorization_binding(command)
+            {
+                return Err("应用命令幂等键已经绑定到不同的能力或参数范围".to_string());
+            }
+            if stored_trace_id != trace_id {
+                return Err("应用命令幂等键已经绑定到其他 Trace".to_string());
+            }
             transaction
                 .commit()
                 .map_err(|error| format!("无法完成应用命令幂等查询：{error}"))?;
@@ -2154,11 +2410,12 @@ impl RuntimeDatabase {
         transaction
             .execute(
                 "INSERT INTO operation_events
-                 (id, task_id, event_type, state, payload, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 (id, task_id, trace_id, event_type, state, payload, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     event.id,
                     event.task_id,
+                    trace_id,
                     event.event_type,
                     event.state,
                     event_payload,
@@ -2166,6 +2423,75 @@ impl RuntimeDatabase {
                 ],
             )
             .map_err(|error| format!("无法保存策略决定审计事件：{error}"))?;
+        crate::trace::record_trace_event_in_connection(
+            &transaction,
+            workspace_scope,
+            &crate::trace::TraceEventRecord {
+                trace_id,
+                entity_kind: "application_command",
+                entity_id: &command.id,
+                event_type: "command.policy_decided",
+                state: command_state,
+                payload: &serde_json::json!({
+                    "taskId": task_id,
+                    "operation": command.operation,
+                    "outcome": decision.outcome,
+                }),
+                created_at: accepted_at,
+            },
+        )?;
+        if let (Some(task_id), Some(task_state)) = (task_id.as_deref(), task_state) {
+            crate::trace::record_trace_event_in_connection(
+                &transaction,
+                workspace_scope,
+                &crate::trace::TraceEventRecord {
+                    trace_id,
+                    entity_kind: "runtime_task",
+                    entity_id: task_id,
+                    event_type: "task.created",
+                    state: task_state,
+                    payload: &serde_json::json!({"commandId": command.id}),
+                    created_at: accepted_at,
+                },
+            )?;
+        }
+        crate::trace::record_trace_event_in_connection(
+            &transaction,
+            workspace_scope,
+            &crate::trace::TraceEventRecord {
+                trace_id,
+                entity_kind: "operation_event",
+                entity_id: &event.id,
+                event_type: &event.event_type,
+                state: &event.state,
+                payload: &serde_json::json!({
+                    "taskId": event.task_id,
+                    "vaultId": event.vault_id,
+                    "relativePath": event.relative_path,
+                    "detail": event.detail,
+                }),
+                created_at: &event.created_at,
+            },
+        )?;
+        if let Some(vault_id) = event.vault_id.as_deref() {
+            crate::trace::record_trace_event_in_connection(
+                &transaction,
+                workspace_scope,
+                &crate::trace::TraceEventRecord {
+                    trace_id,
+                    entity_kind: "vault_operation",
+                    entity_id: &event.id,
+                    event_type: &event.event_type,
+                    state: &event.state,
+                    payload: &serde_json::json!({
+                        "vaultId": vault_id,
+                        "relativePath": event.relative_path,
+                        "detail": event.detail,
+                    }),
+                    created_at: &event.created_at,
+                },
+            )?;
+        }
         transaction
             .commit()
             .map_err(|error| format!("无法提交应用命令事务：{error}"))?;
@@ -2182,6 +2508,26 @@ impl RuntimeDatabase {
             .lock()
             .map_err(|_| "SQLite 连接锁不可用".to_string())?;
         read_native_runtime_task(&connection, workspace_scope, task_id)
+    }
+
+    pub(crate) fn resolve_operation_trace_id(
+        &self,
+        workspace_scope: &str,
+        task_id: Option<&str>,
+        supplied_trace_id: Option<&str>,
+    ) -> Result<String, String> {
+        if let Some(trace_id) = supplied_trace_id.filter(|value| !value.trim().is_empty()) {
+            return Ok(crate::trace::validate_trace_id(trace_id)?.to_string());
+        }
+        if let Some(trace_id) = task_id
+            .and_then(|task_id| self.runtime_task(workspace_scope, task_id).ok())
+            .and_then(|task| task.trace_id)
+            .filter(|value| !value.trim().is_empty())
+        {
+            crate::trace::validate_trace_id(&trace_id)?;
+            return Ok(trace_id);
+        }
+        Ok(crate::trace::new_trace_id())
     }
 
     pub(crate) fn ensure_runtime_task_authorized(
@@ -2304,7 +2650,12 @@ impl RuntimeDatabase {
         let now = Utc::now().to_rfc3339();
         let current_state = current.state.clone();
         let title = current.title.clone();
-        let trace_id = current.trace_id.clone();
+        let trace_id = current
+            .trace_id
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(crate::trace::new_trace_id);
+        crate::trace::validate_trace_id(&trace_id)?;
         let created_at = current.created_at.clone();
         let mut payload = current.payload;
         let object = payload
@@ -2313,6 +2664,7 @@ impl RuntimeDatabase {
         object.insert("state".to_string(), Value::String(target_state.to_string()));
         object.insert("progress".to_string(), Value::from(progress));
         object.insert("updatedAt".to_string(), Value::String(now.clone()));
+        object.insert("traceId".to_string(), Value::String(trace_id.clone()));
         if !detail.trim().is_empty() {
             object.insert(
                 "result".to_string(),
@@ -2323,9 +2675,16 @@ impl RuntimeDatabase {
             .map_err(|error| format!("无法序列化任务状态：{error}"))?;
         transaction
             .execute(
-                "UPDATE runtime_tasks SET state=?3, payload=?4, updated_at=?5
+                "UPDATE runtime_tasks SET state=?3, trace_id=?4, payload=?5, updated_at=?6
                  WHERE workspace_scope=?1 AND id=?2",
-                params![workspace_scope, task_id, target_state, serialized, now],
+                params![
+                    workspace_scope,
+                    task_id,
+                    target_state,
+                    trace_id,
+                    serialized,
+                    now
+                ],
             )
             .map_err(|error| format!("无法更新任务状态：{error}"))?;
         transaction
@@ -2428,7 +2787,7 @@ impl RuntimeDatabase {
         let event = OperationEvent {
             id: Uuid::new_v4().to_string(),
             task_id: Some(task_id.to_string()),
-            trace_id: trace_id.clone(),
+            trace_id: Some(trace_id.clone()),
             event_type: "task.state_changed".to_string(),
             state: target_state.to_string(),
             created_at: now.clone(),
@@ -2439,28 +2798,30 @@ impl RuntimeDatabase {
             relative_path: None,
             detail: detail.chars().take(2000).collect(),
         };
-        let event_payload = serde_json::to_string(&event)
-            .map_err(|error| format!("无法序列化任务状态审计事件：{error}"))?;
-        transaction
-            .execute(
-                "INSERT INTO operation_events
-                 (id, task_id, event_type, state, payload, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    event.id,
-                    event.task_id,
-                    event.event_type,
-                    event.state,
-                    event_payload,
-                    event.created_at
-                ],
-            )
+        insert_operation_event_in_transaction(&transaction, &event)
             .map_err(|error| format!("无法保存任务状态审计事件：{error}"))?;
+        crate::trace::record_trace_event_in_connection(
+            &transaction,
+            workspace_scope,
+            &crate::trace::TraceEventRecord {
+                trace_id: &trace_id,
+                entity_kind: "runtime_task",
+                entity_id: task_id,
+                event_type: "task.state_changed",
+                state: target_state,
+                payload: &serde_json::json!({
+                    "fromState": current_state,
+                    "progress": progress,
+                    "detail": detail,
+                }),
+                created_at: &now,
+            },
+        )?;
         let next = NativeRuntimeTask {
             id: task_id.to_string(),
             state: target_state.to_string(),
             title,
-            trace_id,
+            trace_id: Some(trace_id),
             progress,
             payload,
             created_at,
@@ -2550,6 +2911,15 @@ impl RuntimeDatabase {
             .execute("DELETE FROM note_fts WHERE vault_id=?1", [vault_id])
             .map_err(|error| format!("无法清理全文索引：{error}"))?;
         transaction
+            .execute("DELETE FROM note_lexical_fts WHERE vault_id=?1", [vault_id])
+            .map_err(|error| format!("无法清理中文词法索引：{error}"))?;
+        transaction
+            .execute(
+                "DELETE FROM note_feature_vectors WHERE vault_id=?1",
+                [vault_id],
+            )
+            .map_err(|error| format!("无法清理本地特征向量：{error}"))?;
+        transaction
             .execute("DELETE FROM note_index WHERE vault_id=?1", [vault_id])
             .map_err(|error| format!("无法清理笔记索引：{error}"))?;
 
@@ -2557,9 +2927,12 @@ impl RuntimeDatabase {
         let mut skipped_notes = 0;
         for path in markdown {
             ensure_index_not_cancelled(is_cancelled)?;
-            match index_note_in_transaction(&transaction, vault_id, &root, &path) {
-                Ok(true) => indexed_notes += 1,
-                Ok(false) | Err(_) => skipped_notes += 1,
+            match prepare_note_index(&root, &path).and_then(|note| {
+                note.map(|note| upsert_prepared_note_index(&transaction, vault_id, &note))
+                    .transpose()
+            }) {
+                Ok(Some(())) => indexed_notes += 1,
+                Ok(None) | Err(_) => skipped_notes += 1,
             }
         }
         ensure_index_not_cancelled(is_cancelled)?;
@@ -2574,70 +2947,472 @@ impl RuntimeDatabase {
         })
     }
 
-    pub fn index_note_path_with_cancellation<F>(
+    pub(crate) fn enqueue_vault_index_path(
         &self,
         vault_id: &str,
         root: &Path,
         path: &Path,
-        is_cancelled: &F,
-    ) -> Result<(), String>
-    where
-        F: Fn() -> bool,
-    {
-        ensure_index_not_cancelled(is_cancelled)?;
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|_| "监听文件越过 Vault 边界".to_string())?
-            .to_string_lossy()
-            .into_owned();
+    ) -> Result<(), String> {
+        self.enqueue_vault_index_path_inner(vault_id, root, path, None)
+    }
+
+    pub(crate) fn enqueue_vault_index_path_with_trace(
+        &self,
+        vault_id: &str,
+        root: &Path,
+        path: &Path,
+        trace_id: &str,
+    ) -> Result<(), String> {
+        self.enqueue_vault_index_path_inner(vault_id, root, path, Some(trace_id))
+    }
+
+    fn enqueue_vault_index_path_inner(
+        &self,
+        vault_id: &str,
+        root: &Path,
+        path: &Path,
+        inherited_trace_id: Option<&str>,
+    ) -> Result<(), String> {
+        let relative_path = normalized_index_relative_path(root, path)?;
+        validate_index_relative_path(&relative_path)?;
+        let canonical_root = canonical_index_root(root)?;
+        let change_kind = match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() => "upsert",
+            Ok(_) => "delete",
+            Err(error) if error.kind() == ErrorKind::NotFound => "delete",
+            Err(error) => return Err(format!("无法读取索引变更文件：{error}")),
+        };
+        let root_text = strict_path_text(&canonical_root, "Vault 根目录")?;
+        let now = Utc::now();
+        let generated_trace_id;
+        let (trace_id, replace_existing_trace) = if let Some(trace_id) = inherited_trace_id {
+            (crate::trace::validate_trace_id(trace_id)?, true)
+        } else {
+            generated_trace_id = crate::trace::new_trace_id();
+            (generated_trace_id.as_str(), false)
+        };
         let connection = self
             .connection
             .lock()
             .map_err(|_| "SQLite 连接锁不可用".to_string())?;
-        if !path.exists() {
-            let transaction = connection
-                .unchecked_transaction()
-                .map_err(|error| format!("无法开始增量索引事务：{error}"))?;
-            ensure_index_not_cancelled(is_cancelled)?;
-            transaction
-                .execute(
-                    "DELETE FROM note_fts WHERE vault_id=?1 AND relative_path=?2",
-                    params![vault_id, relative],
-                )
-                .map_err(|error| format!("无法删除全文索引项：{error}"))?;
-            transaction
-                .execute(
-                    "DELETE FROM note_index WHERE vault_id=?1 AND relative_path=?2",
-                    params![vault_id, relative],
-                )
-                .map_err(|error| format!("无法删除笔记索引项：{error}"))?;
-            ensure_index_not_cancelled(is_cancelled)?;
-            return transaction
-                .commit()
-                .map_err(|error| format!("无法提交增量索引事务：{error}"));
-        }
-        let metadata = fs::symlink_metadata(path)
-            .map_err(|error| format!("无法读取监听文件元数据：{error}"))?;
-        if metadata.file_type().is_symlink() {
-            return Err("拒绝索引 Vault 内的符号链接".to_string());
-        }
-        let canonical_root = root
-            .canonicalize()
-            .map_err(|error| format!("无法规范化 Vault 路径：{error}"))?;
-        let canonical_path = path
-            .canonicalize()
-            .map_err(|error| format!("无法规范化监听文件：{error}"))?;
-        if !canonical_path.starts_with(&canonical_root) || !canonical_path.is_file() {
-            return Err("监听文件越过 Vault 边界或不是普通文件".to_string());
-        }
-        index_note_in_connection_with_cancellation(
+        ensure_registered_vault_root(&connection, vault_id, &canonical_root)?;
+        enqueue_vault_index_change_in_connection(
             &connection,
             vault_id,
+            root_text,
+            &relative_path,
+            change_kind,
+            trace_id,
+            replace_existing_trace,
+            now.timestamp_millis() + VAULT_INDEX_DEBOUNCE_MS,
+            &now.to_rfc3339(),
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn recover_vault_index_changes(&self) -> Result<usize, String> {
+        let now = Utc::now();
+        let now_text = now.to_rfc3339();
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("无法开始 Vault 索引恢复事务：{error}"))?;
+        let recovered = transaction
+            .execute(
+                "UPDATE vault_index_changes
+                 SET state='pending', available_at_ms=?1, claimed_at_ms=NULL, updated_at=?2
+                 WHERE state='processing' AND attempt_count < ?3",
+                params![now.timestamp_millis(), now_text, VAULT_INDEX_MAX_ATTEMPTS,],
+            )
+            .map_err(|error| format!("无法恢复中断的 Vault 索引任务：{error}"))?;
+        let dead_lettered = dead_letter_exhausted_vault_index_changes(
+            &transaction,
+            "processing",
+            "应用退出前索引任务未完成",
+            "startup_recovery",
+            &now_text,
+        )?;
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交 Vault 索引恢复事务：{error}"))?;
+        Ok(recovered + dead_lettered)
+    }
+
+    pub(crate) fn claim_vault_index_changes(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ClaimedVaultIndexChange>, String> {
+        let now = Utc::now();
+        let now_ms = now.timestamp_millis();
+        let now_text = now.to_rfc3339();
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("无法开始 Vault 索引认领事务：{error}"))?;
+        dead_letter_exhausted_vault_index_changes(
+            &transaction,
+            "pending",
+            "Vault 索引任务超过最大重试次数",
+            "claim_sweep",
+            &now_text,
+        )?;
+        let candidates = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT id, vault_id, canonical_root, relative_path, generation, attempt_count, trace_id
+                     FROM vault_index_changes
+                     WHERE state='pending' AND attempt_count < ?1 AND available_at_ms <= ?2
+                     ORDER BY available_at_ms, id LIMIT ?3",
+                )
+                .map_err(|error| format!("无法准备 Vault 索引认领查询：{error}"))?;
+            let rows = statement
+                .query_map(
+                    params![VAULT_INDEX_MAX_ATTEMPTS, now_ms, limit.clamp(1, 128) as i64],
+                    |row| {
+                        Ok(ClaimedVaultIndexChange {
+                            id: row.get(0)?,
+                            vault_id: row.get(1)?,
+                            canonical_root: PathBuf::from(row.get::<_, String>(2)?),
+                            relative_path: row.get(3)?,
+                            generation: row.get(4)?,
+                            attempt_count: row.get::<_, i64>(5)? + 1,
+                            trace_id: row.get(6)?,
+                        })
+                    },
+                )
+                .map_err(|error| format!("无法读取待处理 Vault 索引任务：{error}"))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("无法解析待处理 Vault 索引任务：{error}"))?
+        };
+        let mut claimed = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let changed = transaction
+                .execute(
+                    "UPDATE vault_index_changes
+                     SET state='processing', attempt_count=attempt_count+1,
+                         claimed_at_ms=?1, updated_at=?2
+                     WHERE id=?3 AND generation=?4 AND state='pending'
+                       AND attempt_count < ?5 AND available_at_ms <= ?1",
+                    params![
+                        now_ms,
+                        now_text,
+                        candidate.id,
+                        candidate.generation,
+                        VAULT_INDEX_MAX_ATTEMPTS
+                    ],
+                )
+                .map_err(|error| format!("无法认领 Vault 索引任务：{error}"))?;
+            if changed == 1 {
+                crate::trace::record_trace_event_in_connection(
+                    &transaction,
+                    DEFAULT_LOCAL_WORKSPACE_SCOPE,
+                    &crate::trace::TraceEventRecord {
+                        trace_id: &candidate.trace_id,
+                        entity_kind: "index_change",
+                        entity_id: &format!("{}:{}", candidate.id, candidate.generation),
+                        event_type: "index.claimed",
+                        state: "processing",
+                        payload: &serde_json::json!({
+                            "vaultId": candidate.vault_id,
+                            "relativePath": candidate.relative_path,
+                            "attemptCount": candidate.attempt_count,
+                        }),
+                        created_at: &now_text,
+                    },
+                )?;
+                claimed.push(candidate);
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交 Vault 索引认领事务：{error}"))?;
+        Ok(claimed)
+    }
+
+    pub(crate) fn apply_claimed_vault_index_change(
+        &self,
+        change: &ClaimedVaultIndexChange,
+        current_root: &Path,
+    ) -> Result<Option<AppliedVaultIndexChange>, String> {
+        let canonical_root = canonical_index_root(current_root)?;
+        if canonical_root != change.canonical_root {
+            return Err("Vault 根目录已变化，拒绝应用旧索引任务".to_string());
+        }
+        let target = resolve_index_target(&canonical_root, &change.relative_path)?;
+        let prepared = match fs::symlink_metadata(&target) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                prepare_note_index(&canonical_root, &target)?
+            }
+            Ok(_) => None,
+            Err(error) if error.kind() == ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("无法读取待索引笔记：{error}")),
+        };
+        if prepared
+            .as_ref()
+            .is_some_and(|note| note.relative_path != change.relative_path)
+        {
+            return Err("索引任务路径规范化后发生变化".to_string());
+        }
+        let root_text = strict_path_text(&canonical_root, "Vault 根目录")?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("无法开始 Vault 索引提交事务：{error}"))?;
+        let owns_change = transaction
+            .query_row(
+                "SELECT 1 FROM vault_index_changes
+                 WHERE id=?1 AND vault_id=?2 AND canonical_root=?3 AND relative_path=?4
+                   AND generation=?5 AND state='processing'",
+                params![
+                    change.id,
+                    change.vault_id,
+                    root_text,
+                    change.relative_path,
+                    change.generation
+                ],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| format!("无法校验 Vault 索引任务所有权：{error}"))?
+            .is_some();
+        if !owns_change {
+            return Ok(None);
+        }
+        ensure_registered_vault_root(&transaction, &change.vault_id, &canonical_root)?;
+        let change_kind = if let Some(note) = prepared.as_ref() {
+            upsert_prepared_note_index(&transaction, &change.vault_id, note)?;
+            "upsert"
+        } else {
+            delete_note_index_in_transaction(
+                &transaction,
+                &change.vault_id,
+                &change.relative_path,
+            )?;
+            "delete"
+        };
+        let event = OperationEvent {
+            id: Uuid::new_v4().to_string(),
+            task_id: None,
+            trace_id: Some(change.trace_id.clone()),
+            event_type: "vault.note.index".to_string(),
+            state: "success".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            vault_id: Some(change.vault_id.clone()),
+            relative_path: Some(change.relative_path.clone()),
+            detail: format!("Vault 索引队列已完成 {change_kind}"),
+        };
+        insert_operation_event_in_transaction(&transaction, &event)?;
+        crate::trace::record_trace_event_in_connection(
+            &transaction,
+            DEFAULT_LOCAL_WORKSPACE_SCOPE,
+            &crate::trace::TraceEventRecord {
+                trace_id: &change.trace_id,
+                entity_kind: "index_change",
+                entity_id: &format!("{}:{}", change.id, change.generation),
+                event_type: "index.completed",
+                state: "succeeded",
+                payload: &serde_json::json!({
+                    "vaultId": change.vault_id,
+                    "relativePath": change.relative_path,
+                    "changeKind": change_kind,
+                }),
+                created_at: &event.created_at,
+            },
+        )?;
+        let deleted = transaction
+            .execute(
+                "DELETE FROM vault_index_changes
+                 WHERE id=?1 AND generation=?2 AND state='processing'",
+                params![change.id, change.generation],
+            )
+            .map_err(|error| format!("无法完成 Vault 索引任务：{error}"))?;
+        if deleted != 1 {
+            return Err("Vault 索引任务在提交期间被新事件替换".to_string());
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交 Vault 索引变更：{error}"))?;
+        Ok(Some(AppliedVaultIndexChange {
+            vault_id: change.vault_id.clone(),
+            relative_path: change.relative_path.clone(),
+            change_kind: change_kind.to_string(),
+        }))
+    }
+
+    pub(crate) fn fail_claimed_vault_index_change(
+        &self,
+        change: &ClaimedVaultIndexChange,
+        error: &str,
+    ) -> Result<VaultIndexFailureOutcome, String> {
+        let terminal = change.attempt_count >= VAULT_INDEX_MAX_ATTEMPTS;
+        let retry_delay = VAULT_INDEX_RETRY_BASE_MS
+            .saturating_mul(1_i64 << change.attempt_count.saturating_sub(1).min(6));
+        let now = Utc::now();
+        let error = error.chars().take(2_000).collect::<String>();
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|db_error| format!("无法开始 Vault 索引失败事务：{db_error}"))?;
+        let updated = transaction
+            .execute(
+                "UPDATE vault_index_changes
+                 SET state=?1, available_at_ms=?2, claimed_at_ms=NULL,
+                     last_error=?3, updated_at=?4
+                 WHERE id=?5 AND generation=?6 AND state='processing'",
+                params![
+                    if terminal { "dead_letter" } else { "pending" },
+                    now.timestamp_millis() + retry_delay,
+                    error,
+                    now.to_rfc3339(),
+                    change.id,
+                    change.generation
+                ],
+            )
+            .map_err(|db_error| format!("无法记录 Vault 索引失败：{db_error}"))?
+            == 1;
+        if updated {
+            crate::trace::record_trace_event_in_connection(
+                &transaction,
+                DEFAULT_LOCAL_WORKSPACE_SCOPE,
+                &crate::trace::TraceEventRecord {
+                    trace_id: &change.trace_id,
+                    entity_kind: "index_change",
+                    entity_id: &format!("{}:{}", change.id, change.generation),
+                    event_type: if terminal {
+                        "index.dead_lettered"
+                    } else {
+                        "index.retry_scheduled"
+                    },
+                    state: if terminal { "dead_letter" } else { "pending" },
+                    payload: &serde_json::json!({
+                        "vaultId": change.vault_id,
+                        "relativePath": change.relative_path,
+                        "attemptCount": change.attempt_count,
+                        "error": error,
+                    }),
+                    created_at: &now.to_rfc3339(),
+                },
+            )?;
+        }
+        if updated && terminal {
+            let event = OperationEvent {
+                id: Uuid::new_v4().to_string(),
+                task_id: None,
+                trace_id: Some(change.trace_id.clone()),
+                event_type: "vault.note.index".to_string(),
+                state: "failed".to_string(),
+                created_at: now.to_rfc3339(),
+                vault_id: Some(change.vault_id.clone()),
+                relative_path: Some(change.relative_path.clone()),
+                detail: format!("Vault 索引任务重试耗尽：{error}"),
+            };
+            insert_operation_event_in_transaction(&transaction, &event)?;
+        }
+        transaction
+            .commit()
+            .map_err(|db_error| format!("无法提交 Vault 索引失败状态：{db_error}"))?;
+        Ok(VaultIndexFailureOutcome { updated, terminal })
+    }
+
+    pub(crate) fn reconcile_vault_index(
+        &self,
+        vault: &VaultDescriptor,
+    ) -> Result<VaultIndexReconcileResult, String> {
+        if vault.connection_state != "connected" {
+            return Err("只能校准已连接的 Vault".to_string());
+        }
+        let canonical_root = canonical_index_root(Path::new(&vault.path))?;
+        let root_text = strict_path_text(&canonical_root, "Vault 根目录")?;
+        let mut markdown = Vec::new();
+        let mut attachments = 0;
+        collect_files_for_runtime_with_cancellation(
             &canonical_root,
-            &canonical_path,
-            is_cancelled,
-        )
-        .map(|_| ())
+            &mut markdown,
+            &mut attachments,
+            &|| false,
+        )?;
+        let mut current_paths = HashSet::with_capacity(markdown.len());
+        for path in markdown {
+            let relative_path = normalized_index_relative_path(&canonical_root, &path)?;
+            validate_index_relative_path(&relative_path)?;
+            current_paths.insert(relative_path);
+        }
+
+        let now = Utc::now();
+        let now_text = now.to_rfc3339();
+        let now_ms = now.timestamp_millis();
+        let reconcile_trace_id = crate::trace::new_trace_id();
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("无法开始 Vault 索引校准事务：{error}"))?;
+        ensure_registered_vault_root(&transaction, &vault.id, &canonical_root)?;
+        let known_paths = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT relative_path FROM note_index WHERE vault_id=?1
+                     UNION
+                     SELECT relative_path FROM vault_index_changes WHERE vault_id=?1",
+                )
+                .map_err(|error| format!("无法准备 Vault 索引校准查询：{error}"))?;
+            let rows = statement
+                .query_map([&vault.id], |row| row.get::<_, String>(0))
+                .map_err(|error| format!("无法读取 Vault 索引校准基线：{error}"))?;
+            rows.collect::<Result<HashSet<_>, _>>()
+                .map_err(|error| format!("无法解析 Vault 索引校准基线：{error}"))?
+        };
+        for relative_path in &current_paths {
+            enqueue_vault_index_change_in_connection(
+                &transaction,
+                &vault.id,
+                root_text,
+                relative_path,
+                "upsert",
+                &reconcile_trace_id,
+                false,
+                now_ms,
+                &now_text,
+            )?;
+        }
+        let mut queued_deletes = 0;
+        for relative_path in known_paths.difference(&current_paths) {
+            let normalized = normalize_queued_relative_path(relative_path)?;
+            validate_index_relative_path(&normalized)?;
+            enqueue_vault_index_change_in_connection(
+                &transaction,
+                &vault.id,
+                root_text,
+                &normalized,
+                "delete",
+                &reconcile_trace_id,
+                false,
+                now_ms,
+                &now_text,
+            )?;
+            queued_deletes += 1;
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交 Vault 索引校准事务：{error}"))?;
+        Ok(VaultIndexReconcileResult {
+            queued_upserts: current_paths.len(),
+            queued_deletes,
+        })
     }
 
     fn health(&self, workspace_scope: &str) -> Result<DatabaseHealth, String> {
@@ -2817,14 +3592,9 @@ impl RuntimeDatabase {
                 Connection::open_with_flags(&source_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
                     .map_err(|error| format!("无法以只读方式打开恢复来源：{error}"))?;
             copy_database(&source, &mut destination)?;
+            drop(source);
             run_migrations(&destination)?;
-            destination
-                .execute_batch(
-                    "PRAGMA journal_mode=WAL;
-                     PRAGMA synchronous=FULL;
-                     PRAGMA foreign_keys=ON;
-                     PRAGMA wal_checkpoint(TRUNCATE);",
-                )
+            restore_database_runtime_configuration(&destination)
                 .map_err(|error| format!("无法恢复 SQLite 运行参数：{error}"))?;
             let integrity = database_integrity(&destination)?;
             if integrity != "ok" {
@@ -3436,6 +4206,34 @@ fn copy_database(source: &Connection, destination: &mut Connection) -> Result<()
         .map_err(|error| format!("SQLite 复制失败：{error}"))
 }
 
+fn restore_database_runtime_configuration(connection: &Connection) -> Result<(), String> {
+    let current_journal_mode = connection
+        .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("无法读取 journal_mode：{error}"))?;
+    let was_wal = current_journal_mode.eq_ignore_ascii_case("wal");
+    if !was_wal {
+        let applied_journal_mode = connection
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0))
+            .map_err(|error| format!("无法启用 WAL：{error}"))?;
+        if !applied_journal_mode.eq_ignore_ascii_case("wal") {
+            return Err(format!(
+                "SQLite 未启用 WAL，当前模式为 {applied_journal_mode}"
+            ));
+        }
+    }
+    connection
+        .execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")
+        .map_err(|error| format!("无法配置同步与外键约束：{error}"))?;
+    // A rollback-journal database has no WAL frames to flush. Checkpointing immediately after
+    // switching that same connection to WAL can return SQLITE_LOCKED.
+    if was_wal {
+        connection
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .map_err(|error| format!("无法完成 WAL checkpoint：{error}"))?;
+    }
+    Ok(())
+}
+
 fn database_integrity(connection: &Connection) -> Result<String, String> {
     connection
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
@@ -3590,6 +4388,33 @@ fn read_native_runtime_task(
         .ok_or_else(|| "未找到原生任务".to_string())
 }
 
+fn add_sqlite_column_if_missing(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    declaration: &str,
+) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|error| format!("无法检查 {table}.{column}：{error}"))?;
+    let exists = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| format!("无法读取 {table} 字段：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法解析 {table} 字段：{error}"))?
+        .iter()
+        .any(|name| name == column);
+    drop(statement);
+    if !exists {
+        connection
+            .execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN {column} {declaration};"
+            ))
+            .map_err(|error| format!("无法新增 {table}.{column}：{error}"))?;
+    }
+    Ok(())
+}
+
 fn run_migrations(connection: &Connection) -> Result<(), String> {
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -3617,7 +4442,7 @@ fn run_migrations(connection: &Connection) -> Result<(), String> {
                  CREATE TABLE IF NOT EXISTS tasks (
                    id TEXT PRIMARY KEY,
                    state TEXT NOT NULL,
-                   trace_id TEXT,
+                   trace_id TEXT NOT NULL,
                    payload TEXT NOT NULL,
                    updated_at TEXT NOT NULL
                  );
@@ -4045,7 +4870,7 @@ fn run_migrations(connection: &Connection) -> Result<(), String> {
                    operation TEXT NOT NULL,
                    state TEXT NOT NULL CHECK(state IN ('accepted', 'denied', 'completed', 'failed', 'cancelled')),
                    task_id TEXT,
-                   trace_id TEXT NOT NULL,
+                   trace_id TEXT,
                    payload TEXT NOT NULL,
                    created_at TEXT NOT NULL,
                    updated_at TEXT NOT NULL,
@@ -4311,6 +5136,286 @@ fn run_migrations(connection: &Connection) -> Result<(), String> {
                  COMMIT;",
             )
             .map_err(|error| format!("SQLite migration 21 失败：{error}"))?;
+    }
+    if version < 22 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS vault_index_changes (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   vault_id TEXT NOT NULL,
+                   canonical_root TEXT NOT NULL,
+                   relative_path TEXT NOT NULL,
+                   generation INTEGER NOT NULL DEFAULT 1 CHECK(generation > 0),
+                   change_kind TEXT NOT NULL CHECK(change_kind IN ('upsert', 'delete')),
+                   state TEXT NOT NULL CHECK(state IN ('pending', 'processing', 'failed')),
+                   attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+                   available_at_ms INTEGER NOT NULL,
+                   claimed_at_ms INTEGER,
+                   last_error TEXT,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   UNIQUE(vault_id, relative_path)
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_vault_index_changes_ready
+                   ON vault_index_changes(state, available_at_ms, updated_at);
+                 PRAGMA user_version=22;
+                 COMMIT;",
+            )
+            .map_err(|error| format!("SQLite migration 22 失败：{error}"))?;
+    }
+    if version < 23 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE VIRTUAL TABLE IF NOT EXISTS note_lexical_fts USING fts5(
+                   vault_id UNINDEXED,
+                   relative_path UNINDEXED,
+                   title,
+                   content,
+                   tags,
+                   wiki_links,
+                   cjk_terms,
+                   tokenize='unicode61'
+                 );
+                 PRAGMA user_version=23;
+                 COMMIT;",
+            )
+            .map_err(|error| format!("SQLite migration 23 失败：{error}"))?;
+    }
+    if version < 24 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS memory_records (
+                   workspace_scope TEXT NOT NULL,
+                   id TEXT NOT NULL,
+                   track TEXT NOT NULL CHECK(track IN ('user_episode', 'user_profile', 'agent_case', 'agent_skill')),
+                   title TEXT NOT NULL,
+                   content TEXT NOT NULL,
+                   user_id TEXT NOT NULL,
+                   agent_id TEXT NOT NULL,
+                   app_id TEXT NOT NULL,
+                   project_id TEXT NOT NULL,
+                   session_id TEXT NOT NULL,
+                   source_doc_id TEXT NOT NULL,
+                   source_relative_path TEXT,
+                   source_content_hash TEXT,
+                   evidence_json TEXT NOT NULL,
+                   confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+                   version INTEGER NOT NULL CHECK(version > 0),
+                   supersedes_id TEXT,
+                   state TEXT NOT NULL CHECK(state IN ('draft', 'active', 'superseded', 'tombstone')),
+                   expires_at TEXT,
+                   payload_hash TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   PRIMARY KEY(workspace_scope, id),
+                   FOREIGN KEY(workspace_scope) REFERENCES local_workspace_scopes(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_memory_records_scope_state
+                   ON memory_records(workspace_scope, user_id, agent_id, app_id, project_id, session_id, state, updated_at);
+                 CREATE INDEX IF NOT EXISTS idx_memory_records_source
+                   ON memory_records(workspace_scope, source_doc_id, source_content_hash);
+                 CREATE TABLE IF NOT EXISTS memory_record_revisions (
+                   id TEXT PRIMARY KEY,
+                   workspace_scope TEXT NOT NULL,
+                   memory_id TEXT NOT NULL,
+                   version INTEGER NOT NULL,
+                   state TEXT NOT NULL CHECK(state IN ('draft', 'active', 'superseded', 'tombstone')),
+                   payload TEXT NOT NULL,
+                   payload_hash TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   UNIQUE(workspace_scope, memory_id, version),
+                   FOREIGN KEY(workspace_scope, memory_id)
+                     REFERENCES memory_records(workspace_scope, id) ON DELETE CASCADE
+                 );
+                 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+                   workspace_scope UNINDEXED,
+                   memory_id UNINDEXED,
+                   title,
+                   content,
+                   evidence,
+                   cjk_terms,
+                   tokenize='unicode61'
+                 );
+                 CREATE TABLE IF NOT EXISTS memory_reflection_jobs (
+                   workspace_scope TEXT NOT NULL,
+                   id TEXT NOT NULL,
+                   idempotency_key TEXT NOT NULL,
+                   task_id TEXT,
+                   scope_json TEXT NOT NULL,
+                   source_doc_ids_json TEXT NOT NULL,
+                   source_content_hash TEXT NOT NULL,
+                   metrics_json TEXT NOT NULL,
+                   state TEXT NOT NULL CHECK(state IN ('queued', 'running', 'awaiting_review', 'completed', 'failed', 'cancelled')),
+                   proposal_memory_id TEXT,
+                   attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+                   last_error TEXT,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   PRIMARY KEY(workspace_scope, id),
+                   UNIQUE(workspace_scope, idempotency_key),
+                   FOREIGN KEY(workspace_scope) REFERENCES local_workspace_scopes(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_memory_reflection_state
+                   ON memory_reflection_jobs(workspace_scope, state, updated_at);
+                 PRAGMA user_version=24;
+                 COMMIT;",
+            )
+            .map_err(|error| format!("SQLite migration 24 失败：{error}"))?;
+    }
+    if version < 25 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS note_feature_vectors (
+                   vault_id TEXT NOT NULL,
+                   relative_path TEXT NOT NULL,
+                   content_hash TEXT NOT NULL,
+                   representation_version INTEGER NOT NULL,
+                   dimensions INTEGER NOT NULL,
+                   vector_blob BLOB NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   PRIMARY KEY (vault_id, relative_path),
+                   FOREIGN KEY (vault_id, relative_path)
+                     REFERENCES note_index(vault_id, relative_path) ON DELETE CASCADE
+                 );
+                 INSERT OR IGNORE INTO vault_index_changes
+                   (vault_id, canonical_root, relative_path, generation, change_kind, state,
+                    attempt_count, available_at_ms, claimed_at_ms, last_error, created_at, updated_at)
+                 SELECT i.vault_id, v.canonical_path, i.relative_path, 1, 'upsert', 'pending',
+                        0, 0, NULL, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                 FROM note_index i
+                 JOIN vault_registry v ON v.id=i.vault_id
+                 LEFT JOIN note_feature_vectors n
+                   ON n.vault_id=i.vault_id AND n.relative_path=i.relative_path
+                 WHERE n.vault_id IS NULL;
+                 PRAGMA user_version=25;
+                 COMMIT;",
+            )
+            .map_err(|error| format!("SQLite migration 25 失败：{error}"))?;
+    }
+    if version < 26 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS assistant_conversations (
+                   workspace_scope TEXT NOT NULL,
+                   id TEXT NOT NULL,
+                   revision INTEGER NOT NULL CHECK(revision >= 0),
+                   context_json TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   PRIMARY KEY(workspace_scope, id),
+                   FOREIGN KEY(workspace_scope) REFERENCES local_workspace_scopes(id) ON DELETE CASCADE
+                 );
+                 CREATE TABLE IF NOT EXISTS assistant_requests (
+                   workspace_scope TEXT NOT NULL,
+                   id TEXT NOT NULL,
+                   conversation_id TEXT NOT NULL,
+                   conversation_revision INTEGER NOT NULL CHECK(conversation_revision >= 0),
+                   sequence INTEGER NOT NULL CHECK(sequence > 0),
+                   state TEXT NOT NULL CHECK(state IN ('queued', 'running', 'succeeded', 'failed', 'cancelled', 'needs_input')),
+                   payload_json TEXT NOT NULL,
+                   context_json TEXT,
+                   context_hash TEXT,
+                   result_json TEXT,
+                   has_volatile_attachments INTEGER NOT NULL DEFAULT 0 CHECK(has_volatile_attachments IN (0, 1)),
+                   recovery_count INTEGER NOT NULL DEFAULT 0 CHECK(recovery_count >= 0),
+                   last_error TEXT,
+                   created_at TEXT NOT NULL,
+                   started_at TEXT,
+                   completed_at TEXT,
+                   updated_at TEXT NOT NULL,
+                   PRIMARY KEY(workspace_scope, id),
+                   UNIQUE(workspace_scope, conversation_id, sequence),
+                   FOREIGN KEY(workspace_scope, conversation_id)
+                     REFERENCES assistant_conversations(workspace_scope, id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_assistant_requests_lane
+                   ON assistant_requests(workspace_scope, conversation_id, state, sequence);
+                 CREATE INDEX IF NOT EXISTS idx_assistant_requests_recovery
+                   ON assistant_requests(workspace_scope, state, updated_at);
+                 PRAGMA user_version=26;
+                 COMMIT;",
+            )
+            .map_err(|error| format!("SQLite migration 26 失败：{error}"))?;
+    }
+    if version < 27 {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("SQLite migration 27 无法开始事务：{error}"))?;
+        crate::trace::migrate_schema(&transaction)?;
+        crate::skill_lifecycle::migrate_schema(&transaction)?;
+        add_sqlite_column_if_missing(&transaction, "model_usage_events", "trace_id", "TEXT")?;
+        add_sqlite_column_if_missing(&transaction, "operation_events", "trace_id", "TEXT")?;
+        add_sqlite_column_if_missing(&transaction, "vault_index_changes", "trace_id", "TEXT")?;
+        transaction
+            .execute_batch(
+                "UPDATE runtime_tasks
+                    SET trace_id='trace-legacy-task-' || lower(hex(randomblob(16)))
+                  WHERE trace_id IS NULL OR trim(trace_id)='';
+                 UPDATE model_usage_events
+                    SET trace_id='trace-legacy-model-' || lower(hex(randomblob(16)))
+                  WHERE trace_id IS NULL OR trim(trace_id)='';
+                 UPDATE operation_events
+                    SET trace_id=COALESCE(
+                      NULLIF(json_extract(payload, '$.traceId'), ''),
+                      'trace-legacy-operation-' || id
+                    )
+                  WHERE trace_id IS NULL OR trim(trace_id)='';
+                 UPDATE vault_index_changes
+                    SET trace_id='trace-legacy-index-' || id
+                  WHERE trace_id IS NULL OR trim(trace_id)='';",
+            )
+            .map_err(|error| format!("SQLite migration 27 无法扩展 Trace 字段：{error}"))?;
+        crate::trace::migrate_legacy_events(&transaction)?;
+        crate::skill_lifecycle::migrate_legacy_skills(&transaction)?;
+        transaction
+            .execute_batch("PRAGMA user_version=27;")
+            .map_err(|error| format!("SQLite migration 27 无法更新版本：{error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("SQLite migration 27 失败：{error}"))?;
+    }
+    if version < 28 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE vault_index_changes RENAME TO vault_index_changes_v27;
+                 CREATE TABLE vault_index_changes (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   vault_id TEXT NOT NULL,
+                   canonical_root TEXT NOT NULL,
+                   relative_path TEXT NOT NULL,
+                   generation INTEGER NOT NULL DEFAULT 1 CHECK(generation > 0),
+                   change_kind TEXT NOT NULL CHECK(change_kind IN ('upsert', 'delete')),
+                   state TEXT NOT NULL CHECK(state IN ('pending', 'processing', 'dead_letter')),
+                   attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+                   available_at_ms INTEGER NOT NULL,
+                   claimed_at_ms INTEGER,
+                   last_error TEXT,
+                   trace_id TEXT,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   UNIQUE(vault_id, relative_path)
+                 );
+                 INSERT INTO vault_index_changes
+                   (id, vault_id, canonical_root, relative_path, generation, change_kind, state,
+                    attempt_count, available_at_ms, claimed_at_ms, last_error, trace_id,
+                    created_at, updated_at)
+                 SELECT id, vault_id, canonical_root, relative_path, generation, change_kind,
+                        CASE WHEN state='failed' THEN 'dead_letter' ELSE state END,
+                        attempt_count, available_at_ms, claimed_at_ms, last_error, trace_id,
+                        created_at, updated_at
+                   FROM vault_index_changes_v27;
+                 DROP TABLE vault_index_changes_v27;
+                 CREATE INDEX idx_vault_index_changes_ready
+                   ON vault_index_changes(state, available_at_ms, updated_at);
+                 PRAGMA user_version=28;
+                 COMMIT;",
+            )
+            .map_err(|error| format!("SQLite migration 28 失败：{error}"))?;
     }
     Ok(())
 }
@@ -4762,20 +5867,42 @@ fn sync_runtime_tasks(
             .chars()
             .take(240)
             .collect::<String>();
-        let trace_id = task
+        let incoming_trace_id = task
             .get("traceId")
             .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
             .map(str::to_string);
-        let payload =
-            serde_json::to_string(task).map_err(|error| format!("无法序列化原生任务：{error}"))?;
-        let old_state = transaction
+        let previous_task = transaction
             .query_row(
-                "SELECT state FROM runtime_tasks WHERE workspace_scope=?1 AND id=?2",
+                "SELECT state, trace_id FROM runtime_tasks WHERE workspace_scope=?1 AND id=?2",
                 params![workspace_scope, id],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
             )
             .optional()
             .map_err(|error| format!("无法读取原生任务状态：{error}"))?;
+        let previous_trace_id = previous_task
+            .as_ref()
+            .and_then(|(_, trace_id)| trace_id.as_deref())
+            .filter(|value| !value.trim().is_empty());
+        if incoming_trace_id
+            .as_deref()
+            .zip(previous_trace_id)
+            .is_some_and(|(incoming, previous)| incoming != previous)
+        {
+            return Err("同一原生任务不能重新绑定其他 Trace".to_string());
+        }
+        let trace_id = incoming_trace_id
+            .or_else(|| previous_trace_id.map(str::to_string))
+            .unwrap_or_else(crate::trace::new_trace_id);
+        crate::trace::validate_trace_id(&trace_id)?;
+        let mut task_payload = task.clone();
+        task_payload
+            .as_object_mut()
+            .ok_or_else(|| "原生任务必须是 JSON 对象".to_string())?
+            .insert("traceId".to_string(), Value::String(trace_id.clone()));
+        let payload = serde_json::to_string(&task_payload)
+            .map_err(|error| format!("无法序列化原生任务：{error}"))?;
         let now = Utc::now().to_rfc3339();
         transaction
             .execute(
@@ -4787,7 +5914,7 @@ fn sync_runtime_tasks(
                 params![workspace_scope, id, state, title, trace_id, payload, now],
             )
             .map_err(|error| format!("无法保存原生任务：{error}"))?;
-        if old_state.as_deref() != Some(state) {
+        if previous_task.as_ref().map(|(state, _)| state.as_str()) != Some(state) {
             transaction
                 .execute(
                     "UPDATE runtime_task_attempts SET finished_at=?3
@@ -4815,6 +5942,22 @@ fn sync_runtime_tasks(
                     ],
                 )
                 .map_err(|error| format!("无法记录原生任务状态变更：{error}"))?;
+            crate::trace::record_trace_event_in_connection(
+                transaction,
+                workspace_scope,
+                &crate::trace::TraceEventRecord {
+                    trace_id: &trace_id,
+                    entity_kind: "runtime_task",
+                    entity_id: &id,
+                    event_type: "task.synced",
+                    state,
+                    payload: &serde_json::json!({
+                        "previousState": previous_task.as_ref().map(|(state, _)| state),
+                        "source": "runtime-state-sync",
+                    }),
+                    created_at: &now,
+                },
+            )?;
         }
         let mut current_step_ids = HashSet::new();
         if let Some(steps) = task.get("steps").and_then(Value::as_array) {
@@ -5119,19 +6262,24 @@ fn markdown_metadata(content: &str) -> (String, Vec<String>, Vec<String>) {
         .find_map(|line| line.strip_prefix("# ").map(str::trim))
         .filter(|title| !title.is_empty())
         .unwrap_or("无标题笔记")
-        .to_string();
+        .nfc()
+        .collect::<String>();
     let tag_regex = Regex::new(r"(?:^|\s)#([\p{L}\p{N}_/-]+)").expect("valid tag regex");
     let link_regex = Regex::new(r"\[\[([^\]|#]+)").expect("valid wiki link regex");
     let mut tags = tag_regex
         .captures_iter(content)
-        .filter_map(|capture| capture.get(1).map(|value| value.as_str().to_string()))
+        .filter_map(|capture| {
+            capture
+                .get(1)
+                .map(|value| value.as_str().nfc().collect::<String>())
+        })
         .collect::<Vec<_>>();
     let mut links = link_regex
         .captures_iter(content)
         .filter_map(|capture| {
             capture
                 .get(1)
-                .map(|value| value.as_str().trim().to_string())
+                .map(|value| value.as_str().trim().nfc().collect::<String>())
         })
         .collect::<Vec<_>>();
     tags.sort();
@@ -5167,58 +6315,620 @@ where
     }
 }
 
-fn index_note_in_connection_with_cancellation<F>(
-    connection: &Connection,
-    vault_id: &str,
-    root: &Path,
-    path: &Path,
-    is_cancelled: &F,
-) -> Result<bool, String>
-where
-    F: Fn() -> bool,
-{
-    ensure_index_not_cancelled(is_cancelled)?;
-    let transaction = connection
-        .unchecked_transaction()
-        .map_err(|error| format!("无法开始增量索引事务：{error}"))?;
-    let indexed = index_note_in_transaction(&transaction, vault_id, root, path)?;
-    ensure_index_not_cancelled(is_cancelled)?;
-    transaction
-        .commit()
-        .map_err(|error| format!("无法提交增量索引事务：{error}"))?;
-    Ok(indexed)
+fn is_cjk(character: char) -> bool {
+    matches!(
+        character,
+        '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{20000}'..='\u{2FA1F}'
+    )
 }
 
-fn index_note_in_transaction(
-    transaction: &Transaction<'_>,
-    vault_id: &str,
-    root: &Path,
-    path: &Path,
-) -> Result<bool, String> {
-    if path
-        .components()
-        .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
+fn cjk_lexical_terms(value: &str) -> String {
+    let mut terms = Vec::new();
+    let mut run = Vec::new();
+    let flush = |run: &mut Vec<char>, terms: &mut Vec<String>| {
+        if run.is_empty() {
+            return;
+        }
+        terms.extend(run.iter().map(char::to_string));
+        terms.extend(run.windows(2).map(|pair| pair.iter().collect::<String>()));
+        run.clear();
+    };
+    for character in value.nfc() {
+        if is_cjk(character) {
+            run.push(character);
+        } else {
+            flush(&mut run, &mut terms);
+        }
+    }
+    flush(&mut run, &mut terms);
+    terms.sort();
+    terms.dedup();
+    terms.join(" ")
+}
+
+// Local feature vectors are deterministic hashed bags of words and CJK 1-3 grams.
+// They are rebuildable search features, not model embeddings.
+fn stable_feature_hash(namespace: u8, bytes: impl IntoIterator<Item = u8>) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64 ^ u64::from(namespace);
+    for byte in bytes {
+        hash = stable_feature_hash_step(hash, byte);
+    }
+    hash
+}
+
+fn stable_feature_hash_step(hash: u64, byte: u8) -> u64 {
+    (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+}
+
+fn add_hashed_feature(vector: &mut [f32], hash: u64, weight: f32) {
+    let index = (hash as usize) % vector.len();
+    let sign = if hash & (1_u64 << 63) == 0 { 1.0 } else { -1.0 };
+    vector[index] += weight * sign;
+}
+
+fn add_text_feature(vector: &mut [f32], namespace: u8, text: &str, weight: f32) {
+    if !text.is_empty() {
+        add_hashed_feature(vector, stable_feature_hash(namespace, text.bytes()), weight);
+    }
+}
+
+fn add_cjk_feature(vector: &mut [f32], namespace: u8, characters: &[char], weight: f32) {
+    let mut hash = 0xcbf29ce484222325_u64 ^ u64::from(namespace);
+    for character in characters {
+        let mut encoded = [0_u8; 4];
+        for byte in character.encode_utf8(&mut encoded).bytes() {
+            hash = stable_feature_hash_step(hash, byte);
+        }
+    }
+    add_hashed_feature(vector, hash, weight);
+}
+
+fn flush_vector_word(vector: &mut [f32], word: &mut String, weight: f32) {
+    if !word.is_empty() {
+        add_text_feature(vector, b'w', word, weight * 1.4);
+        word.clear();
+    }
+}
+
+fn add_local_vector_text(vector: &mut [f32], value: &str, weight: f32, max_chars: usize) {
+    let mut word = String::new();
+    let mut previous = None;
+    let mut previous_previous = None;
+    for character in value.nfc().flat_map(char::to_lowercase).take(max_chars) {
+        if is_cjk(character) {
+            flush_vector_word(vector, &mut word, weight);
+            add_cjk_feature(vector, b'1', &[character], weight * 0.35);
+            if let Some(left) = previous {
+                add_cjk_feature(vector, b'2', &[left, character], weight);
+            }
+            if let (Some(left), Some(middle)) = (previous_previous, previous) {
+                add_cjk_feature(vector, b'3', &[left, middle, character], weight * 1.25);
+            }
+            previous_previous = previous;
+            previous = Some(character);
+        } else {
+            previous = None;
+            previous_previous = None;
+            if character.is_alphanumeric() {
+                if word.len() >= 128 {
+                    flush_vector_word(vector, &mut word, weight);
+                }
+                word.push(character);
+            } else {
+                flush_vector_word(vector, &mut word, weight);
+            }
+        }
+    }
+    flush_vector_word(vector, &mut word, weight);
+}
+
+fn normalize_local_feature_vector(vector: &mut [f32]) -> bool {
+    let norm = vector
+        .iter()
+        .map(|value| f64::from(*value) * f64::from(*value))
+        .sum::<f64>()
+        .sqrt();
+    if !norm.is_finite() || norm <= f64::EPSILON {
+        return false;
+    }
+    for value in vector {
+        *value = (f64::from(*value) / norm) as f32;
+    }
+    true
+}
+
+fn note_local_feature_vector(
+    relative_path: &str,
+    title: &str,
+    content: &str,
+    tags: &[String],
+    wiki_links: &[String],
+) -> Vec<u8> {
+    let mut vector = vec![0_f32; LOCAL_FEATURE_VECTOR_DIMENSIONS];
+    add_local_vector_text(&mut vector, title, 3.0, usize::MAX);
+    add_local_vector_text(&mut vector, relative_path, 1.5, usize::MAX);
+    for tag in tags {
+        add_local_vector_text(&mut vector, tag, 2.5, usize::MAX);
+    }
+    for link in wiki_links {
+        add_local_vector_text(&mut vector, link, 2.0, usize::MAX);
+    }
+    add_local_vector_text(&mut vector, content, 1.0, MAX_LOCAL_VECTOR_CONTENT_CHARS);
+    normalize_local_feature_vector(&mut vector);
+    vector
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>()
+}
+
+fn query_local_feature_vector(query: &str) -> Option<Vec<f32>> {
+    let mut vector = vec![0_f32; LOCAL_FEATURE_VECTOR_DIMENSIONS];
+    add_local_vector_text(&mut vector, query, 1.0, MAX_SEARCH_QUERY_CHARS);
+    normalize_local_feature_vector(&mut vector).then_some(vector)
+}
+
+fn decode_local_feature_vector(version: i64, dimensions: i64, blob: &[u8]) -> Option<Vec<f32>> {
+    if version != LOCAL_FEATURE_VECTOR_VERSION
+        || dimensions != LOCAL_FEATURE_VECTOR_DIMENSIONS as i64
+        || blob.len() != LOCAL_FEATURE_VECTOR_DIMENSIONS * std::mem::size_of::<f32>()
     {
-        return Ok(false);
+        return None;
     }
-    let metadata = fs::metadata(path).map_err(|error| format!("无法读取索引文件：{error}"))?;
-    if metadata.len() > MAX_INDEXED_NOTE_BYTES {
-        return Ok(false);
+    let vector = blob
+        .chunks_exact(std::mem::size_of::<f32>())
+        .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        .collect::<Vec<_>>();
+    let norm = vector
+        .iter()
+        .map(|value| f64::from(*value) * f64::from(*value))
+        .sum::<f64>()
+        .sqrt();
+    (vector.iter().all(|value| value.is_finite()) && (0.99..=1.01).contains(&norm))
+        .then_some(vector)
+}
+
+fn local_vector_similarity(query: &[f32], candidate: &[f32]) -> Option<f64> {
+    if query.len() != candidate.len() {
+        return None;
     }
-    let bytes = read_file_limited_for_runtime(path)?;
-    let content =
-        String::from_utf8(bytes.clone()).map_err(|_| "索引文件不是有效 UTF-8".to_string())?;
-    let relative_path = path
+    let similarity = query
+        .iter()
+        .zip(candidate)
+        .map(|(left, right)| f64::from(*left) * f64::from(*right))
+        .sum::<f64>();
+    similarity
+        .is_finite()
+        .then_some(similarity.clamp(-1.0, 1.0))
+}
+
+fn lexical_fts_match_query(query: &str) -> Result<String, String> {
+    if query.chars().count() > MAX_SEARCH_QUERY_CHARS {
+        return Err("搜索词超过 512 个字符的安全上限".to_string());
+    }
+    let normalized = query.trim().nfc().collect::<String>();
+    if normalized.is_empty() {
+        return Err("搜索词不能为空".to_string());
+    }
+    let mut groups = Vec::new();
+    for raw_term in normalized.split_whitespace() {
+        let cjk = raw_term
+            .chars()
+            .filter(|character| is_cjk(*character))
+            .collect::<Vec<_>>();
+        if cjk.len() >= 2 {
+            let pairs = cjk
+                .windows(2)
+                .map(|pair| format!("\"{}\"", pair.iter().collect::<String>()))
+                .collect::<Vec<_>>();
+            groups.push(format!("({})", pairs.join(" AND ")));
+        } else {
+            groups.push(format!("\"{}\"", raw_term.replace('"', "\"\"")));
+        }
+    }
+    if groups.is_empty() {
+        return Err("搜索词不能为空".to_string());
+    }
+    Ok(groups.join(" AND "))
+}
+
+fn strict_path_text<'a>(path: &'a Path, label: &str) -> Result<&'a str, String> {
+    path.to_str()
+        .ok_or_else(|| format!("{label}不是有效 UTF-8"))
+}
+
+fn canonical_index_root(root: &Path) -> Result<PathBuf, String> {
+    let canonical = root
+        .canonicalize()
+        .map_err(|error| format!("无法规范化 Vault 根目录：{error}"))?;
+    if !canonical.is_dir() {
+        return Err("Vault 根路径不是目录".to_string());
+    }
+    strict_path_text(&canonical, "Vault 根目录")?;
+    Ok(canonical)
+}
+
+fn normalize_queued_relative_path(value: &str) -> Result<String, String> {
+    if value.is_empty() || value.contains('\0') || value.chars().any(char::is_control) {
+        return Err("索引相对路径无效".to_string());
+    }
+    Ok(value.replace('\\', "/").nfc().collect())
+}
+
+fn validate_index_relative_path(value: &str) -> Result<PathBuf, String> {
+    let normalized = normalize_queued_relative_path(value)?;
+    if normalized != value {
+        return Err("索引相对路径尚未规范化".to_string());
+    }
+    let relative = Path::new(value);
+    if relative.as_os_str().is_empty() || relative.is_absolute() {
+        return Err("索引路径必须是 Vault 内的相对路径".to_string());
+    }
+    if relative.components().any(|component| {
+        !matches!(component, std::path::Component::Normal(_))
+            || component
+                .as_os_str()
+                .to_str()
+                .is_none_or(|value| value.starts_with('.'))
+    }) {
+        return Err("索引路径包含隐藏目录、无效 UTF-8 或目录跳转".to_string());
+    }
+    if !relative
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+    {
+        return Err("索引队列只接受 Markdown 笔记".to_string());
+    }
+    Ok(relative.to_path_buf())
+}
+
+fn normalized_index_relative_path(root: &Path, path: &Path) -> Result<String, String> {
+    let relative = path
         .strip_prefix(root)
-        .map_err(|_| "索引文件越过 Vault 边界".to_string())?
-        .to_string_lossy()
-        .into_owned();
+        .map_err(|_| "索引文件越过 Vault 边界".to_string())?;
+    let text = strict_path_text(relative, "索引文件路径")?;
+    normalize_queued_relative_path(text)
+}
+
+fn resolve_index_target(root: &Path, relative_path: &str) -> Result<PathBuf, String> {
+    let relative = validate_index_relative_path(relative_path)?;
+    let mut target = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err("索引路径包含无效目录组件".to_string());
+        };
+        let direct = target.join(name);
+        match fs::symlink_metadata(&direct) {
+            Ok(_) => {
+                target = direct;
+                continue;
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("无法解析索引目标：{error}")),
+        }
+        if !target.is_dir() {
+            target = direct;
+            continue;
+        }
+        let expected = name
+            .to_str()
+            .ok_or_else(|| "索引路径组件不是有效 UTF-8".to_string())?;
+        let mut normalized_match = None;
+        for entry in
+            fs::read_dir(&target).map_err(|error| format!("无法读取索引目标目录：{error}"))?
+        {
+            let entry = entry.map_err(|error| format!("无法读取索引目标目录项：{error}"))?;
+            let Some(candidate) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if candidate.nfc().eq(expected.chars()) {
+                if normalized_match.is_some() {
+                    return Err("Vault 中存在规范化后重名的笔记路径".to_string());
+                }
+                normalized_match = Some(entry.path());
+            }
+        }
+        target = normalized_match.unwrap_or(direct);
+    }
+    Ok(target)
+}
+
+fn ensure_registered_vault_root(
+    connection: &Connection,
+    vault_id: &str,
+    canonical_root: &Path,
+) -> Result<(), String> {
+    let registered = connection
+        .query_row(
+            "SELECT canonical_path FROM vault_registry WHERE id=?1",
+            [vault_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("无法校验 Vault 注册路径：{error}"))?
+        .ok_or_else(|| "Vault 尚未登记到本地索引注册表".to_string())?;
+    if Path::new(&registered) != canonical_root {
+        return Err("Vault 注册路径已变化，拒绝应用旧索引任务".to_string());
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn enqueue_vault_index_change_in_connection(
+    connection: &Connection,
+    vault_id: &str,
+    canonical_root: &str,
+    relative_path: &str,
+    change_kind: &str,
+    trace_id: &str,
+    replace_existing_trace: bool,
+    available_at_ms: i64,
+    now: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO vault_index_changes
+             (vault_id, canonical_root, relative_path, generation, change_kind, state,
+              attempt_count, available_at_ms, claimed_at_ms, last_error, trace_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 1, ?4, 'pending', 0, ?6, NULL, NULL, ?5, ?7, ?7)
+             ON CONFLICT(vault_id, relative_path) DO UPDATE SET
+               canonical_root=excluded.canonical_root,
+               generation=vault_index_changes.generation+1,
+               change_kind=excluded.change_kind,
+               state='pending', attempt_count=0,
+               available_at_ms=excluded.available_at_ms,
+               claimed_at_ms=NULL, last_error=NULL,
+               trace_id=CASE WHEN ?8 THEN excluded.trace_id
+                             ELSE COALESCE(vault_index_changes.trace_id, excluded.trace_id) END,
+               updated_at=excluded.updated_at",
+            params![
+                vault_id,
+                canonical_root,
+                relative_path,
+                change_kind,
+                trace_id,
+                available_at_ms,
+                now,
+                replace_existing_trace
+            ],
+        )
+        .map_err(|error| format!("无法持久化 Vault 索引变更：{error}"))?;
+    let (change_id, generation, persisted_trace_id) = connection
+        .query_row(
+            "SELECT id, generation, trace_id FROM vault_index_changes
+             WHERE vault_id=?1 AND relative_path=?2",
+            params![vault_id, relative_path],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(|error| format!("无法读取 Vault 索引入队结果：{error}"))?;
+    crate::trace::record_trace_event_in_connection(
+        connection,
+        DEFAULT_LOCAL_WORKSPACE_SCOPE,
+        &crate::trace::TraceEventRecord {
+            trace_id: &persisted_trace_id,
+            entity_kind: "index_change",
+            entity_id: &format!("{change_id}:{generation}"),
+            event_type: "index.enqueued",
+            state: "pending",
+            payload: &serde_json::json!({
+                "vaultId": vault_id,
+                "relativePath": relative_path,
+                "changeKind": change_kind,
+                "generation": generation,
+            }),
+            created_at: now,
+        },
+    )?;
+    Ok(())
+}
+
+fn dead_letter_exhausted_vault_index_changes(
+    transaction: &Transaction<'_>,
+    source_state: &str,
+    default_error: &str,
+    source: &str,
+    now: &str,
+) -> Result<usize, String> {
+    if !matches!(source_state, "pending" | "processing") {
+        return Err("Vault 索引死信来源状态无效".to_string());
+    }
+    let exhausted = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT id, vault_id, relative_path, generation, attempt_count, trace_id, last_error
+                 FROM vault_index_changes
+                 WHERE state=?1 AND attempt_count >= ?2
+                 ORDER BY id",
+            )
+            .map_err(|error| format!("无法准备 Vault 索引死信查询：{error}"))?;
+        let rows = statement
+            .query_map(params![source_state, VAULT_INDEX_MAX_ATTEMPTS], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            })
+            .map_err(|error| format!("无法读取 Vault 索引死信任务：{error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法解析 Vault 索引死信任务：{error}"))?
+    };
+
+    let mut dead_lettered = 0;
+    for (id, vault_id, relative_path, generation, attempt_count, trace_id, last_error) in exhausted
+    {
+        let error = last_error
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| default_error.to_string());
+        let updated = transaction
+            .execute(
+                "UPDATE vault_index_changes
+                 SET state='dead_letter', claimed_at_ms=NULL, last_error=?1, updated_at=?2
+                 WHERE id=?3 AND generation=?4 AND state=?5 AND attempt_count >= ?6",
+                params![
+                    error,
+                    now,
+                    id,
+                    generation,
+                    source_state,
+                    VAULT_INDEX_MAX_ATTEMPTS,
+                ],
+            )
+            .map_err(|db_error| format!("无法写入 Vault 索引死信状态：{db_error}"))?;
+        if updated != 1 {
+            continue;
+        }
+        crate::trace::record_trace_event_in_connection(
+            transaction,
+            DEFAULT_LOCAL_WORKSPACE_SCOPE,
+            &crate::trace::TraceEventRecord {
+                trace_id: &trace_id,
+                entity_kind: "index_change",
+                entity_id: &format!("{id}:{generation}"),
+                event_type: "index.dead_lettered",
+                state: "dead_letter",
+                payload: &serde_json::json!({
+                    "vaultId": vault_id,
+                    "relativePath": relative_path,
+                    "attemptCount": attempt_count,
+                    "error": error,
+                    "source": source,
+                }),
+                created_at: now,
+            },
+        )?;
+        insert_operation_event_in_transaction(
+            transaction,
+            &OperationEvent {
+                id: Uuid::new_v4().to_string(),
+                task_id: None,
+                trace_id: Some(trace_id),
+                event_type: "vault.note.index".to_string(),
+                state: "failed".to_string(),
+                created_at: now.to_string(),
+                vault_id: Some(vault_id),
+                relative_path: Some(relative_path),
+                detail: format!("Vault 索引任务进入死信：{error}"),
+            },
+        )?;
+        dead_lettered += 1;
+    }
+    Ok(dead_lettered)
+}
+
+fn insert_operation_event_in_transaction(
+    transaction: &Transaction<'_>,
+    event: &OperationEvent,
+) -> Result<(), String> {
+    let mut event = event.clone();
+    let trace_id = event
+        .trace_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(crate::trace::new_trace_id);
+    crate::trace::validate_trace_id(&trace_id)?;
+    event.trace_id = Some(trace_id.clone());
+    let payload = serde_json::to_string(&event)
+        .map_err(|error| format!("无法序列化 Vault 索引事件：{error}"))?;
+    transaction
+        .execute(
+            "INSERT INTO operation_events
+             (id, task_id, trace_id, event_type, state, payload, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                event.id,
+                event.task_id,
+                trace_id,
+                event.event_type,
+                event.state,
+                payload,
+                event.created_at
+            ],
+        )
+        .map_err(|error| format!("无法写入 Vault 索引操作日志：{error}"))?;
+    crate::trace::record_trace_event_in_connection(
+        transaction,
+        DEFAULT_LOCAL_WORKSPACE_SCOPE,
+        &crate::trace::TraceEventRecord {
+            trace_id: &trace_id,
+            entity_kind: "operation_event",
+            entity_id: &event.id,
+            event_type: &event.event_type,
+            state: &event.state,
+            payload: &serde_json::json!({
+                "taskId": event.task_id,
+                "vaultId": event.vault_id,
+                "relativePath": event.relative_path,
+                "detail": event.detail,
+            }),
+            created_at: &event.created_at,
+        },
+    )?;
+    if let Some(vault_id) = event.vault_id.as_deref() {
+        crate::trace::record_trace_event_in_connection(
+            transaction,
+            DEFAULT_LOCAL_WORKSPACE_SCOPE,
+            &crate::trace::TraceEventRecord {
+                trace_id: &trace_id,
+                entity_kind: "vault_operation",
+                entity_id: &event.id,
+                event_type: &event.event_type,
+                state: &event.state,
+                payload: &serde_json::json!({
+                    "vaultId": vault_id,
+                    "relativePath": event.relative_path,
+                    "detail": event.detail,
+                }),
+                created_at: &event.created_at,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn prepare_note_index(root: &Path, path: &Path) -> Result<Option<PreparedNoteIndex>, String> {
+    let relative_path = normalized_index_relative_path(root, path)?;
+    validate_index_relative_path(&relative_path)?;
+    let canonical_root = canonical_index_root(root)?;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("无法读取索引文件元数据：{error}"))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.file_type().is_file()
+        || metadata.len() > MAX_INDEXED_NOTE_BYTES
+    {
+        return Ok(None);
+    }
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|error| format!("无法规范化索引文件：{error}"))?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err("索引文件越过 Vault 边界".to_string());
+    }
+    let bytes = read_file_limited_for_runtime(&canonical_path)?;
+    let Ok(content) = String::from_utf8(bytes.clone()) else {
+        return Ok(None);
+    };
     let (fallback_title, tags, links) = markdown_metadata(&content);
     let title = if fallback_title == "无标题笔记" {
-        path.file_stem()
+        canonical_path
+            .file_stem()
             .and_then(|name| name.to_str())
             .unwrap_or("无标题笔记")
-            .to_string()
+            .nfc()
+            .collect()
     } else {
         fallback_title
     };
@@ -5228,7 +6938,25 @@ fn index_note_in_transaction(
         .map(chrono::DateTime::<Utc>::from)
         .map(|value| value.to_rfc3339())
         .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
-    let content_hash = format!("{:x}", Sha256::digest(&bytes));
+    let feature_vector = note_local_feature_vector(&relative_path, &title, &content, &tags, &links);
+    Ok(Some(PreparedNoteIndex {
+        relative_path,
+        title,
+        content_hash: format!("{:x}", Sha256::digest(&bytes)),
+        modified_at,
+        byte_length: metadata.len(),
+        tags_json: serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string()),
+        wiki_links_json: serde_json::to_string(&links).unwrap_or_else(|_| "[]".to_string()),
+        content,
+        feature_vector,
+    }))
+}
+
+fn upsert_prepared_note_index(
+    transaction: &Transaction<'_>,
+    vault_id: &str,
+    note: &PreparedNoteIndex,
+) -> Result<(), String> {
     transaction
         .execute(
             "INSERT INTO note_index
@@ -5243,29 +6971,131 @@ fn index_note_in_transaction(
                wiki_links_json=excluded.wiki_links_json",
             params![
                 vault_id,
-                relative_path,
-                title,
-                content_hash,
-                modified_at,
-                metadata.len(),
-                serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string()),
-                serde_json::to_string(&links).unwrap_or_else(|_| "[]".to_string()),
+                note.relative_path,
+                note.title,
+                note.content_hash,
+                note.modified_at,
+                note.byte_length,
+                note.tags_json,
+                note.wiki_links_json,
             ],
         )
         .map_err(|error| format!("无法更新笔记索引：{error}"))?;
     transaction
         .execute(
             "DELETE FROM note_fts WHERE vault_id=?1 AND relative_path=?2",
-            params![vault_id, relative_path],
+            params![vault_id, note.relative_path],
         )
         .map_err(|error| format!("无法刷新全文索引：{error}"))?;
     transaction
         .execute(
             "INSERT INTO note_fts (vault_id, relative_path, title, content)
              VALUES (?1, ?2, ?3, ?4)",
-            params![vault_id, relative_path, title, content],
+            params![vault_id, note.relative_path, note.title, note.content],
         )
         .map_err(|error| format!("无法写入全文索引：{error}"))?;
+    transaction
+        .execute(
+            "DELETE FROM note_lexical_fts WHERE vault_id=?1 AND relative_path=?2",
+            params![vault_id, note.relative_path],
+        )
+        .map_err(|error| format!("无法刷新中文词法索引：{error}"))?;
+    let searchable = format!(
+        "{}\n{}\n{}\n{}\n{}",
+        note.relative_path, note.title, note.content, note.tags_json, note.wiki_links_json
+    );
+    let cjk_terms = cjk_lexical_terms(&searchable);
+    transaction
+        .execute(
+            "INSERT INTO note_lexical_fts
+             (vault_id, relative_path, title, content, tags, wiki_links, cjk_terms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                vault_id,
+                note.relative_path,
+                note.title,
+                note.content,
+                note.tags_json,
+                note.wiki_links_json,
+                cjk_terms,
+            ],
+        )
+        .map_err(|error| format!("无法写入中文词法索引：{error}"))?;
+    transaction
+        .execute(
+            "INSERT INTO note_feature_vectors
+             (vault_id, relative_path, content_hash, representation_version,
+              dimensions, vector_blob, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(vault_id, relative_path) DO UPDATE SET
+               content_hash=excluded.content_hash,
+               representation_version=excluded.representation_version,
+               dimensions=excluded.dimensions,
+               vector_blob=excluded.vector_blob,
+               updated_at=excluded.updated_at",
+            params![
+                vault_id,
+                note.relative_path,
+                note.content_hash,
+                LOCAL_FEATURE_VECTOR_VERSION,
+                LOCAL_FEATURE_VECTOR_DIMENSIONS as i64,
+                note.feature_vector,
+                note.modified_at,
+            ],
+        )
+        .map_err(|error| format!("无法写入本地特征向量：{error}"))?;
+    Ok(())
+}
+
+fn delete_note_index_in_transaction(
+    transaction: &Transaction<'_>,
+    vault_id: &str,
+    relative_path: &str,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "DELETE FROM note_fts WHERE vault_id=?1 AND relative_path=?2",
+            params![vault_id, relative_path],
+        )
+        .map_err(|error| format!("无法删除全文索引项：{error}"))?;
+    transaction
+        .execute(
+            "DELETE FROM note_lexical_fts WHERE vault_id=?1 AND relative_path=?2",
+            params![vault_id, relative_path],
+        )
+        .map_err(|error| format!("无法删除中文词法索引项：{error}"))?;
+    transaction
+        .execute(
+            "DELETE FROM note_feature_vectors WHERE vault_id=?1 AND relative_path=?2",
+            params![vault_id, relative_path],
+        )
+        .map_err(|error| format!("无法删除本地特征向量：{error}"))?;
+    transaction
+        .execute(
+            "DELETE FROM note_index WHERE vault_id=?1 AND relative_path=?2",
+            params![vault_id, relative_path],
+        )
+        .map_err(|error| format!("无法删除笔记索引项：{error}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn index_note_in_connection(
+    connection: &Connection,
+    vault_id: &str,
+    root: &Path,
+    path: &Path,
+) -> Result<bool, String> {
+    let Some(note) = prepare_note_index(root, path)? else {
+        return Ok(false);
+    };
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("无法开始增量索引事务：{error}"))?;
+    upsert_prepared_note_index(&transaction, vault_id, &note)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("无法提交增量索引事务：{error}"))?;
     Ok(true)
 }
 
@@ -5635,6 +7465,400 @@ pub fn poll_due_runtime_schedules(
     database.claim_due_runtime_schedules(&workspace_scope, 32)
 }
 
+fn indexed_search_candidate_signals(
+    candidate: &IndexedSearchCandidate,
+    normalized_query: &str,
+    now: &chrono::DateTime<Utc>,
+) -> (f64, f64, f64) {
+    let title = candidate.title.nfc().collect::<String>().to_lowercase();
+    let path = candidate
+        .relative_path
+        .nfc()
+        .collect::<String>()
+        .to_lowercase();
+    let tags = candidate.tags.join(" ").to_lowercase();
+    let links = candidate.wiki_links.join(" ").to_lowercase();
+    let title_path_bonus = if title == normalized_query {
+        12.0
+    } else if title.contains(normalized_query) {
+        8.0
+    } else if path.contains(normalized_query) {
+        6.0
+    } else {
+        0.0
+    };
+    let relation_bonus = if tags.contains(normalized_query) {
+        4.0
+    } else {
+        0.0
+    } + if links.contains(normalized_query) {
+        3.0
+    } else {
+        0.0
+    };
+    let recency_bonus = chrono::DateTime::parse_from_rfc3339(&candidate.modified_at)
+        .ok()
+        .map(|modified| {
+            let age_days = now
+                .signed_duration_since(modified.with_timezone(&Utc))
+                .num_days()
+                .max(0) as f64;
+            1.0 / (1.0 + age_days / 30.0)
+        })
+        .unwrap_or(0.0);
+    (title_path_bonus, relation_bonus, recency_bonus)
+}
+
+fn load_lexical_search_candidates(
+    connection: &Connection,
+    scoped: Option<&str>,
+    query: &str,
+    candidate_limit: i64,
+) -> Result<Vec<IndexedSearchCandidate>, String> {
+    let lexical_match_query = lexical_fts_match_query(query)?;
+    let legacy_match_query = fts_match_query(query)?;
+    let lexical_sql = if scoped.is_some() {
+        "SELECT f.vault_id, f.relative_path, f.title,
+                snippet(note_lexical_fts, 3, '', '', '…', 24), i.modified_at,
+                bm25(note_lexical_fts), i.tags_json, i.wiki_links_json
+         FROM note_lexical_fts f
+         JOIN note_index i ON i.vault_id=f.vault_id AND i.relative_path=f.relative_path
+         WHERE note_lexical_fts MATCH ?1 AND f.vault_id=?2
+         ORDER BY bm25(note_lexical_fts) LIMIT ?3"
+    } else {
+        "SELECT f.vault_id, f.relative_path, f.title,
+                snippet(note_lexical_fts, 3, '', '', '…', 24), i.modified_at,
+                bm25(note_lexical_fts), i.tags_json, i.wiki_links_json
+         FROM note_lexical_fts f
+         JOIN note_index i ON i.vault_id=f.vault_id AND i.relative_path=f.relative_path
+         WHERE note_lexical_fts MATCH ?1
+         ORDER BY bm25(note_lexical_fts) LIMIT ?2"
+    };
+    let mut statement = connection
+        .prepare(lexical_sql)
+        .map_err(|error| format!("无法准备中文混合搜索：{error}"))?;
+    let map_row = |row: &rusqlite::Row<'_>| {
+        let tags_json = row.get::<_, String>(6)?;
+        let wiki_links_json = row.get::<_, String>(7)?;
+        Ok(IndexedSearchCandidate {
+            vault_id: row.get(0)?,
+            relative_path: row.get(1)?,
+            title: row.get(2)?,
+            excerpt: row.get(3)?,
+            modified_at: row.get(4)?,
+            lexical_score: Some(row.get(5)?),
+            vector_similarity: None,
+            tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+            wiki_links: serde_json::from_str(&wiki_links_json).unwrap_or_default(),
+        })
+    };
+    let mut candidates = if let Some(vault_id) = scoped {
+        statement
+            .query_map(
+                params![lexical_match_query, vault_id, candidate_limit],
+                map_row,
+            )
+            .map_err(|error| format!("中文混合搜索失败：{error}"))?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>()
+    } else {
+        statement
+            .query_map(params![lexical_match_query, candidate_limit], map_row)
+            .map_err(|error| format!("中文混合搜索失败：{error}"))?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>()
+    };
+    drop(statement);
+
+    // Existing installations may search before the startup reindex has populated the new
+    // lexical table. Keep the original FTS index as a temporary, read-only fallback.
+    if candidates.is_empty() {
+        let legacy_sql = if scoped.is_some() {
+            "SELECT f.vault_id, f.relative_path, f.title,
+                    snippet(note_fts, 3, '', '', '…', 24), i.modified_at,
+                    bm25(note_fts), i.tags_json, i.wiki_links_json
+             FROM note_fts f
+             JOIN note_index i ON i.vault_id=f.vault_id AND i.relative_path=f.relative_path
+             WHERE note_fts MATCH ?1 AND f.vault_id=?2
+             ORDER BY bm25(note_fts) LIMIT ?3"
+        } else {
+            "SELECT f.vault_id, f.relative_path, f.title,
+                    snippet(note_fts, 3, '', '', '…', 24), i.modified_at,
+                    bm25(note_fts), i.tags_json, i.wiki_links_json
+             FROM note_fts f
+             JOIN note_index i ON i.vault_id=f.vault_id AND i.relative_path=f.relative_path
+             WHERE note_fts MATCH ?1
+             ORDER BY bm25(note_fts) LIMIT ?2"
+        };
+        let mut legacy = connection
+            .prepare(legacy_sql)
+            .map_err(|error| format!("无法准备兼容全文搜索：{error}"))?;
+        candidates = if let Some(vault_id) = scoped {
+            legacy
+                .query_map(
+                    params![legacy_match_query, vault_id, candidate_limit],
+                    map_row,
+                )
+                .map_err(|error| format!("兼容全文搜索失败：{error}"))?
+                .filter_map(Result::ok)
+                .collect()
+        } else {
+            legacy
+                .query_map(params![legacy_match_query, candidate_limit], map_row)
+                .map_err(|error| format!("兼容全文搜索失败：{error}"))?
+                .filter_map(Result::ok)
+                .collect()
+        };
+    }
+    Ok(candidates)
+}
+
+fn load_vector_search_candidates(
+    connection: &Connection,
+    scoped: Option<&str>,
+    query: &str,
+) -> Result<Vec<IndexedSearchCandidate>, String> {
+    let Some(query_vector) = query_local_feature_vector(query) else {
+        return Ok(Vec::new());
+    };
+    let vector_sql = if scoped.is_some() {
+        "SELECT i.vault_id, i.relative_path, i.title,
+                COALESCE((
+                  SELECT substr(f.content, 1, 320) FROM note_fts f
+                  WHERE f.vault_id=i.vault_id AND f.relative_path=i.relative_path LIMIT 1
+                ), ''),
+                i.modified_at, i.tags_json, i.wiki_links_json,
+                v.representation_version, v.dimensions, v.vector_blob
+         FROM note_feature_vectors v
+         JOIN note_index i
+           ON i.vault_id=v.vault_id AND i.relative_path=v.relative_path
+          AND i.content_hash=v.content_hash
+         WHERE v.vault_id=?1"
+    } else {
+        "SELECT i.vault_id, i.relative_path, i.title,
+                COALESCE((
+                  SELECT substr(f.content, 1, 320) FROM note_fts f
+                  WHERE f.vault_id=i.vault_id AND f.relative_path=i.relative_path LIMIT 1
+                ), ''),
+                i.modified_at, i.tags_json, i.wiki_links_json,
+                v.representation_version, v.dimensions, v.vector_blob
+         FROM note_feature_vectors v
+         JOIN note_index i
+           ON i.vault_id=v.vault_id AND i.relative_path=v.relative_path
+          AND i.content_hash=v.content_hash"
+    };
+    let mut statement = connection
+        .prepare(vector_sql)
+        .map_err(|error| format!("无法准备本地特征向量搜索：{error}"))?;
+    let map_row = |row: &rusqlite::Row<'_>| {
+        let vault_id = row.get::<_, String>(0)?;
+        let relative_path = row.get::<_, String>(1)?;
+        let title = row.get::<_, String>(2)?;
+        let excerpt = row.get::<_, String>(3)?;
+        let modified_at = row.get::<_, String>(4)?;
+        let tags_json = row.get::<_, String>(5)?;
+        let wiki_links_json = row.get::<_, String>(6)?;
+        let version = row.get::<_, i64>(7)?;
+        let dimensions = row.get::<_, i64>(8)?;
+        let blob = row.get::<_, Vec<u8>>(9)?;
+        let similarity = decode_local_feature_vector(version, dimensions, &blob)
+            .and_then(|candidate| local_vector_similarity(&query_vector, &candidate));
+        Ok(similarity
+            .filter(|score| *score >= MIN_LOCAL_VECTOR_SIMILARITY)
+            .map(|score| IndexedSearchCandidate {
+                vault_id,
+                relative_path,
+                title,
+                excerpt,
+                modified_at,
+                lexical_score: None,
+                vector_similarity: Some(score),
+                tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+                wiki_links: serde_json::from_str(&wiki_links_json).unwrap_or_default(),
+            }))
+    };
+    let candidates = if let Some(vault_id) = scoped {
+        statement
+            .query_map([vault_id], map_row)
+            .map_err(|error| format!("本地特征向量搜索失败：{error}"))?
+            .filter_map(Result::ok)
+            .flatten()
+            .collect()
+    } else {
+        statement
+            .query_map([], map_row)
+            .map_err(|error| format!("本地特征向量搜索失败：{error}"))?
+            .filter_map(Result::ok)
+            .flatten()
+            .collect()
+    };
+    Ok(candidates)
+}
+
+fn indexed_search_in_connection(
+    connection: &Connection,
+    vault_id: Option<&str>,
+    query: &str,
+    max_results: usize,
+) -> Result<Vec<IndexedSearchResult>, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err("搜索词不能为空".to_string());
+    }
+    if query.chars().count() > MAX_SEARCH_QUERY_CHARS {
+        return Err("搜索词超过 512 个字符的安全上限".to_string());
+    }
+    let scoped = vault_id.filter(|value| *value != "all");
+    let candidate_limit = (max_results * 5).min(1_000);
+    let normalized_query = query.nfc().collect::<String>().to_lowercase();
+    let now = Utc::now();
+    let mut lexical_candidates =
+        load_lexical_search_candidates(connection, scoped, query, candidate_limit as i64)?;
+    lexical_candidates.sort_by(|left, right| {
+        let left_signals = indexed_search_candidate_signals(left, &normalized_query, &now);
+        let right_signals = indexed_search_candidate_signals(right, &normalized_query, &now);
+        let left_score = -left.lexical_score.unwrap_or_default()
+            + left_signals.0
+            + left_signals.1
+            + left_signals.2;
+        let right_score = -right.lexical_score.unwrap_or_default()
+            + right_signals.0
+            + right_signals.1
+            + right_signals.2;
+        right_score
+            .partial_cmp(&left_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.relative_path.cmp(&right.relative_path))
+    });
+    lexical_candidates.truncate(candidate_limit);
+
+    let mut vector_candidates = match load_vector_search_candidates(connection, scoped, query) {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            log::warn!("本地特征向量不可用，继续使用 FTS：{error}");
+            Vec::new()
+        }
+    };
+    vector_candidates.sort_by(|left, right| {
+        right
+            .vector_similarity
+            .unwrap_or_default()
+            .partial_cmp(&left.vector_similarity.unwrap_or_default())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                let left_signals = indexed_search_candidate_signals(left, &normalized_query, &now);
+                let right_signals =
+                    indexed_search_candidate_signals(right, &normalized_query, &now);
+                (right_signals.0 + right_signals.1 + right_signals.2)
+                    .partial_cmp(&(left_signals.0 + left_signals.1 + left_signals.2))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.relative_path.cmp(&right.relative_path))
+    });
+    vector_candidates.truncate(candidate_limit);
+
+    let lexical_ranks = lexical_candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            (
+                (candidate.vault_id.clone(), candidate.relative_path.clone()),
+                index + 1,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let vector_ranks = vector_candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            (
+                (candidate.vault_id.clone(), candidate.relative_path.clone()),
+                index + 1,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut fused = HashMap::new();
+    for candidate in lexical_candidates {
+        fused.insert(
+            (candidate.vault_id.clone(), candidate.relative_path.clone()),
+            candidate,
+        );
+    }
+    for candidate in vector_candidates {
+        let key = (candidate.vault_id.clone(), candidate.relative_path.clone());
+        fused
+            .entry(key)
+            .and_modify(|existing: &mut IndexedSearchCandidate| {
+                existing.vector_similarity = candidate.vector_similarity;
+                if existing.excerpt.is_empty() {
+                    existing.excerpt.clone_from(&candidate.excerpt);
+                }
+            })
+            .or_insert(candidate);
+    }
+
+    let mut results = fused
+        .into_iter()
+        .map(|(key, candidate)| {
+            let lexical_rank = lexical_ranks.get(&key).copied();
+            let vector_rank = vector_ranks.get(&key).copied();
+            let lexical_rrf = lexical_rank
+                .map(|rank| 1.0 / (RRF_K + rank as f64))
+                .unwrap_or(0.0);
+            let vector_rrf = vector_rank
+                .map(|rank| 1.0 / (RRF_K + rank as f64))
+                .unwrap_or(0.0);
+            let (title_path_bonus, relation_bonus, recency_bonus) =
+                indexed_search_candidate_signals(&candidate, &normalized_query, &now);
+            IndexedSearchResult {
+                vault_id: candidate.vault_id,
+                relative_path: candidate.relative_path,
+                title: candidate.title,
+                excerpt: candidate.excerpt,
+                modified_at: candidate.modified_at,
+                score: lexical_rrf + vector_rrf,
+                tags: candidate.tags,
+                wiki_links: candidate.wiki_links,
+                source_kind: "obsidian_markdown".to_string(),
+                ranking_signals: IndexedSearchSignals {
+                    lexical_rank,
+                    vector_rank,
+                    lexical_rrf,
+                    vector_rrf,
+                    vector_similarity: candidate.vector_similarity,
+                    title_path_bonus,
+                    relation_bonus,
+                    recency_bonus,
+                    vector_kind: "local_feature_hash_v1",
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+    results.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                let left_signals = &left.ranking_signals;
+                let right_signals = &right.ranking_signals;
+                (right_signals.title_path_bonus
+                    + right_signals.relation_bonus
+                    + right_signals.recency_bonus)
+                    .partial_cmp(
+                        &(left_signals.title_path_bonus
+                            + left_signals.relation_bonus
+                            + left_signals.recency_bonus),
+                    )
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| right.modified_at.cmp(&left.modified_at))
+            .then_with(|| left.relative_path.cmp(&right.relative_path))
+    });
+    results.truncate(max_results.clamp(1, 200));
+    Ok(results)
+}
+
 #[tauri::command]
 pub fn indexed_search(
     database: State<'_, RuntimeDatabase>,
@@ -5642,61 +7866,16 @@ pub fn indexed_search(
     query: String,
     limit: Option<usize>,
 ) -> Result<Vec<IndexedSearchResult>, String> {
-    let query = query.trim();
-    if query.is_empty() {
-        return Err("搜索词不能为空".to_string());
-    }
-    let match_query = fts_match_query(query)?;
     let connection = database
         .connection
         .lock()
         .map_err(|_| "SQLite 连接锁不可用".to_string())?;
-    let scoped = vault_id.as_deref().filter(|value| *value != "all");
-    let sql = if scoped.is_some() {
-        "SELECT f.vault_id, f.relative_path, f.title,
-                snippet(note_fts, 3, '', '', '…', 24), i.modified_at,
-                bm25(note_fts)
-         FROM note_fts f
-         JOIN note_index i ON i.vault_id=f.vault_id AND i.relative_path=f.relative_path
-         WHERE note_fts MATCH ?1 AND f.vault_id=?2
-         ORDER BY bm25(note_fts) LIMIT ?3"
-    } else {
-        "SELECT f.vault_id, f.relative_path, f.title,
-                snippet(note_fts, 3, '', '', '…', 24), i.modified_at,
-                bm25(note_fts)
-         FROM note_fts f
-         JOIN note_index i ON i.vault_id=f.vault_id AND i.relative_path=f.relative_path
-         WHERE note_fts MATCH ?1
-         ORDER BY bm25(note_fts) LIMIT ?2"
-    };
-    let mut statement = connection
-        .prepare(sql)
-        .map_err(|error| format!("无法准备全文搜索：{error}"))?;
-    let max_results = limit.unwrap_or(50).clamp(1, 200) as i64;
-    let map_row = |row: &rusqlite::Row<'_>| {
-        Ok(IndexedSearchResult {
-            vault_id: row.get(0)?,
-            relative_path: row.get(1)?,
-            title: row.get(2)?,
-            excerpt: row.get(3)?,
-            modified_at: row.get(4)?,
-            score: row.get(5)?,
-        })
-    };
-    let results = if let Some(vault_id) = scoped {
-        statement
-            .query_map(params![match_query, vault_id, max_results], map_row)
-            .map_err(|error| format!("全文搜索失败：{error}"))?
-            .filter_map(Result::ok)
-            .collect()
-    } else {
-        statement
-            .query_map(params![match_query, max_results], map_row)
-            .map_err(|error| format!("全文搜索失败：{error}"))?
-            .filter_map(Result::ok)
-            .collect()
-    };
-    Ok(results)
+    indexed_search_in_connection(
+        &connection,
+        vault_id.as_deref(),
+        &query,
+        limit.unwrap_or(50).clamp(1, 200),
+    )
 }
 
 #[cfg(test)]
@@ -5717,6 +7896,44 @@ mod tests {
         }
     }
 
+    fn test_vault(id: &str, root: &Path) -> VaultDescriptor {
+        let canonical = root.canonicalize().expect("canonicalize test vault");
+        VaultDescriptor {
+            id: id.to_string(),
+            name: id.to_string(),
+            path: canonical
+                .to_str()
+                .expect("test vault path is utf8")
+                .to_string(),
+            note_count: 0,
+            attachment_count: 0,
+            connection_state: "connected".to_string(),
+            is_open: false,
+            last_indexed_at: Utc::now().to_rfc3339(),
+            last_error: None,
+        }
+    }
+
+    fn register_test_vault(database: &RuntimeDatabase, id: &str, root: &Path) -> VaultDescriptor {
+        let vault = test_vault(id, root);
+        database
+            .sync_vault_registry(std::slice::from_ref(&vault))
+            .expect("register test vault");
+        vault
+    }
+
+    fn force_vault_index_queue_due(database: &RuntimeDatabase) {
+        database
+            .connection
+            .lock()
+            .expect("lock test database")
+            .execute(
+                "UPDATE vault_index_changes SET available_at_ms=0 WHERE state='pending'",
+                [],
+            )
+            .expect("make queue due");
+    }
+
     fn snapshot(skills: Vec<Value>) -> ManagedResourceSnapshotInput {
         ManagedResourceSnapshotInput {
             custom_skills: skills,
@@ -5730,29 +7947,1211 @@ mod tests {
     }
 
     #[test]
-    fn managed_resources_version_delete_and_reopen() {
+    fn unicode_metadata_and_paths_are_normalized_without_replacement_characters() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let root = directory.path();
+        let filename = "知识-Cafe\u{301}-🧭.md";
+        let path = root.join(filename);
+        fs::write(
+            &path,
+            "# 知识 Cafe\u{301} 🧭\n\n#标签 [[关联 Cafe\u{301} 🧩]]",
+        )
+        .expect("write unicode note");
+        let connection = Connection::open_in_memory().expect("open sqlite");
+        run_migrations(&connection).expect("run migrations");
+        assert!(
+            index_note_in_connection(&connection, "vault-unicode", root, &path)
+                .expect("index unicode note")
+        );
+        let (relative_path, title, links): (String, String, String) = connection
+            .query_row(
+                "SELECT relative_path, title, wiki_links_json FROM note_index WHERE vault_id='vault-unicode'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read unicode index");
+        assert_eq!(relative_path, "知识-Café-🧭.md");
+        assert_eq!(title, "知识 Café 🧭");
+        assert!(links.contains("关联 Café 🧩"));
+        assert!(!format!("{relative_path}{title}{links}").contains('\u{fffd}'));
+        assert_eq!(
+            normalize_queued_relative_path("目录\\Cafe\u{301}\\笔记.md")
+                .expect("normalize windows separators"),
+            "目录/Café/笔记.md"
+        );
+    }
+
+    #[test]
+    fn latest_migrations_are_incremental_and_preserve_version_21_data() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let path = directory.path().join("runtime.sqlite");
+        let database = test_database(&path);
+        let connection = database.connection.lock().expect("lock sqlite");
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 DROP TABLE assistant_requests;
+                 DROP TABLE assistant_conversations;
+                 DROP TABLE note_feature_vectors;
+                 DROP TABLE memory_reflection_jobs;
+                 DROP TABLE memory_record_revisions;
+                 DROP TABLE memory_fts;
+                 DROP TABLE memory_records;
+                 DROP TABLE note_lexical_fts;
+                 DROP TABLE vault_index_changes;
+                 DROP TABLE skill_lifecycle_audit;
+                 DROP TABLE skill_approvals;
+                 DROP TABLE skill_evaluations;
+                 DROP TABLE skill_versions;
+                 DROP TABLE skill_registry;
+                 DROP TABLE runtime_trace_events;
+                 DROP TABLE runtime_trace_bindings;
+                 DROP TABLE runtime_traces;
+                 CREATE TABLE migration_sentinel (value TEXT NOT NULL);
+                 INSERT INTO migration_sentinel (value) VALUES ('keep-me');
+                 PRAGMA user_version=21;
+                 PRAGMA foreign_keys=ON;",
+            )
+            .expect("prepare version 21 database");
+        run_migrations(&connection).expect("migrate to latest version");
+        let version = connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .expect("read schema version");
+        let sentinel = connection
+            .query_row("SELECT value FROM migration_sentinel", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .expect("read sentinel");
+        let new_tables = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type='table' AND name IN (
+                   'vault_index_changes', 'note_lexical_fts', 'memory_records',
+                   'memory_record_revisions', 'memory_fts', 'memory_reflection_jobs',
+                   'note_feature_vectors', 'assistant_conversations', 'assistant_requests'
+                 )",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("read Memory V2 and lexical search schema");
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(sentinel, "keep-me");
+        assert_eq!(new_tables, 9);
+    }
+
+    #[test]
+    fn version_27_upgrade_converts_failed_index_rows_to_dead_letter() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let connection = Connection::open(directory.path().join("runtime.sqlite"))
+            .expect("open sqlite database");
+        connection
+            .execute_batch(
+                "CREATE TABLE vault_index_changes (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   vault_id TEXT NOT NULL,
+                   canonical_root TEXT NOT NULL,
+                   relative_path TEXT NOT NULL,
+                   generation INTEGER NOT NULL DEFAULT 1 CHECK(generation > 0),
+                   change_kind TEXT NOT NULL CHECK(change_kind IN ('upsert', 'delete')),
+                   state TEXT NOT NULL CHECK(state IN ('pending', 'processing', 'failed')),
+                   attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+                   available_at_ms INTEGER NOT NULL,
+                   claimed_at_ms INTEGER,
+                   last_error TEXT,
+                   trace_id TEXT,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   UNIQUE(vault_id, relative_path)
+                 );
+                 CREATE INDEX idx_vault_index_changes_ready
+                   ON vault_index_changes(state, available_at_ms, updated_at);
+                 INSERT INTO vault_index_changes
+                   (vault_id, canonical_root, relative_path, generation, change_kind, state,
+                    attempt_count, available_at_ms, claimed_at_ms, last_error, trace_id,
+                    created_at, updated_at)
+                 VALUES
+                   ('vault-migration', '/tmp/vault', 'dead.md', 1, 'upsert', 'failed',
+                    5, 0, NULL, 'exhausted', 'trace-index-migration',
+                    '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                 PRAGMA user_version=27;",
+            )
+            .expect("prepare version 27 database");
+
+        run_migrations(&connection).expect("migrate version 27 database");
+        let (version, state, trace_id) = connection
+            .query_row(
+                "SELECT (SELECT user_version FROM pragma_user_version), state, trace_id
+                 FROM vault_index_changes WHERE vault_id='vault-migration'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .expect("read migrated dead-letter row");
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(state, "dead_letter");
+        assert_eq!(trace_id, "trace-index-migration");
+    }
+
+    #[test]
+    fn vault_index_queue_coalesces_rapid_file_changes() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let root = directory.path().join("vault");
+        fs::create_dir(&root).expect("create vault");
+        let note = root.join("变化.md");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        register_test_vault(&database, "vault-coalesce", &root);
+
+        fs::write(&note, "# 第一版").expect("write first note");
+        database
+            .enqueue_vault_index_path("vault-coalesce", &root, &note)
+            .expect("enqueue create");
+        fs::write(&note, "# 第二版").expect("write second note");
+        database
+            .enqueue_vault_index_path("vault-coalesce", &root, &note)
+            .expect("enqueue modify");
+        fs::remove_file(&note).expect("delete note");
+        database
+            .enqueue_vault_index_path("vault-coalesce", &root, &note)
+            .expect("enqueue delete");
+        fs::write(&note, "# 最终版").expect("recreate note");
+        database
+            .enqueue_vault_index_path("vault-coalesce", &root, &note)
+            .expect("enqueue recreate");
+
+        let row = database
+            .connection
+            .lock()
+            .expect("lock database")
+            .query_row(
+                "SELECT generation, change_kind, state, attempt_count
+                 FROM vault_index_changes WHERE vault_id='vault-coalesce'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .expect("read coalesced queue row");
+        assert_eq!(row, (4, "upsert".to_string(), "pending".to_string(), 0));
+    }
+
+    #[test]
+    fn vault_index_queue_preserves_known_trace_across_watcher_events() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let root = directory.path().join("vault");
+        fs::create_dir(&root).expect("create vault");
+        let note = root.join("追踪.md");
+        fs::write(&note, "# Trace").expect("write note");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        register_test_vault(&database, "vault-trace", &root);
+
+        database
+            .enqueue_vault_index_path("vault-trace", &root, &note)
+            .expect("enqueue watcher fallback");
+        let fallback_trace = database
+            .connection
+            .lock()
+            .expect("lock database")
+            .query_row(
+                "SELECT trace_id FROM vault_index_changes WHERE vault_id='vault-trace'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read fallback trace");
+
+        database
+            .enqueue_vault_index_path_with_trace("vault-trace", &root, &note, "trace-known-a")
+            .expect("known trace replaces fallback");
+        database
+            .enqueue_vault_index_path("vault-trace", &root, &note)
+            .expect("watcher preserves known trace");
+        database
+            .enqueue_vault_index_path_with_trace("vault-trace", &root, &note, "trace-known-b")
+            .expect("new known trace replaces old known trace");
+        database
+            .enqueue_vault_index_path("vault-trace", &root, &note)
+            .expect("later watcher preserves newest known trace");
+
+        let (trace_id, generation) = database
+            .connection
+            .lock()
+            .expect("lock database")
+            .query_row(
+                "SELECT trace_id, generation FROM vault_index_changes WHERE vault_id='vault-trace'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .expect("read persisted trace");
+        assert_ne!(fallback_trace, "trace-known-a");
+        assert_eq!(trace_id, "trace-known-b");
+        assert_eq!(generation, 5);
+    }
+
+    #[test]
+    fn repeated_watcher_events_keep_the_first_fallback_trace() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let root = directory.path().join("vault");
+        fs::create_dir(&root).expect("create vault");
+        let note = root.join("外部变化.md");
+        fs::write(&note, "# First").expect("write note");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        register_test_vault(&database, "vault-fallback-trace", &root);
+        database
+            .enqueue_vault_index_path("vault-fallback-trace", &root, &note)
+            .expect("enqueue first watcher event");
+        let first_trace = database
+            .connection
+            .lock()
+            .expect("lock database")
+            .query_row(
+                "SELECT trace_id FROM vault_index_changes WHERE vault_id='vault-fallback-trace'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read first trace");
+        database
+            .enqueue_vault_index_path("vault-fallback-trace", &root, &note)
+            .expect("enqueue second watcher event");
+        let second_trace = database
+            .connection
+            .lock()
+            .expect("lock database")
+            .query_row(
+                "SELECT trace_id FROM vault_index_changes WHERE vault_id='vault-fallback-trace'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read second trace");
+        assert_eq!(second_trace, first_trace);
+    }
+
+    #[test]
+    fn newer_generation_supersedes_a_claimed_change() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let root = directory.path().join("vault");
+        fs::create_dir(&root).expect("create vault");
+        let note = root.join("并发.md");
+        fs::write(&note, "# 第一版").expect("write note");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        register_test_vault(&database, "vault-generation", &root);
+        database
+            .enqueue_vault_index_path("vault-generation", &root, &note)
+            .expect("enqueue first generation");
+        force_vault_index_queue_due(&database);
+        let claimed = database
+            .claim_vault_index_changes(1)
+            .expect("claim first generation")
+            .pop()
+            .expect("claimed row");
+
+        fs::write(&note, "# 第二版").expect("update note");
+        database
+            .enqueue_vault_index_path("vault-generation", &root, &note)
+            .expect("enqueue second generation");
+        assert!(database
+            .apply_claimed_vault_index_change(&claimed, &root)
+            .expect("old apply returns cleanly")
+            .is_none());
+        let failure = database
+            .fail_claimed_vault_index_change(&claimed, "旧任务失败")
+            .expect("old failure returns cleanly");
+        assert!(!failure.updated);
+
+        let row = database
+            .connection
+            .lock()
+            .expect("lock database")
+            .query_row(
+                "SELECT generation, state, attempt_count FROM vault_index_changes",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .expect("read current generation");
+        assert_eq!(row, (2, "pending".to_string(), 0));
+    }
+
+    #[test]
+    fn interrupted_vault_index_claim_is_recovered_after_reopen() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let root = directory.path().join("vault");
+        fs::create_dir(&root).expect("create vault");
+        let note = root.join("恢复.md");
+        fs::write(&note, "# 恢复").expect("write note");
+        let database_path = directory.path().join("runtime.sqlite");
+        {
+            let database = test_database(&database_path);
+            register_test_vault(&database, "vault-recovery", &root);
+            database
+                .enqueue_vault_index_path("vault-recovery", &root, &note)
+                .expect("enqueue note");
+            force_vault_index_queue_due(&database);
+            assert_eq!(
+                database
+                    .claim_vault_index_changes(1)
+                    .expect("claim note")
+                    .len(),
+                1
+            );
+        }
+
+        let reopened = RuntimeDatabase::open_test(&database_path).expect("reopen database");
+        assert_eq!(
+            reopened
+                .recover_vault_index_changes()
+                .expect("recover queue"),
+            1
+        );
+        let state = reopened
+            .connection
+            .lock()
+            .expect("lock database")
+            .query_row(
+                "SELECT state, attempt_count FROM vault_index_changes",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .expect("read recovered row");
+        assert_eq!(state, ("pending".to_string(), 1));
+    }
+
+    #[test]
+    fn exhausted_interrupted_index_claim_is_dead_lettered_with_trace_and_audit() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let root = directory.path().join("vault");
+        fs::create_dir(&root).expect("create vault");
+        let note = root.join("恢复死信.md");
+        fs::write(&note, "# 恢复死信").expect("write note");
+        let database_path = directory.path().join("runtime.sqlite");
+        {
+            let database = test_database(&database_path);
+            register_test_vault(&database, "vault-recovery-dead-letter", &root);
+            database
+                .enqueue_vault_index_path("vault-recovery-dead-letter", &root, &note)
+                .expect("enqueue note");
+            database
+                .connection
+                .lock()
+                .expect("lock database")
+                .execute(
+                    "UPDATE vault_index_changes
+                     SET state='processing', attempt_count=?1, claimed_at_ms=1",
+                    [VAULT_INDEX_MAX_ATTEMPTS],
+                )
+                .expect("simulate exhausted interrupted claim");
+        }
+
+        let reopened = RuntimeDatabase::open_test(&database_path).expect("reopen database");
+        assert_eq!(
+            reopened
+                .recover_vault_index_changes()
+                .expect("recover exhausted queue"),
+            1
+        );
+        let connection = reopened.connection.lock().expect("lock reopened database");
+        let (state, last_error) = connection
+            .query_row(
+                "SELECT state, last_error FROM vault_index_changes",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("read recovered dead-letter row");
+        let dead_letter_traces = connection
+            .query_row(
+                "SELECT COUNT(*) FROM runtime_trace_events
+                 WHERE entity_kind='index_change' AND event_type='index.dead_lettered'
+                   AND state='dead_letter'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count dead-letter traces");
+        let failure_events = connection
+            .query_row(
+                "SELECT COUNT(*) FROM operation_events
+                 WHERE event_type='vault.note.index' AND state='failed'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count dead-letter operation events");
+        assert_eq!(state, "dead_letter");
+        assert_eq!(last_error, "应用退出前索引任务未完成");
+        assert_eq!(dead_letter_traces, 1);
+        assert_eq!(failure_events, 1);
+    }
+
+    #[test]
+    fn claim_sweep_dead_letters_exhausted_pending_rows_with_trace_and_audit() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let root = directory.path().join("vault");
+        fs::create_dir(&root).expect("create vault");
+        let note = root.join("认领死信.md");
+        fs::write(&note, "# 认领死信").expect("write note");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        register_test_vault(&database, "vault-claim-dead-letter", &root);
+        database
+            .enqueue_vault_index_path("vault-claim-dead-letter", &root, &note)
+            .expect("enqueue note");
+        database
+            .connection
+            .lock()
+            .expect("lock database")
+            .execute(
+                "UPDATE vault_index_changes SET attempt_count=?1, available_at_ms=0",
+                [VAULT_INDEX_MAX_ATTEMPTS],
+            )
+            .expect("simulate exhausted pending row");
+
+        assert!(database
+            .claim_vault_index_changes(1)
+            .expect("sweep exhausted pending row")
+            .is_empty());
+        let connection = database.connection.lock().expect("lock database");
+        let (state, last_error) = connection
+            .query_row(
+                "SELECT state, last_error FROM vault_index_changes",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("read claim-swept dead-letter row");
+        let dead_letter_traces = connection
+            .query_row(
+                "SELECT COUNT(*) FROM runtime_trace_events
+                 WHERE entity_kind='index_change' AND event_type='index.dead_lettered'
+                   AND state='dead_letter'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count dead-letter traces");
+        let failure_events = connection
+            .query_row(
+                "SELECT COUNT(*) FROM operation_events
+                 WHERE event_type='vault.note.index' AND state='failed'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count dead-letter operation events");
+        assert_eq!(state, "dead_letter");
+        assert_eq!(last_error, "Vault 索引任务超过最大重试次数");
+        assert_eq!(dead_letter_traces, 1);
+        assert_eq!(failure_events, 1);
+    }
+
+    #[test]
+    fn vault_index_retry_limit_transitions_to_dead_letter() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let root = directory.path().join("vault");
+        fs::create_dir(&root).expect("create vault");
+        let note = root.join("失败.md");
+        fs::write(&note, "# 失败").expect("write note");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        register_test_vault(&database, "vault-retry", &root);
+        database
+            .enqueue_vault_index_path("vault-retry", &root, &note)
+            .expect("enqueue note");
+
+        for attempt in 1..=VAULT_INDEX_MAX_ATTEMPTS {
+            force_vault_index_queue_due(&database);
+            let claimed = database
+                .claim_vault_index_changes(1)
+                .expect("claim retry")
+                .pop()
+                .expect("claimed retry");
+            assert_eq!(claimed.attempt_count, attempt);
+            let outcome = database
+                .fail_claimed_vault_index_change(&claimed, "测试失败")
+                .expect("record retry failure");
+            assert!(outcome.updated);
+            assert_eq!(outcome.terminal, attempt == VAULT_INDEX_MAX_ATTEMPTS);
+        }
+        let connection = database.connection.lock().expect("lock database");
+        let state = connection
+            .query_row("SELECT state FROM vault_index_changes", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .expect("read failed state");
+        let failed_events = connection
+            .query_row(
+                "SELECT COUNT(*) FROM operation_events
+                 WHERE event_type='vault.note.index' AND state='failed'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count failure events");
+        let dead_letter_traces = connection
+            .query_row(
+                "SELECT COUNT(*) FROM runtime_trace_events
+                 WHERE entity_kind='index_change' AND event_type='index.dead_lettered'
+                   AND state='dead_letter'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count dead-letter traces");
+        assert_eq!(state, "dead_letter");
+        assert_eq!(failed_events, 1);
+        assert_eq!(dead_letter_traces, 1);
+    }
+
+    #[test]
+    fn vault_index_apply_is_atomic_with_fts_audit_and_queue_completion() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let root = directory.path().join("vault");
+        fs::create_dir(&root).expect("create vault");
+        let note = root.join("事务.md");
+        fs::write(&note, "# 事务\n\n必须一起提交").expect("write note");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        register_test_vault(&database, "vault-atomic", &root);
+        database
+            .enqueue_vault_index_path("vault-atomic", &root, &note)
+            .expect("enqueue note");
+        force_vault_index_queue_due(&database);
+        let claimed = database
+            .claim_vault_index_changes(1)
+            .expect("claim note")
+            .pop()
+            .expect("claimed note");
+        database
+            .connection
+            .lock()
+            .expect("lock database")
+            .execute_batch(
+                "CREATE TRIGGER reject_vault_index_audit
+                 BEFORE INSERT ON operation_events
+                 WHEN NEW.event_type='vault.note.index'
+                 BEGIN SELECT RAISE(ABORT, 'reject audit'); END;",
+            )
+            .expect("install rollback trigger");
+        assert!(database
+            .apply_claimed_vault_index_change(&claimed, &root)
+            .is_err());
+        let connection = database.connection.lock().expect("lock database");
+        let note_count = connection
+            .query_row("SELECT COUNT(*) FROM note_index", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count note index");
+        let fts_count = connection
+            .query_row("SELECT COUNT(*) FROM note_fts", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count fts");
+        let lexical_count = connection
+            .query_row("SELECT COUNT(*) FROM note_lexical_fts", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count lexical fts");
+        let vector_count = connection
+            .query_row("SELECT COUNT(*) FROM note_feature_vectors", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count feature vectors");
+        let queue_state = connection
+            .query_row("SELECT state FROM vault_index_changes", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .expect("read queue state");
+        assert_eq!(note_count, 0);
+        assert_eq!(fts_count, 0);
+        assert_eq!(lexical_count, 0);
+        assert_eq!(vector_count, 0);
+        assert_eq!(queue_state, "processing");
+    }
+
+    #[test]
+    fn vault_index_queue_upsert_completes_with_searchable_fts_and_success_audit() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let root = directory.path().join("vault");
+        fs::create_dir(&root).expect("create vault");
+        let note = root.join("可搜索.md");
+        fs::write(&note, "# 可搜索\n\n独立检索词 yunspirequeue").expect("write note");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        register_test_vault(&database, "vault-upsert", &root);
+        database
+            .enqueue_vault_index_path("vault-upsert", &root, &note)
+            .expect("enqueue note");
+        force_vault_index_queue_due(&database);
+        let claimed = database
+            .claim_vault_index_changes(1)
+            .expect("claim note")
+            .pop()
+            .expect("claimed note");
+        let applied = database
+            .apply_claimed_vault_index_change(&claimed, &root)
+            .expect("apply note")
+            .expect("owned queue generation");
+        assert_eq!(applied.vault_id, "vault-upsert");
+        assert_eq!(applied.relative_path, "可搜索.md");
+        assert_eq!(applied.change_kind, "upsert");
+
+        let connection = database.connection.lock().expect("lock database");
+        let queue_count = connection
+            .query_row("SELECT COUNT(*) FROM vault_index_changes", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count queue");
+        let fts_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM note_fts
+                 WHERE note_fts MATCH ?1 AND vault_id=?2",
+                params!["\"yunspirequeue\"", "vault-upsert"],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("search fts");
+        let vector_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM note_feature_vectors
+                 WHERE vault_id=?1 AND relative_path=?2",
+                params!["vault-upsert", "可搜索.md"],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count feature vector");
+        let payload = connection
+            .query_row(
+                "SELECT payload FROM operation_events
+                 WHERE event_type='vault.note.index' AND state='success'
+                 ORDER BY rowid DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read success audit");
+        let event: OperationEvent =
+            serde_json::from_str(&payload).expect("parse success audit payload");
+        assert_eq!(queue_count, 0);
+        assert_eq!(fts_count, 1);
+        assert_eq!(vector_count, 1);
+        assert_eq!(event.vault_id.as_deref(), Some("vault-upsert"));
+        assert_eq!(event.relative_path.as_deref(), Some("可搜索.md"));
+    }
+
+    #[test]
+    fn chinese_lexical_index_matches_subphrases_tags_and_wiki_links() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let root = directory.path().join("vault");
+        fs::create_dir(&root).expect("create vault");
+        let note = root.join("知识系统.md");
+        fs::write(
+            &note,
+            "# 个人知识系统\n\n关联 [[知识图谱]] 与 #知识管理，支持中文局部检索。",
+        )
+        .expect("write note");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        register_test_vault(&database, "vault-chinese", &root);
+        database
+            .enqueue_vault_index_path("vault-chinese", &root, &note)
+            .expect("enqueue note");
+        force_vault_index_queue_due(&database);
+        let claimed = database
+            .claim_vault_index_changes(1)
+            .expect("claim note")
+            .pop()
+            .expect("claimed note");
+        database
+            .apply_claimed_vault_index_change(&claimed, &root)
+            .expect("apply note")
+            .expect("owned queue generation");
+
+        let query = lexical_fts_match_query("知识图谱").expect("build chinese query");
+        let connection = database.connection.lock().expect("lock database");
+        let matched = connection
+            .query_row(
+                "SELECT COUNT(*) FROM note_lexical_fts
+                 WHERE note_lexical_fts MATCH ?1 AND vault_id=?2",
+                params![query, "vault-chinese"],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("search chinese lexical index");
+        let (tags, links) = connection
+            .query_row(
+                "SELECT tags_json, wiki_links_json FROM note_index
+                 WHERE vault_id=?1 AND relative_path=?2",
+                params!["vault-chinese", "知识系统.md"],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("read relation metadata");
+        assert_eq!(matched, 1);
+        assert!(tags.contains("知识管理"));
+        assert!(links.contains("知识图谱"));
+    }
+
+    #[test]
+    fn local_vector_adds_chinese_feature_hit_and_rrf_is_explainable() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let root = directory.path().join("vault");
+        fs::create_dir(&root).expect("create vault");
+        let related = root.join("智能方法.md");
+        let unrelated = root.join("厨房记录.md");
+        fs::write(
+            &related,
+            "# 智能方法\n\n机器智能用于预测，学习方法用于归纳规律。#算法",
+        )
+        .expect("write related note");
+        fs::write(&unrelated, "# 厨房记录\n\n记录烘焙温度和食材比例。")
+            .expect("write unrelated note");
+        let connection = Connection::open_in_memory().expect("open sqlite");
+        run_migrations(&connection).expect("run migrations");
+        assert!(
+            index_note_in_connection(&connection, "vault-vector", &root, &related)
+                .expect("index related note")
+        );
+        assert!(
+            index_note_in_connection(&connection, "vault-vector", &root, &unrelated)
+                .expect("index unrelated note")
+        );
+        let related_vector = connection
+            .query_row(
+                "SELECT representation_version, dimensions, vector_blob
+                 FROM note_feature_vectors
+                 WHERE vault_id=?1 AND relative_path=?2",
+                params!["vault-vector", "智能方法.md"],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .expect("read related vector");
+        let related_similarity = local_vector_similarity(
+            &query_local_feature_vector("机器学习").expect("query vector"),
+            &decode_local_feature_vector(related_vector.0, related_vector.1, &related_vector.2)
+                .expect("decode related vector"),
+        )
+        .expect("calculate related similarity");
+        assert!(
+            related_similarity >= MIN_LOCAL_VECTOR_SIMILARITY,
+            "related similarity {related_similarity}"
+        );
+
+        let vector_only =
+            indexed_search_in_connection(&connection, Some("vault-vector"), "机器学习", 10)
+                .expect("run vector search");
+        let related_result = vector_only
+            .iter()
+            .find(|result| result.relative_path == "智能方法.md")
+            .expect("find vector-only related result");
+        assert_eq!(related_result.ranking_signals.lexical_rank, None);
+        assert!(related_result.ranking_signals.vector_rank.is_some());
+        assert!(related_result
+            .ranking_signals
+            .vector_similarity
+            .is_some_and(|score| score >= MIN_LOCAL_VECTOR_SIMILARITY));
+        assert!((related_result.score - related_result.ranking_signals.vector_rrf).abs() < 1e-12);
+
+        let fused = indexed_search_in_connection(&connection, Some("vault-vector"), "机器智能", 10)
+            .expect("run fused search");
+        let fused_result = fused
+            .iter()
+            .find(|result| result.relative_path == "智能方法.md")
+            .expect("find fused result");
+        let lexical_rank = fused_result
+            .ranking_signals
+            .lexical_rank
+            .expect("lexical rank");
+        let vector_rank = fused_result
+            .ranking_signals
+            .vector_rank
+            .expect("vector rank");
+        assert!(
+            (fused_result.ranking_signals.lexical_rrf - 1.0 / (RRF_K + lexical_rank as f64)).abs()
+                < 1e-12
+        );
+        assert!(
+            (fused_result.ranking_signals.vector_rrf - 1.0 / (RRF_K + vector_rank as f64)).abs()
+                < 1e-12
+        );
+        assert!(
+            (fused_result.score
+                - fused_result.ranking_signals.lexical_rrf
+                - fused_result.ranking_signals.vector_rrf)
+                .abs()
+                < 1e-12
+        );
+    }
+
+    #[test]
+    fn empty_missing_or_corrupt_vectors_keep_fts_available() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let root = directory.path().join("vault");
+        fs::create_dir(&root).expect("create vault");
+        let note = root.join("回退.md");
+        fs::write(&note, "# 回退\n\nlexicalfallbacktoken").expect("write note");
+        let connection = Connection::open_in_memory().expect("open sqlite");
+        run_migrations(&connection).expect("run migrations");
+        assert!(
+            indexed_search_in_connection(&connection, None, "空索引", 10)
+                .expect("search empty index")
+                .is_empty()
+        );
+        assert!(
+            index_note_in_connection(&connection, "vault-fallback", &root, &note)
+                .expect("index fallback note")
+        );
+        connection
+            .execute(
+                "UPDATE note_feature_vectors SET vector_blob=X'00'
+                 WHERE vault_id=?1 AND relative_path=?2",
+                params!["vault-fallback", "回退.md"],
+            )
+            .expect("corrupt feature vector");
+        let corrupted = indexed_search_in_connection(
+            &connection,
+            Some("vault-fallback"),
+            "lexicalfallbacktoken",
+            10,
+        )
+        .expect("search with corrupt vector");
+        assert_eq!(corrupted.len(), 1);
+        assert!(corrupted[0].ranking_signals.lexical_rank.is_some());
+        assert_eq!(corrupted[0].ranking_signals.vector_rank, None);
+
+        connection
+            .execute(
+                "DELETE FROM note_feature_vectors WHERE vault_id=?1 AND relative_path=?2",
+                params!["vault-fallback", "回退.md"],
+            )
+            .expect("remove feature vector");
+        let missing = indexed_search_in_connection(
+            &connection,
+            Some("vault-fallback"),
+            "lexicalfallbacktoken",
+            10,
+        )
+        .expect("search with missing vector");
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].ranking_signals.lexical_rank.is_some());
+        assert_eq!(missing[0].ranking_signals.vector_rank, None);
+    }
+
+    #[test]
+    fn feature_vectors_persist_after_database_reopen() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let root = directory.path().join("vault");
+        fs::create_dir(&root).expect("create vault");
+        let note = root.join("持久向量.md");
+        fs::write(&note, "# 持久向量\n\n本地特征表示会写入 SQLite。").expect("write note");
+        let database_path = directory.path().join("runtime.sqlite");
+        {
+            let database = RuntimeDatabase::open_test(&database_path).expect("open database");
+            let connection = database.connection.lock().expect("lock database");
+            assert!(
+                index_note_in_connection(&connection, "vault-persist", &root, &note)
+                    .expect("index note")
+            );
+        }
+        let reopened = RuntimeDatabase::open_test(&database_path).expect("reopen database");
+        let connection = reopened.connection.lock().expect("lock reopened database");
+        let stored = connection
+            .query_row(
+                "SELECT representation_version, dimensions, length(vector_blob)
+                 FROM note_feature_vectors
+                 WHERE vault_id=?1 AND relative_path=?2",
+                params!["vault-persist", "持久向量.md"],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .expect("read persisted vector");
+        assert_eq!(
+            stored,
+            (
+                LOCAL_FEATURE_VECTOR_VERSION,
+                LOCAL_FEATURE_VECTOR_DIMENSIONS as i64,
+                (LOCAL_FEATURE_VECTOR_DIMENSIONS * std::mem::size_of::<f32>()) as i64
+            )
+        );
+        assert!(
+            !indexed_search_in_connection(&connection, Some("vault-persist"), "本地特征", 10,)
+                .expect("search reopened database")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn version_24_upgrade_queues_and_rebuilds_missing_vectors() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let root = directory.path().join("vault");
+        fs::create_dir(&root).expect("create vault");
+        let note = root.join("升级.md");
+        fs::write(&note, "# 升级\n\n旧索引升级后重建本地特征向量。").expect("write note");
+        let database_path = directory.path().join("runtime.sqlite");
+        {
+            let database = RuntimeDatabase::open_test(&database_path).expect("open database");
+            register_test_vault(&database, "vault-upgrade", &root);
+            let connection = database.connection.lock().expect("lock database");
+            assert!(
+                index_note_in_connection(&connection, "vault-upgrade", &root, &note)
+                    .expect("index old note")
+            );
+            connection
+                .execute_batch(
+                    "DROP TABLE note_feature_vectors;
+                     DELETE FROM vault_index_changes;
+                     PRAGMA user_version=24;",
+                )
+                .expect("simulate version 24 database");
+        }
+
+        let reopened = RuntimeDatabase::open_test(&database_path).expect("upgrade database");
+        let (version, queued) = {
+            let connection = reopened.connection.lock().expect("lock upgraded database");
+            let version = connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("read upgraded version");
+            let queued = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM vault_index_changes
+                     WHERE vault_id=?1 AND relative_path=?2 AND state='pending'",
+                    params!["vault-upgrade", "升级.md"],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count queued rebuild");
+            (version, queued)
+        };
+        assert_eq!((version, queued), (CURRENT_SCHEMA_VERSION, 1));
+        let claimed = reopened
+            .claim_vault_index_changes(1)
+            .expect("claim upgrade rebuild")
+            .pop()
+            .expect("queued upgrade rebuild");
+        reopened
+            .apply_claimed_vault_index_change(&claimed, &root)
+            .expect("apply upgrade rebuild")
+            .expect("owned upgrade generation");
+        let vector_count = reopened
+            .connection
+            .lock()
+            .expect("lock rebuilt database")
+            .query_row(
+                "SELECT COUNT(*) FROM note_feature_vectors
+                 WHERE vault_id=?1 AND relative_path=?2",
+                params!["vault-upgrade", "升级.md"],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count rebuilt vector");
+        assert_eq!(vector_count, 1);
+    }
+
+    #[test]
+    fn vault_index_queue_delete_removes_note_and_fts_together() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let root = directory.path().join("vault");
+        fs::create_dir(&root).expect("create vault");
+        let note = root.join("待删除.md");
+        fs::write(&note, "# 待删除\n\ndeletequeue").expect("write note");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        register_test_vault(&database, "vault-delete", &root);
+
+        database
+            .enqueue_vault_index_path("vault-delete", &root, &note)
+            .expect("enqueue initial note");
+        force_vault_index_queue_due(&database);
+        let initial = database
+            .claim_vault_index_changes(1)
+            .expect("claim initial note")
+            .pop()
+            .expect("claimed initial note");
+        database
+            .apply_claimed_vault_index_change(&initial, &root)
+            .expect("apply initial note")
+            .expect("owned initial generation");
+
+        fs::remove_file(&note).expect("delete note");
+        database
+            .enqueue_vault_index_path("vault-delete", &root, &note)
+            .expect("enqueue deletion");
+        force_vault_index_queue_due(&database);
+        let deletion = database
+            .claim_vault_index_changes(1)
+            .expect("claim deletion")
+            .pop()
+            .expect("claimed deletion");
+        let applied = database
+            .apply_claimed_vault_index_change(&deletion, &root)
+            .expect("apply deletion")
+            .expect("owned deletion generation");
+        assert_eq!(applied.vault_id, "vault-delete");
+        assert_eq!(applied.relative_path, "待删除.md");
+        assert_eq!(applied.change_kind, "delete");
+
+        let connection = database.connection.lock().expect("lock database");
+        let note_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM note_index WHERE vault_id=?1 AND relative_path=?2",
+                params!["vault-delete", "待删除.md"],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count note index");
+        let fts_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM note_fts WHERE vault_id=?1 AND relative_path=?2",
+                params!["vault-delete", "待删除.md"],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count fts index");
+        let lexical_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM note_lexical_fts WHERE vault_id=?1 AND relative_path=?2",
+                params!["vault-delete", "待删除.md"],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count lexical index");
+        let vector_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM note_feature_vectors WHERE vault_id=?1 AND relative_path=?2",
+                params!["vault-delete", "待删除.md"],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count feature vector");
+        let queue_count = connection
+            .query_row("SELECT COUNT(*) FROM vault_index_changes", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count queue");
+        assert_eq!(
+            (
+                note_count,
+                fts_count,
+                lexical_count,
+                vector_count,
+                queue_count
+            ),
+            (0, 0, 0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn vault_reconciliation_queues_new_and_deleted_notes() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let root = directory.path().join("vault");
+        fs::create_dir(&root).expect("create vault");
+        let deleted = root.join("旧笔记.md");
+        let created = root.join("新笔记.md");
+        fs::write(&deleted, "# 旧笔记").expect("write old note");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        let vault = register_test_vault(&database, "vault-reconcile", &root);
+        {
+            let connection = database.connection.lock().expect("lock database");
+            assert!(
+                index_note_in_connection(&connection, "vault-reconcile", &root, &deleted)
+                    .expect("index old note")
+            );
+        }
+        fs::remove_file(&deleted).expect("delete old note");
+        fs::write(&created, "# 新笔记").expect("write new note");
+        let result = database
+            .reconcile_vault_index(&vault)
+            .expect("reconcile vault");
+        assert_eq!(result.queued_upserts, 1);
+        assert_eq!(result.queued_deletes, 1);
+        let connection = database.connection.lock().expect("lock database");
+        let changes = connection
+            .prepare(
+                "SELECT relative_path, change_kind FROM vault_index_changes
+                 ORDER BY relative_path",
+            )
+            .expect("prepare queue query")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("query queue")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect queue");
+        assert_eq!(
+            changes,
+            vec![
+                ("新笔记.md".to_string(), "upsert".to_string()),
+                ("旧笔记.md".to_string(), "delete".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn claimed_change_is_rejected_after_vault_root_changes() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let first_root = directory.path().join("first");
+        let second_root = directory.path().join("second");
+        fs::create_dir(&first_root).expect("create first vault");
+        fs::create_dir(&second_root).expect("create second vault");
+        let note = first_root.join("路径.md");
+        fs::write(&note, "# 原路径").expect("write note");
+        let database = test_database(&directory.path().join("runtime.sqlite"));
+        register_test_vault(&database, "vault-root", &first_root);
+        database
+            .enqueue_vault_index_path("vault-root", &first_root, &note)
+            .expect("enqueue note");
+        force_vault_index_queue_due(&database);
+        let claimed = database
+            .claim_vault_index_changes(1)
+            .expect("claim note")
+            .pop()
+            .expect("claimed note");
+        register_test_vault(&database, "vault-root", &second_root);
+        let error = database
+            .apply_claimed_vault_index_change(&claimed, &second_root)
+            .expect_err("old root must be rejected");
+        assert!(error.contains("根目录已变化"));
+        let indexed = database
+            .connection
+            .lock()
+            .expect("lock database")
+            .query_row("SELECT COUNT(*) FROM note_index", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count index");
+        assert_eq!(indexed, 0);
+    }
+
+    #[test]
+    fn managed_resources_version_delete_and_reopen_without_legacy_skill_bypass() {
         let directory = tempfile::tempdir().expect("create temp directory");
         let path = directory.path().join("runtime.sqlite");
         {
             let database = test_database(&path);
+            let mut first_snapshot =
+                snapshot(vec![json!({"id": "skill-1", "name": "旧入口不得写入"})]);
+            first_snapshot.schedules = vec![json!({"id": "schedule-1", "name": "第一版"})];
             let first = database
-                .sync_managed_resources(
-                    DEFAULT_LOCAL_WORKSPACE_SCOPE,
-                    &snapshot(vec![json!({"id": "skill-1", "name": "第一版"})]),
-                )
+                .sync_managed_resources(DEFAULT_LOCAL_WORKSPACE_SCOPE, &first_snapshot)
                 .expect("save first revision");
-            assert_eq!(first.custom_skills.len(), 1);
+            assert!(first.custom_skills.is_empty());
+            assert_eq!(first.schedules.len(), 1);
+            let mut second_snapshot = snapshot(Vec::new());
+            second_snapshot.schedules = vec![json!({"id": "schedule-1", "name": "第二版"})];
             database
-                .sync_managed_resources(
-                    DEFAULT_LOCAL_WORKSPACE_SCOPE,
-                    &snapshot(vec![json!({"id": "skill-1", "name": "第二版"})]),
-                )
+                .sync_managed_resources(DEFAULT_LOCAL_WORKSPACE_SCOPE, &second_snapshot)
                 .expect("save second revision");
             let connection = database.connection.lock().expect("lock sqlite");
+            let legacy_skills: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM managed_resources
+                     WHERE workspace_scope=?1 AND resource_type='user_skill'",
+                    [DEFAULT_LOCAL_WORKSPACE_SCOPE],
+                    |row| row.get(0),
+                )
+                .expect("count legacy skills");
+            assert_eq!(legacy_skills, 0);
             let revisions: i64 = connection
                 .query_row(
                     "SELECT COUNT(*) FROM managed_resource_revisions
-                     WHERE workspace_scope=?1 AND resource_type='user_skill' AND resource_id='skill-1'",
+                     WHERE workspace_scope=?1 AND resource_type='schedule' AND resource_id='schedule-1'",
                     [DEFAULT_LOCAL_WORKSPACE_SCOPE],
                     |row| row.get(0),
                 )
@@ -5764,16 +9163,17 @@ mod tests {
             let restored = database
                 .load_managed_resources(DEFAULT_LOCAL_WORKSPACE_SCOPE)
                 .expect("reload managed resources");
-            assert_eq!(restored.custom_skills[0]["name"], "第二版");
+            assert!(restored.custom_skills.is_empty());
+            assert_eq!(restored.schedules[0]["name"], "第二版");
             let deleted = database
                 .sync_managed_resources(DEFAULT_LOCAL_WORKSPACE_SCOPE, &snapshot(Vec::new()))
                 .expect("sync empty resource group");
-            assert!(deleted.custom_skills.is_empty());
+            assert!(deleted.schedules.is_empty());
             let connection = database.connection.lock().expect("lock sqlite");
             let state: String = connection
                 .query_row(
                     "SELECT state FROM managed_resources
-                     WHERE workspace_scope=?1 AND resource_type='user_skill' AND id='skill-1'",
+                     WHERE workspace_scope=?1 AND resource_type='schedule' AND id='schedule-1'",
                     [DEFAULT_LOCAL_WORKSPACE_SCOPE],
                     |row| row.get(0),
                 )
@@ -5782,7 +9182,7 @@ mod tests {
             let revisions: i64 = connection
                 .query_row(
                     "SELECT COUNT(*) FROM managed_resource_revisions
-                     WHERE workspace_scope=?1 AND resource_type='user_skill' AND resource_id='skill-1'",
+                     WHERE workspace_scope=?1 AND resource_type='schedule' AND resource_id='schedule-1'",
                     [DEFAULT_LOCAL_WORKSPACE_SCOPE],
                     |row| row.get(0),
                 )
@@ -5896,6 +9296,20 @@ mod tests {
         assert!(!first.1);
         assert!(second.1);
         assert_eq!(first.0, second.0);
+        let mut substituted = command.clone();
+        substituted.vault_id = Some("vault-substituted".to_string());
+        substituted.relative_paths = vec!["其他库/替换.md".to_string()];
+        let substituted_decision = crate::policy::evaluate(&substituted);
+        let error = database
+            .persist_application_command(
+                DEFAULT_LOCAL_WORKSPACE_SCOPE,
+                &substituted,
+                &substituted_decision,
+                "trace-substituted",
+                "2026-07-21T00:00:02Z",
+            )
+            .expect_err("idempotency key must not authorize substituted scope");
+        assert!(error.contains("不同的能力或参数范围"));
         let connection = database.connection.lock().expect("lock sqlite");
         for (table, expected) in [
             ("application_commands", 1_i64),
@@ -6072,6 +9486,12 @@ mod tests {
             .expect("restore database backup");
         assert_eq!(result.integrity, "ok");
         let connection = database.connection.lock().expect("lock sqlite");
+        restore_database_runtime_configuration(&connection)
+            .expect("reapply runtime configuration in WAL mode");
+        let journal_mode: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("read restored journal mode");
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
         let value: String = connection
             .query_row(
                 "SELECT value FROM workspace_state WHERE key='restore-test'",
@@ -6358,6 +9778,7 @@ mod tests {
         database
             .record_model_usage(&ModelUsageRecord {
                 request_id: "model-request-test",
+                trace_id: "trace-model-request-test",
                 operation: "assistant.chat",
                 provider: "openai",
                 model: "gpt-test",
@@ -6374,6 +9795,7 @@ mod tests {
         database
             .record_model_usage(&ModelUsageRecord {
                 request_id: "model-request-test",
+                trace_id: "trace-model-request-test",
                 operation: "assistant.chat",
                 provider: "openai",
                 model: "gpt-test",

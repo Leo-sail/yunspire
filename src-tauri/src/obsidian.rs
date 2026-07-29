@@ -1,7 +1,9 @@
 use crate::{
     capture_pipeline::{claim_staged_capture_attachment, remove_claimed_capture_attachment},
+    execution_ticket::{ExecutionTicketState, TicketScope},
     model_provider::ModelAnalysisState,
     runtime_db::RuntimeDatabase,
+    vault_batch::{self, BatchFileSource, BatchManifestEntryInput},
 };
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -23,6 +25,7 @@ use std::{
 };
 use tauri::{AppHandle, Manager, State};
 use tempfile::NamedTempFile;
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -37,6 +40,15 @@ const MAX_LONG_TERM_MEMORY_CONTENT_BYTES: usize = 1024 * 1024;
 const MAX_LONG_TERM_MEMORY_METADATA_BYTES: usize = 256 * 1024;
 const MAX_LONG_TERM_MEMORY_LEDGER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_LONG_TERM_MEMORY_LEDGER_PARTS: usize = 128;
+const VAULT_WRITE_CAPABILITIES: &[&str] = &[
+    "system:capture",
+    "system:create",
+    "system:inbox",
+    "system:knowledge_maintenance",
+    "system:reports",
+    "system:vaults",
+];
+const VAULT_WRITE_OPERATIONS: &[&str] = &["run", "create", "update", "generate"];
 
 #[derive(Default)]
 pub struct ObsidianAdapterState {
@@ -57,6 +69,8 @@ struct PendingWrite {
     expected_hash: Option<String>,
     previous_hash: Option<String>,
     analysis_receipt: String,
+    execution_ticket: Option<String>,
+    effect_digest: String,
     created_at: SystemTime,
 }
 
@@ -78,6 +92,8 @@ struct PendingAssetWrite {
     content_hash: String,
     previous_hash: Option<String>,
     analysis_receipt: String,
+    execution_ticket: Option<String>,
+    effect_digest: String,
     created_at: SystemTime,
 }
 
@@ -138,6 +154,8 @@ struct ObsidianConfigVault {
 pub struct OperationContext {
     pub(crate) task_id: Option<String>,
     pub(crate) trace_id: Option<String>,
+    #[serde(default)]
+    pub(crate) execution_ticket: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -370,18 +388,12 @@ impl BatchPendingWrite {
         }
     }
 
-    fn write_target(&self) -> Result<(), String> {
+    fn batch_source(&self) -> BatchFileSource<'_> {
         match self {
-            Self::Note(pending) => {
-                atomic_write_file(&pending.target_path, pending.content.as_bytes())
-            }
+            Self::Note(pending) => BatchFileSource::Bytes(pending.content.as_bytes()),
             Self::Asset(pending) => match &pending.source {
-                PendingAssetSource::Bytes(content) => {
-                    atomic_write_file(&pending.target_path, content)
-                }
-                PendingAssetSource::Staged(source) => {
-                    atomic_copy_file(&pending.target_path, source)
-                }
+                PendingAssetSource::Bytes(content) => BatchFileSource::Bytes(content),
+                PendingAssetSource::Staged(source) => BatchFileSource::Path(source),
             },
         }
     }
@@ -427,6 +439,20 @@ impl BatchPendingWrite {
             Self::Asset(pending) => &pending.analysis_receipt,
         }
     }
+
+    fn execution_ticket(&self) -> Option<&str> {
+        match self {
+            Self::Note(pending) => pending.execution_ticket.as_deref(),
+            Self::Asset(pending) => pending.execution_ticket.as_deref(),
+        }
+    }
+
+    fn effect_digest(&self) -> &str {
+        match self {
+            Self::Note(pending) => &pending.effect_digest,
+            Self::Asset(pending) => &pending.effect_digest,
+        }
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -468,6 +494,111 @@ fn hash_file_streaming(path: &Path) -> Result<String, String> {
         hasher.update(&buffer[..count]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn write_effect_digest_from_hash(
+    kind: &str,
+    vault_id: &str,
+    relative_path: &str,
+    content_hash: &str,
+) -> String {
+    let value = serde_json::json!({
+        "kind": kind,
+        "vaultId": vault_id,
+        "relativePath": relative_path,
+        "contentHash": content_hash,
+    });
+    hash_bytes(
+        &serde_json::to_vec(&value).expect("write effect digest payload is always serializable"),
+    )
+}
+
+fn write_effect_digest(kind: &str, vault_id: &str, relative_path: &str, content: &[u8]) -> String {
+    write_effect_digest_from_hash(kind, vault_id, relative_path, &hash_bytes(content))
+}
+
+struct WriteExecutionBinding<'a> {
+    workspace_scope: &'a str,
+    operation_context: Option<OperationContext>,
+    vault_id: &'a str,
+    relative_path: &'a str,
+    approval_id: &'a str,
+    effect_digest: &'a str,
+}
+
+struct BoundWriteExecution {
+    task_id: Option<String>,
+    trace_id: Option<String>,
+    execution_ticket: Option<String>,
+}
+
+fn bind_write_execution_ticket(
+    database: &RuntimeDatabase,
+    ticket_state: Option<&ExecutionTicketState>,
+    binding: WriteExecutionBinding<'_>,
+) -> Result<BoundWriteExecution, String> {
+    let Some(context) = binding.operation_context else {
+        if ticket_state.is_none() {
+            return Ok(BoundWriteExecution {
+                task_id: None,
+                trace_id: None,
+                execution_ticket: None,
+            });
+        }
+        return Err("Obsidian 写入缺少能力范围执行票据".to_string());
+    };
+    if ticket_state.is_none() {
+        return Ok(BoundWriteExecution {
+            task_id: context.task_id.filter(|value| !value.trim().is_empty()),
+            trace_id: context.trace_id.filter(|value| !value.trim().is_empty()),
+            execution_ticket: None,
+        });
+    }
+    let task_id = context
+        .task_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "Obsidian 写入缺少绑定的原生任务".to_string())?;
+    let trace_id = context
+        .trace_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
+    let execution_ticket = context
+        .execution_ticket
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "Obsidian 写入缺少能力范围执行票据".to_string())?;
+    database.ensure_runtime_task_authorized(
+        binding.workspace_scope,
+        &task_id,
+        VAULT_WRITE_CAPABILITIES,
+        VAULT_WRITE_OPERATIONS,
+        Some(binding.vault_id),
+        &["running"],
+    )?;
+    ticket_state.expect("ticket state checked").bind_approval(
+        &execution_ticket,
+        TicketScope {
+            workspace_scope: binding.workspace_scope,
+            task_id: &task_id,
+            trace_id: trace_id.as_deref(),
+            allowed_capability_ids: VAULT_WRITE_CAPABILITIES,
+            allowed_operations: VAULT_WRITE_OPERATIONS,
+            vault_id: binding.vault_id,
+            relative_path: binding.relative_path,
+            require_declared_path: true,
+        },
+        binding.approval_id,
+        binding.effect_digest,
+    )?;
+    Ok(BoundWriteExecution {
+        task_id: Some(task_id),
+        trace_id,
+        execution_ticket: Some(execution_ticket),
+    })
 }
 
 fn obsidian_config_path() -> Result<PathBuf, String> {
@@ -686,7 +817,7 @@ pub(crate) fn ensure_default_vaults_for_runtime() -> Result<(), String> {
         "创作成品/文章",
         "创作成品/脚本",
     ];
-    const AGENT_INTRODUCTION: &str = "---\nvault_role: agent\nmanaged_by: Yunspire\n---\n\n# Agent 库\n\n用于保存云枢采集、分析、长期记忆和维护的知识资产。Markdown 文件是知识事实来源，索引可以随时重建。\n\n- [[知识库]]：专题与长期知识页\n- [[原子库]]：带来源、分类和标签的知识单元\n- [[资料库]]：网页、社交平台、本地文件与对话原文\n- [[收件箱]]：等待后台处理的临时内容\n- [[画像]]：带来源和置信度的用户画像\n- [[长期记忆]]：保存对话、操作和重要界面行为的追加式记录\n";
+    const AGENT_INTRODUCTION: &str = "---\nvault_role: agent\nmanaged_by: Yunspire\n---\n\n# Agent 库\n\n用于保存云枢采集、分析、长期记忆和维护的知识资产。Markdown 文件是知识事实来源，索引可以随时重建。\n\n- [[知识库]]：专题与长期知识页\n- [[原子库]]：带来源引用、分类和标签的分析知识单元\n- [[资料库]]：兼容既有目录；新采集不会复制原文或来源附件\n- [[收件箱]]：等待后台处理的临时内容\n- [[画像]]：带来源和置信度的用户画像\n- [[长期记忆]]：保存对话、操作和重要界面行为的追加式记录\n";
     const PERSONAL_INTRODUCTION: &str = "---\nvault_role: personal\nmanaged_by: Yunspire\n---\n\n# 个人库\n\n用于保存用户原创内容和 AI 助手代笔成果，并参与 Obsidian 链接图谱。\n\n- [[复盘报告体系]]：日报、周报、月报和年报\n- [[随想]]：灵感与对话中确认沉淀的新想法\n- [[项目]]：进行中、已完成和计划事项\n- [[创作成品]]：文案、文章和脚本\n";
 
     let root = yunspire_vault_root()?;
@@ -781,11 +912,7 @@ fn collect_vault_folders(
         if file_type.is_symlink() || should_skip(&path) || !file_type.is_dir() {
             continue;
         }
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|_| "目录路径越过 Vault 边界")?
-            .to_string_lossy()
-            .replace('\\', "/");
+        let relative = normalized_relative_path(root, &path)?;
         folders.insert(relative);
         collect_vault_folders(root, &path, folders)?;
     }
@@ -973,6 +1100,16 @@ fn resolve_note_target(
         return Err("笔记目录越过 Vault 边界".to_string());
     }
     Ok((target, relative.to_string_lossy().into_owned()))
+}
+
+fn normalized_relative_path(root: &Path, path: &Path) -> Result<String, String> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| "笔记路径越过 Vault 边界".to_string())?;
+    let text = relative
+        .to_str()
+        .ok_or_else(|| "笔记路径不是有效 UTF-8".to_string())?;
+    Ok(text.replace('\\', "/").nfc().collect())
 }
 
 fn validate_relative_asset_path(relative_path: &str) -> Result<PathBuf, String> {
@@ -1242,24 +1379,6 @@ pub(crate) fn atomic_write_file(target: &Path, content: &[u8]) -> Result<(), Str
     temporary
         .persist(target)
         .map_err(|error| format!("无法原子替换笔记：{}", error.error))?;
-    sync_parent_directory(parent)
-}
-
-fn atomic_copy_file(target: &Path, source: &Path) -> Result<(), String> {
-    let parent = target.parent().ok_or("附件缺少父目录")?;
-    fs::create_dir_all(parent).map_err(|error| format!("无法创建附件目录：{error}"))?;
-    let mut input = File::open(source).map_err(|error| format!("无法打开暂存附件：{error}"))?;
-    let mut temporary =
-        NamedTempFile::new_in(parent).map_err(|error| format!("无法创建附件临时文件：{error}"))?;
-    std::io::copy(&mut input, &mut temporary)
-        .map_err(|error| format!("无法流式写入附件临时文件：{error}"))?;
-    temporary
-        .as_file()
-        .sync_all()
-        .map_err(|error| format!("无法同步附件临时文件：{error}"))?;
-    temporary
-        .persist(target)
-        .map_err(|error| format!("无法原子替换附件：{}", error.error))?;
     sync_parent_directory(parent)
 }
 
@@ -1539,6 +1658,41 @@ pub(crate) fn flush_pending_long_term_memory_events_for_runtime(
     Ok(())
 }
 
+pub(crate) fn recover_vault_batch_manifests_for_runtime(
+    app: &AppHandle,
+    database: &RuntimeDatabase,
+) -> Result<(), String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("无法定位应用数据目录：{error}"))?;
+    let summary = vault_batch::recover_batch_manifests(&app_data, |audit| {
+        database.append_operation_event(&OperationEvent {
+            id: audit.id.clone(),
+            task_id: audit.task_id.clone(),
+            trace_id: audit.trace_id.clone(),
+            event_type: audit.event_type.clone(),
+            state: "success".to_string(),
+            created_at: audit.created_at.clone(),
+            vault_id: None,
+            relative_path: None,
+            detail: audit.detail.clone(),
+        })
+    });
+    if summary.completed_audits > 0 || summary.rolled_back_batches > 0 {
+        log::info!(
+            "跨 Vault 批次恢复完成：补写审计 {} 个，回滚 {} 个",
+            summary.completed_audits,
+            summary.rolled_back_batches
+        );
+    }
+    if summary.failures.is_empty() {
+        Ok(())
+    } else {
+        Err(summary.failures.join("；"))
+    }
+}
+
 #[tauri::command]
 pub fn append_long_term_memory_event(
     database: State<'_, RuntimeDatabase>,
@@ -1574,28 +1728,6 @@ pub fn append_long_term_memory_event(
     }
 }
 
-fn restore_batch_backups(
-    backups: &[(PathBuf, Option<PathBuf>)],
-    count: usize,
-) -> Result<(), String> {
-    let mut failures = Vec::new();
-    for (target, backup) in backups.iter().take(count).rev() {
-        let result = match backup {
-            Some(path) => fs::copy(path, target).map(|_| ()),
-            None if target.exists() => fs::remove_file(target),
-            None => Ok(()),
-        };
-        if let Err(error) = result {
-            failures.push(format!("{}：{error}", target.display()));
-        }
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(format!("回滚失败：{}", failures.join("；")))
-    }
-}
-
 fn title_from_markdown(path: &Path, content: &str) -> String {
     content
         .lines()
@@ -1606,7 +1738,8 @@ fn title_from_markdown(path: &Path, content: &str) -> String {
         })
         .or_else(|| path.file_stem().and_then(|name| name.to_str()))
         .unwrap_or("无标题笔记")
-        .to_string()
+        .nfc()
+        .collect()
 }
 
 fn excerpt_around(content: &str, query: &str) -> String {
@@ -1656,7 +1789,10 @@ pub fn list_vault_folders(vault_id: String) -> Result<Vec<VaultFolderDescriptor>
     for path in markdown {
         if let Ok(relative) = path.strip_prefix(&root) {
             if let Some(parent) = relative.parent() {
-                let value = parent.to_string_lossy().replace('\\', "/");
+                let Some(parent) = parent.to_str() else {
+                    continue;
+                };
+                let value = parent.replace('\\', "/").nfc().collect::<String>();
                 if !value.is_empty() {
                     *counts.entry(value).or_insert(0) += 1;
                 }
@@ -1764,16 +1900,19 @@ pub fn search_vault_notes(
         let mut attachments = 0;
         collect_files(&root, &mut markdown, &mut attachments)?;
         for path in markdown {
-            let relative = path
-                .strip_prefix(&root)
-                .map_err(|_| "笔记路径越过 Vault 边界")?;
-            let path_text = relative.to_string_lossy();
+            let path_text = match normalized_relative_path(&root, &path) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
             let path_match = path_text.to_lowercase().contains(&query_lower);
             let bytes = match read_file_limited(&path) {
                 Ok(bytes) => bytes,
                 Err(_) => continue,
             };
-            let content = String::from_utf8_lossy(&bytes);
+            let content = match String::from_utf8(bytes) {
+                Ok(value) => value.nfc().collect::<String>(),
+                Err(_) => continue,
+            };
             let content_lower = content.to_lowercase();
             if !path_match && !content_lower.contains(&query_lower) {
                 continue;
@@ -1783,7 +1922,7 @@ pub fn search_vault_notes(
             results.push(VaultSearchResult {
                 vault_id: vault.id.clone(),
                 vault_name: vault.name.clone(),
-                relative_path: path_text.into_owned(),
+                relative_path: path_text,
                 title,
                 excerpt: excerpt_around(&content, query),
                 modified_at: modified_string(&path),
@@ -1827,35 +1966,38 @@ pub fn read_vault_note(vault_id: String, relative_path: String) -> Result<VaultN
 }
 
 fn note_path_without_markdown_extension(relative_path: &str) -> String {
-    Path::new(relative_path)
-        .with_extension("")
-        .to_string_lossy()
-        .replace('\\', "/")
+    if relative_path.to_ascii_lowercase().ends_with(".md") {
+        relative_path[..relative_path.len() - 3].to_string()
+    } else {
+        relative_path.to_string()
+    }
 }
 
-fn open_obsidian_uri(uri: &str) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    let mut command = Command::new("/usr/bin/open");
-    #[cfg(target_os = "windows")]
-    let mut command = Command::new("rundll32.exe");
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    let mut command = Command::new("xdg-open");
+fn obsidian_open_url(vault_name: &str, relative_path: &str) -> Result<String, String> {
+    let note_path = note_path_without_markdown_extension(relative_path);
+    let normalized_vault_name = vault_name.nfc().collect::<String>();
+    let normalized_note_path = note_path.replace('\\', "/").nfc().collect::<String>();
+    obsidian_open_uri(&normalized_vault_name, &normalized_note_path)
+}
 
+fn open_obsidian_url(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    command.arg("--").arg(uri);
+    let status = Command::new("/usr/bin/open").arg(url).status();
     #[cfg(target_os = "windows")]
-    command.arg("url.dll,FileProtocolHandler").arg(uri);
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    command.arg(uri);
+    let status = Command::new("explorer.exe").arg(url).status();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let status = Command::new("xdg-open").arg(url).status();
 
-    let status = command
-        .status()
-        .map_err(|error| format!("无法调用系统打开 Obsidian：{error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("系统未能打开 Obsidian 链接".to_string())
+    let status = status.map_err(|error| format!("无法启动 Obsidian：{error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "系统未能通过 Obsidian 协议打开笔记，退出状态：{}",
+            status
+                .code()
+                .map_or_else(|| "unknown".to_string(), |code| code.to_string())
+        ));
     }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1865,10 +2007,14 @@ pub fn open_vault_note_in_obsidian(
 ) -> Result<String, String> {
     let (vault_name, root) = resolve_vault(&vault_id)?;
     let (_, normalized_relative) = resolve_note_target(&root, &relative_path, false)?;
-    let obsidian_file = note_path_without_markdown_extension(&normalized_relative);
-    let uri = obsidian_open_uri(&vault_name, &obsidian_file)?;
-    open_obsidian_uri(&uri)?;
-    Ok(uri)
+    let url = obsidian_open_url(&vault_name, &normalized_relative)?;
+    open_obsidian_url(&url)?;
+    Ok(url)
+}
+
+#[tauri::command]
+pub fn open_obsidian_note(vault_id: String, relative_path: String) -> Result<String, String> {
+    open_vault_note_in_obsidian(vault_id, relative_path)
 }
 
 #[tauri::command]
@@ -1896,16 +2042,18 @@ pub fn list_vault_notes(
             if result.len() >= max {
                 break;
             }
-            let relative = path
-                .strip_prefix(&root)
-                .map_err(|_| "笔记路径越过 Vault 边界")?
-                .to_string_lossy()
-                .into_owned();
+            let relative = match normalized_relative_path(&root, &path) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
             let bytes = match read_file_limited(&path) {
                 Ok(value) => value,
                 Err(_) => continue,
             };
-            let content = String::from_utf8_lossy(&bytes).into_owned();
+            let content = match String::from_utf8(bytes) {
+                Ok(value) => value.nfc().collect::<String>(),
+                Err(_) => continue,
+            };
             result.push(VaultNoteSummary {
                 vault_id: vault.id.clone(),
                 vault_name: vault.name.clone(),
@@ -2375,7 +2523,7 @@ fn obsidian_open_uri(vault_name: &str, relative_path: &str) -> Result<String, St
     url.query_pairs_mut()
         .append_pair("vault", vault_name)
         .append_pair("file", relative_path);
-    Ok(url.to_string())
+    Ok(url.to_string().replace('+', "%20"))
 }
 
 fn is_image_attachment(attachment: &CaptureVaultAttachmentInput) -> bool {
@@ -3115,6 +3263,7 @@ fn build_agent_capture_markdown(
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_note_write(
     analysis_state: State<'_, ModelAnalysisState>,
+    ticket_state: State<'_, ExecutionTicketState>,
     state: State<'_, ObsidianAdapterState>,
     database: State<'_, RuntimeDatabase>,
     vault_id: String,
@@ -3128,6 +3277,7 @@ pub fn prepare_note_write(
         analysis_state.inner(),
         state.inner(),
         database.inner(),
+        Some(ticket_state.inner()),
         vault_id,
         relative_path,
         content,
@@ -3142,6 +3292,7 @@ fn prepare_note_write_inner(
     analysis_state: &ModelAnalysisState,
     state: &ObsidianAdapterState,
     database: &RuntimeDatabase,
+    ticket_state: Option<&ExecutionTicketState>,
     vault_id: String,
     relative_path: String,
     content: String,
@@ -3174,8 +3325,12 @@ fn prepare_note_write_inner(
     }
     let previous_text = previous
         .as_deref()
-        .map(String::from_utf8_lossy)
-        .map(|value| value.into_owned())
+        .map(|bytes| {
+            std::str::from_utf8(bytes)
+                .map(str::to_string)
+                .map_err(|_| "现有笔记不是有效 UTF-8 Markdown，无法生成安全写入预览".to_string())
+        })
+        .transpose()?
         .unwrap_or_default();
     let diff = TextDiff::from_lines(&previous_text, &content)
         .unified_diff()
@@ -3186,9 +3341,20 @@ fn prepare_note_write_inner(
         )
         .to_string();
     let approval_id = Uuid::new_v4().to_string();
-    let (task_id, trace_id) = operation_context
-        .map(|context| (context.task_id, context.trace_id))
-        .unwrap_or((None, None));
+    let effect_digest =
+        write_effect_digest("note", &vault_id, &normalized_relative, content.as_bytes());
+    let bound_execution = bind_write_execution_ticket(
+        database,
+        ticket_state,
+        WriteExecutionBinding {
+            workspace_scope: &workspace_scope,
+            operation_context,
+            vault_id: &vault_id,
+            relative_path: &normalized_relative,
+            approval_id: &approval_id,
+            effect_digest: &effect_digest,
+        },
+    )?;
     let mut pending_writes = state
         .pending_writes
         .lock()
@@ -3206,8 +3372,8 @@ fn prepare_note_write_inner(
     pending_writes.insert(
         approval_id.clone(),
         PendingWrite {
-            task_id,
-            trace_id,
+            task_id: bound_execution.task_id,
+            trace_id: bound_execution.trace_id,
             vault_id: vault_id.clone(),
             vault_path: root,
             relative_path: normalized_relative.clone(),
@@ -3216,6 +3382,8 @@ fn prepare_note_write_inner(
             expected_hash,
             previous_hash: previous_hash.clone(),
             analysis_receipt,
+            execution_ticket: bound_execution.execution_ticket,
+            effect_digest,
             created_at: SystemTime::now(),
         },
     );
@@ -3234,6 +3402,7 @@ fn prepare_note_write_inner(
 #[tauri::command]
 pub fn commit_note_write(
     analysis_state: State<'_, ModelAnalysisState>,
+    ticket_state: State<'_, ExecutionTicketState>,
     app: AppHandle,
     state: State<'_, ObsidianAdapterState>,
     database: State<'_, RuntimeDatabase>,
@@ -3277,6 +3446,27 @@ pub fn commit_note_write(
     {
         return Err("笔记在审批期间发生变化，已拒绝覆盖".to_string());
     }
+    let trace_id = database.resolve_operation_trace_id(
+        &workspace_scope,
+        pending.task_id.as_deref(),
+        pending.trace_id.as_deref(),
+    )?;
+
+    let ticket_token = pending.execution_ticket.as_deref();
+    if ticket_token.is_some() {
+        let task_id = pending
+            .task_id
+            .as_deref()
+            .ok_or_else(|| "执行票据缺少绑定的原生任务".to_string())?;
+        database.ensure_runtime_task_authorized(
+            &workspace_scope,
+            task_id,
+            VAULT_WRITE_CAPABILITIES,
+            VAULT_WRITE_OPERATIONS,
+            Some(&pending.vault_id),
+            &["running"],
+        )?;
+    }
 
     let app_data = app
         .path()
@@ -3301,9 +3491,28 @@ pub fn commit_note_write(
     if !canonical_parent.starts_with(&current_root) {
         return Err("笔记目录在审批后越过 Vault 边界".to_string());
     }
-    analysis_state.consume("local", &pending.analysis_receipt)?;
+    if let Some(token) = ticket_token {
+        ticket_state.begin_commit(
+            token,
+            &workspace_scope,
+            pending
+                .task_id
+                .as_deref()
+                .ok_or_else(|| "执行票据缺少绑定的原生任务".to_string())?,
+            &[(&approval_id, &pending.effect_digest)],
+        )?;
+    }
+    if let Err(error) = analysis_state.consume("local", &pending.analysis_receipt) {
+        if let Some(token) = ticket_token {
+            ticket_state.release_commit(token);
+        }
+        return Err(error);
+    }
     if let Err(error) = atomic_write_file(&pending.target_path, pending.content.as_bytes()) {
         analysis_state.restore("local", &pending.analysis_receipt);
+        if let Some(token) = ticket_token {
+            ticket_state.release_commit(token);
+        }
         return Err(error);
     }
 
@@ -3312,7 +3521,7 @@ pub fn commit_note_write(
     let event = OperationEvent {
         id: Uuid::new_v4().to_string(),
         task_id: pending.task_id.clone(),
-        trace_id: pending.trace_id.clone(),
+        trace_id: Some(trace_id.clone()),
         event_type: "vault.note.write".to_string(),
         state: "success".to_string(),
         created_at: committed_at.clone(),
@@ -3320,7 +3529,42 @@ pub fn commit_note_write(
         relative_path: Some(pending.relative_path.clone()),
         detail: format!("审批 {approval_id} 已提交，检查点已创建"),
     };
-    database.append_operation_event(&event)?;
+    if let Err(error) = database.append_operation_event(&event) {
+        let rollback = if pending.previous_hash.is_some() {
+            fs::read(&checkpoint_path)
+                .map_err(|read_error| format!("无法读取写入检查点：{read_error}"))
+                .and_then(|content| atomic_write_file(&pending.target_path, &content))
+        } else if pending.target_path.exists() {
+            fs::remove_file(&pending.target_path)
+                .map_err(|remove_error| format!("无法移除新建笔记：{remove_error}"))
+        } else {
+            Ok(())
+        };
+        analysis_state.restore("local", &pending.analysis_receipt);
+        if let Some(token) = ticket_token {
+            ticket_state.release_commit(token);
+        }
+        return match rollback {
+            Ok(()) => Err(format!("写入审计失败，笔记已回滚：{error}")),
+            Err(rollback_error) => Err(format!(
+                "写入审计失败且笔记回滚失败：{error}；{rollback_error}"
+            )),
+        };
+    }
+    if let Err(error) = database.enqueue_vault_index_path_with_trace(
+        &pending.vault_id,
+        &pending.vault_path,
+        &pending.target_path,
+        &trace_id,
+    ) {
+        log::warn!(
+            "笔记已提交，但无法继承 Trace 入队索引 {}：{error}",
+            pending.relative_path
+        );
+    }
+    if let Some(token) = ticket_token {
+        ticket_state.complete_commit(token)?;
+    }
     state
         .pending_writes
         .lock()
@@ -3354,6 +3598,7 @@ pub fn discard_note_write(
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_asset_write(
     analysis_state: State<'_, ModelAnalysisState>,
+    ticket_state: State<'_, ExecutionTicketState>,
     state: State<'_, ObsidianAdapterState>,
     database: State<'_, RuntimeDatabase>,
     vault_id: String,
@@ -3364,11 +3609,13 @@ pub fn prepare_asset_write(
     analysis_receipt: String,
     task_id: Option<String>,
     trace_id: Option<String>,
+    execution_ticket: Option<String>,
 ) -> Result<AssetWritePreview, String> {
     prepare_asset_write_inner(
         analysis_state.inner(),
         state.inner(),
         database.inner(),
+        Some(ticket_state.inner()),
         vault_id,
         relative_path,
         content_base64,
@@ -3377,6 +3624,7 @@ pub fn prepare_asset_write(
         analysis_receipt,
         task_id,
         trace_id,
+        execution_ticket,
     )
 }
 
@@ -3385,6 +3633,7 @@ fn prepare_asset_write_inner(
     analysis_state: &ModelAnalysisState,
     state: &ObsidianAdapterState,
     database: &RuntimeDatabase,
+    ticket_state: Option<&ExecutionTicketState>,
     vault_id: String,
     relative_path: String,
     content_base64: Option<String>,
@@ -3393,6 +3642,7 @@ fn prepare_asset_write_inner(
     analysis_receipt: String,
     task_id: Option<String>,
     trace_id: Option<String>,
+    execution_ticket: Option<String>,
 ) -> Result<AssetWritePreview, String> {
     analysis_state.validate("local", &analysis_receipt)?;
     let workspace_scope = database.local_workspace_scope()?;
@@ -3465,9 +3715,35 @@ fn prepare_asset_write_inner(
         }
         (PendingAssetSource::Staged(path), content_hash, byte_length)
     };
+    let effect_digest =
+        write_effect_digest_from_hash("asset", &vault_id, &normalized_relative, &content_hash);
+    let bound_execution = match bind_write_execution_ticket(
+        database,
+        ticket_state,
+        WriteExecutionBinding {
+            workspace_scope: &workspace_scope,
+            operation_context: Some(OperationContext {
+                task_id,
+                trace_id,
+                execution_ticket,
+            }),
+            vault_id: &vault_id,
+            relative_path: &normalized_relative,
+            approval_id: &approval_id,
+            effect_digest: &effect_digest,
+        },
+    ) {
+        Ok(bound) => bound,
+        Err(error) => {
+            if let PendingAssetSource::Staged(path) = &source {
+                remove_claimed_capture_attachment(path);
+            }
+            return Err(error);
+        }
+    };
     let pending = PendingAssetWrite {
-        task_id,
-        trace_id,
+        task_id: bound_execution.task_id,
+        trace_id: bound_execution.trace_id,
         vault_id: vault_id.clone(),
         vault_path: root,
         relative_path: normalized_relative.clone(),
@@ -3476,6 +3752,8 @@ fn prepare_asset_write_inner(
         content_hash,
         previous_hash: previous_hash.clone(),
         analysis_receipt,
+        execution_ticket: bound_execution.execution_ticket,
+        effect_digest,
         created_at: SystemTime::now(),
     };
     let mut pending_assets = match state.pending_assets.lock() {
@@ -3522,6 +3800,7 @@ fn discard_prepared_capture_writes(
 #[tauri::command]
 pub fn prepare_capture_vault_writes(
     analysis_state: State<'_, ModelAnalysisState>,
+    ticket_state: State<'_, ExecutionTicketState>,
     state: State<'_, ObsidianAdapterState>,
     database: State<'_, RuntimeDatabase>,
     input: CaptureVaultWriteInput,
@@ -3530,6 +3809,7 @@ pub fn prepare_capture_vault_writes(
         analysis_state.inner(),
         state.inner(),
         database.inner(),
+        Some(ticket_state.inner()),
         input,
     )
 }
@@ -3538,6 +3818,7 @@ fn prepare_capture_vault_writes_inner(
     analysis_state: &ModelAnalysisState,
     state: &ObsidianAdapterState,
     database: &RuntimeDatabase,
+    ticket_state: Option<&ExecutionTicketState>,
     mut input: CaptureVaultWriteInput,
 ) -> Result<CaptureVaultWritePreview, String> {
     analysis_state.validate_analysis("local", &input.analysis_receipt, &input.analysis)?;
@@ -3638,6 +3919,7 @@ fn prepare_capture_vault_writes_inner(
                 analysis_state,
                 state,
                 database,
+                ticket_state,
                 input.raw_vault_id.clone(),
                 raw_relative_path.clone(),
                 raw_markdown,
@@ -3659,6 +3941,7 @@ fn prepare_capture_vault_writes_inner(
             analysis_state,
             state,
             database,
+            ticket_state,
             input.agent_vault_id.clone(),
             agent_relative_path.clone(),
             agent_markdown.clone(),
@@ -3675,56 +3958,62 @@ fn prepare_capture_vault_writes_inner(
             ));
         }
 
-        for attachment in input.attachments {
-            let image_binding = is_image_attachment(&attachment)
-                .then(|| {
-                    image_bindings
-                        .get(&attachment.asset_id)
-                        .cloned()
-                        .ok_or_else(|| {
-                            format!(
-                                "图片附件 asset_id={} 缺少结构化 image binding",
-                                attachment.asset_id
-                            )
-                        })
-                })
-                .transpose()?;
-            let asset_preview = prepare_asset_write_inner(
-                analysis_state,
-                state,
-                database,
-                input.raw_vault_id.clone(),
-                attachment.relative_path,
-                attachment.content_base64,
-                attachment.staged_attachment_id,
-                attachment.expected_sha256,
-                input.analysis_receipt.clone(),
-                operation_context
-                    .as_ref()
-                    .and_then(|context| context.task_id.clone()),
-                operation_context
-                    .as_ref()
-                    .and_then(|context| context.trace_id.clone()),
-            )?;
-            let image_byte_length_conflict = image_binding
-                .as_ref()
-                .is_some_and(|binding| asset_preview.byte_length != binding.original_byte_length);
-            let asset_is_new_file = asset_preview.is_new_file;
-            let asset_conflict_path = asset_preview.relative_path.clone();
-            asset_previews.push(asset_preview);
-            if image_byte_length_conflict {
-                return Err(format!(
-                    "图片附件 asset_id={} 的实际字节数与 image binding 冲突",
-                    image_binding
+        if raw_note_included {
+            for attachment in input.attachments {
+                let image_binding = is_image_attachment(&attachment)
+                    .then(|| {
+                        image_bindings
+                            .get(&attachment.asset_id)
+                            .cloned()
+                            .ok_or_else(|| {
+                                format!(
+                                    "图片附件 asset_id={} 缺少结构化 image binding",
+                                    attachment.asset_id
+                                )
+                            })
+                    })
+                    .transpose()?;
+                let asset_preview = prepare_asset_write_inner(
+                    analysis_state,
+                    state,
+                    database,
+                    ticket_state,
+                    input.raw_vault_id.clone(),
+                    attachment.relative_path,
+                    attachment.content_base64,
+                    attachment.staged_attachment_id,
+                    attachment.expected_sha256,
+                    input.analysis_receipt.clone(),
+                    operation_context
                         .as_ref()
-                        .map(|binding| binding.asset_id.as_str())
-                        .unwrap_or_default()
-                ));
-            }
-            if !asset_is_new_file {
-                return Err(format!(
-                    "采集目标已存在，已阻止覆盖原始附件：{asset_conflict_path}"
-                ));
+                        .and_then(|context| context.task_id.clone()),
+                    operation_context
+                        .as_ref()
+                        .and_then(|context| context.trace_id.clone()),
+                    operation_context
+                        .as_ref()
+                        .and_then(|context| context.execution_ticket.clone()),
+                )?;
+                let image_byte_length_conflict = image_binding.as_ref().is_some_and(|binding| {
+                    asset_preview.byte_length != binding.original_byte_length
+                });
+                let asset_is_new_file = asset_preview.is_new_file;
+                let asset_conflict_path = asset_preview.relative_path.clone();
+                asset_previews.push(asset_preview);
+                if image_byte_length_conflict {
+                    return Err(format!(
+                        "图片附件 asset_id={} 的实际字节数与 image binding 冲突",
+                        image_binding
+                            .as_ref()
+                            .map(|binding| binding.asset_id.as_str())
+                            .unwrap_or_default()
+                    ));
+                }
+                if !asset_is_new_file {
+                    return Err(format!(
+                        "采集目标已存在，已阻止覆盖原始附件：{asset_conflict_path}"
+                    ));
+                }
             }
         }
         Ok(())
@@ -3777,6 +4066,7 @@ pub fn discard_asset_write(
 #[allow(clippy::too_many_arguments)]
 pub fn commit_capture_batch(
     analysis_state: State<'_, ModelAnalysisState>,
+    ticket_state: State<'_, ExecutionTicketState>,
     app: AppHandle,
     state: State<'_, ObsidianAdapterState>,
     database: State<'_, RuntimeDatabase>,
@@ -3793,17 +4083,20 @@ pub fn commit_capture_batch(
         analysis_state.inner(),
         state.inner(),
         database.inner(),
+        Some(ticket_state.inner()),
         note_approval_ids,
         asset_approval_ids,
         batch_kind,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn commit_capture_batch_inner(
     app_data: &Path,
     analysis_state: &ModelAnalysisState,
     state: &ObsidianAdapterState,
     database: &RuntimeDatabase,
+    ticket_state: Option<&ExecutionTicketState>,
     note_approval_ids: Vec<String>,
     asset_approval_ids: Vec<String>,
     batch_kind: Option<String>,
@@ -3904,35 +4197,123 @@ fn commit_capture_batch_inner(
         }
     }
 
-    let batch_id = Uuid::new_v4().to_string();
-    let checkpoint_dir = app_data.join("checkpoints").join(&batch_id);
-    fs::create_dir_all(&checkpoint_dir).map_err(|error| format!("无法创建批次检查点：{error}"))?;
-    let mut backups = Vec::with_capacity(batch.len());
-    for (index, (_, pending)) in batch.iter().enumerate() {
-        let checkpoint_path = checkpoint_dir.join(format!("{index}.before"));
-        if pending.target_path().exists() {
-            fs::copy(pending.target_path(), &checkpoint_path)
-                .map_err(|error| format!("无法保存批次检查点：{error}"))?;
-            backups.push((pending.target_path().to_path_buf(), Some(checkpoint_path)));
-        } else {
-            fs::write(&checkpoint_path, b"")
-                .map_err(|error| format!("无法保存新文件批次检查点：{error}"))?;
-            backups.push((pending.target_path().to_path_buf(), None));
-        }
+    let execution_ticket = batch
+        .first()
+        .and_then(|(_, pending)| pending.execution_ticket())
+        .map(str::to_string);
+    if batch
+        .iter()
+        .any(|(_, pending)| pending.execution_ticket() != execution_ticket.as_deref())
+    {
+        return Err(format!(
+            "同一{}批次必须使用同一张能力范围执行票据",
+            batch_kind.0
+        ));
     }
-
-    analysis_state.consume("local", &analysis_receipt)?;
-    for (committed_count, (_, pending)) in batch.iter().enumerate() {
-        if let Err(error) = pending.write_target() {
-            analysis_state.restore("local", &analysis_receipt);
-            return match restore_batch_backups(&backups, committed_count + 1) {
-                Ok(()) => Err(format!("{}批次写入失败并已回滚：{error}", batch_kind.0)),
-                Err(rollback) => Err(format!(
-                    "{}批次写入失败，且{rollback}；检查点仍保留：{error}",
-                    batch_kind.0
-                )),
-            };
+    let ticket_task_id = if execution_ticket.is_some() {
+        let task_id = batch
+            .first()
+            .and_then(|(_, pending)| pending.task_id())
+            .ok_or_else(|| "执行票据缺少绑定的原生任务".to_string())?;
+        if batch
+            .iter()
+            .any(|(_, pending)| pending.task_id() != Some(task_id))
+        {
+            return Err(format!("同一{}批次必须绑定同一个原生任务", batch_kind.0));
         }
+        for (_, pending) in &batch {
+            database.ensure_runtime_task_authorized(
+                &workspace_scope,
+                task_id,
+                VAULT_WRITE_CAPABILITIES,
+                VAULT_WRITE_OPERATIONS,
+                Some(pending.vault_id()),
+                &["running"],
+            )?;
+        }
+        Some(task_id.to_string())
+    } else {
+        None
+    };
+    let ticket_state = match (execution_ticket.as_ref(), ticket_state) {
+        (Some(_), Some(state)) => Some(state),
+        (Some(_), None) => return Err("执行票据状态不可用".to_string()),
+        (None, _) => None,
+    };
+
+    let batch_id = Uuid::new_v4().to_string();
+    let manifest_entries = batch
+        .iter()
+        .map(|(approval_id, pending)| {
+            Ok(BatchManifestEntryInput {
+                approval_id: approval_id.clone(),
+                vault_id: pending.vault_id().to_string(),
+                vault_root: pending.vault_path().to_path_buf(),
+                relative_path: pending.relative_path().to_string(),
+                previous_hash: pending.previous_hash().clone(),
+                next_hash: pending.content_hash()?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let supplied_trace_id = batch.iter().find_map(|(_, pending)| pending.trace_id());
+    let trace_id = database.resolve_operation_trace_id(
+        &workspace_scope,
+        batch.first().and_then(|(_, pending)| pending.task_id()),
+        supplied_trace_id,
+    )?;
+    if batch.iter().any(|(_, pending)| {
+        pending
+            .trace_id()
+            .is_some_and(|pending_trace_id| pending_trace_id != trace_id)
+    }) {
+        return Err(format!("同一{}批次必须绑定同一个 Trace", batch_kind.0));
+    }
+    let (checkpoint_dir, mut manifest) = vault_batch::prepare_batch_manifest(
+        app_data,
+        batch_id.clone(),
+        batch_kind.0,
+        batch_kind.1,
+        batch
+            .iter()
+            .find_map(|(_, pending)| pending.task_id().map(str::to_string)),
+        Some(trace_id.clone()),
+        manifest_entries,
+    )?;
+    if let (Some(token), Some(task_id)) = (execution_ticket.as_deref(), ticket_task_id.as_deref()) {
+        let approvals = batch
+            .iter()
+            .map(|(approval_id, pending)| (approval_id.as_str(), pending.effect_digest()))
+            .collect::<Vec<_>>();
+        ticket_state.expect("ticket state checked").begin_commit(
+            token,
+            &workspace_scope,
+            task_id,
+            &approvals,
+        )?;
+    }
+    if let Err(error) = analysis_state.consume("local", &analysis_receipt) {
+        if let (Some(token), Some(ticket_state)) = (execution_ticket.as_deref(), ticket_state) {
+            ticket_state.release_commit(token);
+        }
+        return Err(error);
+    }
+    let sources = batch
+        .iter()
+        .map(|(_, pending)| pending.batch_source())
+        .collect::<Vec<_>>();
+    if let Err(error) = vault_batch::commit_batch_sources(&checkpoint_dir, &mut manifest, &sources)
+    {
+        analysis_state.restore("local", &analysis_receipt);
+        if let (Some(token), Some(ticket_state)) = (execution_ticket.as_deref(), ticket_state) {
+            ticket_state.release_commit(token);
+        }
+        return match vault_batch::rollback_batch_manifest(&checkpoint_dir, &mut manifest) {
+            Ok(()) => Err(format!("{}批次写入失败并已回滚：{error}", batch_kind.0)),
+            Err(rollback) => Err(format!(
+                "{}批次写入失败，且回滚失败：{rollback}；检查点仍保留：{error}",
+                batch_kind.0
+            )),
+        };
     }
 
     let committed_at = now_string();
@@ -3946,34 +4327,31 @@ fn commit_capture_batch_inner(
             content_hash: pending
                 .content_hash()
                 .unwrap_or_else(|_| "unavailable".to_string()),
-            checkpoint_path: checkpoint_dir
-                .join(format!("{index}.before"))
+            checkpoint_path: vault_batch::checkpoint_path(&checkpoint_dir, &manifest, index)
                 .to_string_lossy()
                 .into_owned(),
             committed_at: committed_at.clone(),
         })
         .collect::<Vec<_>>();
+    let primary_result = results
+        .first()
+        .expect("validated capture batch always contains at least one note");
     if let Err(error) = database.append_operation_event(&OperationEvent {
-        id: Uuid::new_v4().to_string(),
-        task_id: batch
-            .iter()
-            .find_map(|(_, pending)| pending.task_id().map(str::to_string)),
-        trace_id: batch
-            .iter()
-            .find_map(|(_, pending)| pending.trace_id().map(str::to_string)),
-        event_type: batch_kind.1.to_string(),
+        id: manifest.audit.id.clone(),
+        task_id: manifest.audit.task_id.clone(),
+        trace_id: manifest.audit.trace_id.clone(),
+        event_type: manifest.audit.event_type.clone(),
         state: "success".to_string(),
-        created_at: committed_at,
-        vault_id: None,
-        relative_path: None,
-        detail: format!(
-            "{}批次 {batch_id} 已原子提交 {} 个文件",
-            batch_kind.0,
-            batch.len()
-        ),
+        created_at: manifest.audit.created_at.clone(),
+        vault_id: Some(primary_result.vault_id.clone()),
+        relative_path: Some(primary_result.relative_path.clone()),
+        detail: manifest.audit.detail.clone(),
     }) {
         analysis_state.restore("local", &analysis_receipt);
-        return match restore_batch_backups(&backups, batch.len()) {
+        if let (Some(token), Some(ticket_state)) = (execution_ticket.as_deref(), ticket_state) {
+            ticket_state.release_commit(token);
+        }
+        return match vault_batch::rollback_batch_manifest(&checkpoint_dir, &mut manifest) {
             Ok(()) => Err(format!(
                 "{}批次日志写入失败，文件已回滚：{error}",
                 batch_kind.0
@@ -3983,6 +4361,30 @@ fn commit_capture_batch_inner(
                 batch_kind.0
             )),
         };
+    }
+    for (_, pending) in &batch {
+        let BatchPendingWrite::Note(note) = pending else {
+            continue;
+        };
+        if let Err(error) = database.enqueue_vault_index_path_with_trace(
+            &note.vault_id,
+            &note.vault_path,
+            &note.target_path,
+            &trace_id,
+        ) {
+            log::warn!(
+                "批次笔记已提交，但无法继承 Trace 入队索引 {}：{error}",
+                note.relative_path
+            );
+        }
+    }
+    if let Err(error) = vault_batch::mark_batch_committed(&checkpoint_dir, &mut manifest) {
+        log::warn!("批次 {batch_id} 已提交且审计成功，但 manifest 完成标记失败：{error}");
+    }
+    if let (Some(token), Some(ticket_state)) = (execution_ticket.as_deref(), ticket_state) {
+        if let Err(error) = ticket_state.complete_commit(token) {
+            log::warn!("批次 {batch_id} 已提交，但执行票据终态写入失败：{error}");
+        }
     }
     let mut notes = state
         .pending_writes
@@ -4592,6 +4994,7 @@ mod tests {
             &analysis_state,
             &state,
             &database,
+            None,
             CaptureVaultWriteInput {
                 raw_vault_id: "vault-personal".to_string(),
                 agent_vault_id: "vault-agent".to_string(),
@@ -4615,6 +5018,7 @@ mod tests {
                 operation_context: Some(OperationContext {
                     task_id: Some("capture-task".to_string()),
                     trace_id: Some("capture-trace".to_string()),
+                    execution_ticket: None,
                 }),
             },
         )
@@ -4642,6 +5046,7 @@ mod tests {
             &analysis_state,
             &state,
             &database,
+            None,
             preview
                 .note_previews
                 .iter()
@@ -4695,6 +5100,7 @@ mod tests {
             &analysis_state,
             &state,
             &database,
+            None,
             CaptureVaultWriteInput {
                 raw_vault_id: "vault-agent".to_string(),
                 agent_vault_id: "vault-agent".to_string(),
@@ -4702,19 +5108,17 @@ mod tests {
                 agent_relative_path: None,
                 title: "Agent单稿".to_string(),
                 source_url: Some("https://example.com/agent-only".to_string()),
-                source_type: "url".to_string(),
-                raw_markdown: "只用于构建理解稿的源内容。".to_string(),
-                analysis: serde_json::json!({
-                    "summary": "Agent 单稿分析",
-                    "analysis_markdown": "这是应当保留的 Agent 分析内容。",
-                    "tags": ["单稿"],
-                    "entities": [],
-                    "key_points": ["同库不重复保存忠实原文"],
-                    "image_bindings": [],
-                    "image_observations": [],
-                    "relations": []
-                }),
-                attachments: Vec::new(),
+                source_type: "file".to_string(),
+                raw_markdown: format!(
+                    "只用于构建理解稿的源内容。\n\n![原图](attachment://{encoded_name})"
+                ),
+                analysis: analysis.clone(),
+                attachments: vec![image_attachment(
+                    "asset-figure-1",
+                    "figure 1.png",
+                    "资料库/附件/采集/Agent单稿-1.png",
+                    true,
+                )],
                 external_image_failures: Vec::new(),
                 analysis_receipt: same_vault_receipt,
                 operation_context: None,
@@ -4733,16 +5137,20 @@ mod tests {
         assert_eq!(
             same_vault_preview
                 .agent_markdown
-                .matches("这是应当保留的 Agent 分析内容。")
+                .matches("这份资料说明了本地优先的知识管理方法。")
                 .count(),
             1
         );
+        assert!(same_vault_preview
+            .agent_markdown
+            .contains("一张双库信息流示意图"));
 
         let same_vault_results = commit_capture_batch_inner(
             &app_data,
             &analysis_state,
             &state,
             &database,
+            None,
             same_vault_preview
                 .note_previews
                 .iter()
@@ -4757,6 +5165,7 @@ mod tests {
             .expect("read same-vault Agent analysis note");
         assert!(same_vault_agent_note.contains("yunspire.agent-understood-source.v1"));
         assert!(!agent.join("资料库/来源原文/Agent单稿.md").exists());
+        assert!(!agent.join("资料库/附件/采集/Agent单稿-1.png").exists());
 
         let missing_binding_receipt = analysis_state
             .issue("local")
@@ -4770,6 +5179,7 @@ mod tests {
             &analysis_state,
             &state,
             &database,
+            None,
             CaptureVaultWriteInput {
                 raw_vault_id: "vault-personal".to_string(),
                 agent_vault_id: "vault-agent".to_string(),
@@ -4805,6 +5215,7 @@ mod tests {
             &analysis_state,
             &state,
             &database,
+            None,
             CaptureVaultWriteInput {
                 raw_vault_id: "vault-personal".to_string(),
                 agent_vault_id: "vault-agent".to_string(),
@@ -4891,6 +5302,8 @@ mod tests {
                     expected_hash: None,
                     previous_hash: None,
                     analysis_receipt: receipt.clone(),
+                    execution_ticket: None,
+                    effect_digest: "test-note-effect".to_string(),
                     created_at: SystemTime::now(),
                 },
             );
@@ -4913,6 +5326,8 @@ mod tests {
                     content_hash: hash_bytes(br#"{"schema":"yunspire.capture.verification.v1"}"#),
                     previous_hash: None,
                     analysis_receipt: receipt.clone(),
+                    execution_ticket: None,
+                    effect_digest: "test-asset-effect".to_string(),
                     created_at: SystemTime::now(),
                 },
             );
@@ -4922,6 +5337,7 @@ mod tests {
             &analysis_state,
             &state,
             &database,
+            None,
             vec![note_approval],
             vec![asset_approval],
             Some("capture".to_string()),
@@ -4949,5 +5365,35 @@ mod tests {
             events.last().map(|event| event.event_type.as_str()),
             Some("vault.capture.batch.write")
         );
+        let batch_event = events.last().expect("capture batch operation event");
+        assert_eq!(batch_event.vault_id.as_deref(), Some("vault-capture"));
+        assert_eq!(
+            batch_event.relative_path.as_deref(),
+            Some("资料库/网页/原文.md")
+        );
+        let vault_trace_count = database
+            .connection
+            .lock()
+            .expect("lock runtime database")
+            .query_row(
+                "SELECT COUNT(*) FROM runtime_trace_events
+                 WHERE trace_id='capture-trace' AND entity_kind='vault_operation'
+                   AND event_type='vault.capture.batch.write' AND state='success'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count capture Vault Trace events");
+        assert_eq!(vault_trace_count, 1);
+    }
+
+    #[test]
+    fn obsidian_url_percent_encodes_unicode_and_normalizes_separators() {
+        let url = obsidian_open_url("个人知识库", "项目\\Cafe\u{301} 🧭.md")
+            .expect("build encoded Obsidian URL");
+        assert_eq!(
+            url,
+            "obsidian://open?vault=%E4%B8%AA%E4%BA%BA%E7%9F%A5%E8%AF%86%E5%BA%93&file=%E9%A1%B9%E7%9B%AE%2FCaf%C3%A9%20%F0%9F%A7%AD"
+        );
+        assert!(!url.contains('\u{fffd}'));
     }
 }

@@ -1,77 +1,152 @@
 export class AssistantRequestCoordinator {
-  constructor() {
-    this.activeRequests = new Map();
-    this.activeConversationRequests = new Map();
-    this.conversationTails = new Map();
-    this.pendingSubmissions = new Map();
-    this.generation = 0;
+  constructor(runRequest, { onChange = () => {}, onError = () => {}, onCancel = () => {} } = {}) {
+    if (typeof runRequest !== 'function') throw new TypeError('runRequest must be a function');
+    this.runRequest = runRequest;
+    this.onChange = onChange;
+    this.onError = onError;
+    this.onCancel = onCancel;
+    this.lanes = new Map();
+    this.requests = new Map();
   }
 
-  register(request) {
-    this.activeRequests.set(request.id, request);
-    this.activeConversationRequests.set(request.conversationId, request.id);
+  enqueue(request) {
+    if (!request?.id || !request?.conversationId) {
+      return Promise.reject(new Error('AI assistant request requires id and conversationId'));
+    }
+    if (this.requests.has(request.id)) {
+      return Promise.reject(new Error(`Duplicate AI assistant request: ${request.id}`));
+    }
+    const lane = this.#lane(request.conversationId);
+    request.state = 'queued';
+    request.cancelled = false;
+    request.cancelReason = '';
+    const completion = new Promise((resolve, reject) => {
+      request.resolve = resolve;
+      request.reject = reject;
+    });
+    lane.queue.push(request);
+    this.requests.set(request.id, request);
+    this.#notify(request.conversationId);
+    void this.#pump(request.conversationId, lane);
+    return completion;
   }
 
-  request(requestId) {
-    return this.activeRequests.get(requestId);
+  active(conversationId) {
+    return this.lanes.get(conversationId)?.active || null;
   }
 
-  activeForConversation(conversationId) {
-    const requestId = this.activeConversationRequests.get(conversationId);
-    return requestId ? this.activeRequests.get(requestId) : undefined;
+  queued(conversationId) {
+    return [...(this.lanes.get(conversationId)?.queue || [])];
   }
 
-  finish(requestId) {
-    const request = this.activeRequests.get(requestId);
-    if (!request) return;
-    this.activeRequests.delete(requestId);
-    if (this.activeConversationRequests.get(request.conversationId) === requestId) {
-      this.activeConversationRequests.delete(request.conversationId);
+  get(requestId) {
+    return this.requests.get(requestId) || null;
+  }
+
+  cancel(requestId, reason = 'cancelled') {
+    const request = this.requests.get(requestId);
+    if (!request || request.cancelled || request.state === 'completed' || request.state === 'cancelled') return null;
+    request.cancelled = true;
+    request.cancelReason = reason;
+    const lane = this.lanes.get(request.conversationId);
+    if (request.state === 'queued' && lane) {
+      lane.queue = lane.queue.filter((item) => item.id !== requestId);
+      request.state = 'cancelled';
+      this.requests.delete(requestId);
+      try {
+        this.onCancel(request, reason);
+      } catch {
+        // Native cancellation is best effort; local queue ownership is already settled.
+      }
+      request.resolve({ status: 'cancelled', request });
+      this.#notify(request.conversationId);
+      this.#deleteIdleLane(request.conversationId, lane);
+    } else {
+      try {
+        this.onCancel(request, reason);
+      } catch {
+        // Cancellation transport errors are reported by the owning UI layer.
+      }
+      this.#notify(request.conversationId);
+    }
+    return request;
+  }
+
+  cancelConversation(conversationId, reason = 'conversation_cancelled') {
+    const lane = this.lanes.get(conversationId);
+    if (!lane) return [];
+    const requests = [lane.active, ...lane.queue].filter(Boolean);
+    requests.forEach((request) => this.cancel(request.id, reason));
+    return requests;
+  }
+
+  snapshot(conversationId) {
+    const lane = this.lanes.get(conversationId);
+    return {
+      active: lane?.active || null,
+      queued: [...(lane?.queue || [])],
+    };
+  }
+
+  #lane(conversationId) {
+    let lane = this.lanes.get(conversationId);
+    if (!lane) {
+      lane = { active: null, queue: [], pumping: false };
+      this.lanes.set(conversationId, lane);
+    }
+    return lane;
+  }
+
+  async #pump(conversationId, lane) {
+    if (lane.pumping) return;
+    lane.pumping = true;
+    try {
+      while (lane.queue.length) {
+        const request = lane.queue.shift();
+        if (request.cancelled) continue;
+        lane.active = request;
+        request.state = 'running';
+        this.#notify(conversationId);
+        try {
+          const value = await this.runRequest(request);
+          request.state = request.cancelled ? 'cancelled' : 'completed';
+          request.resolve({ status: request.state, request, value });
+        } catch (error) {
+          if (request.cancelled) {
+            request.state = 'cancelled';
+            request.resolve({ status: 'cancelled', request, error });
+          } else {
+            request.state = 'failed';
+            request.reject(error);
+            this.onError(error, request);
+          }
+        } finally {
+          if (lane.active?.id === request.id) lane.active = null;
+          this.requests.delete(request.id);
+          this.#notify(conversationId);
+        }
+      }
+    } finally {
+      lane.pumping = false;
+      this.#deleteIdleLane(conversationId, lane);
     }
   }
 
-  allActive() {
-    return [...this.activeRequests.values()];
+  #deleteIdleLane(conversationId, lane) {
+    if (!lane.pumping && !lane.active && lane.queue.length === 0) this.lanes.delete(conversationId);
   }
 
-  hasConversationWork(conversationId) {
-    return this.conversationTails.has(conversationId);
+  #notify(conversationId) {
+    try {
+      this.onChange(conversationId, this.snapshot(conversationId));
+    } catch {
+      // UI observation must not change request ordering.
+    }
   }
+}
 
-  pendingForConversation(conversationId) {
-    return [...(this.pendingSubmissions.get(conversationId) || [])];
-  }
-
-  enqueue(conversationId, submission, operation) {
-    const generation = this.generation;
-    const pending = this.pendingSubmissions.get(conversationId) || [];
-    pending.push(submission);
-    this.pendingSubmissions.set(conversationId, pending);
-
-    const previous = this.conversationTails.get(conversationId) || Promise.resolve();
-    const execution = previous.catch(() => undefined).then(async () => {
-      if (generation !== this.generation) return undefined;
-      const queued = this.pendingSubmissions.get(conversationId) || [];
-      const index = queued.indexOf(submission);
-      if (index >= 0) queued.splice(index, 1);
-      if (queued.length) this.pendingSubmissions.set(conversationId, queued);
-      else this.pendingSubmissions.delete(conversationId);
-      return operation(submission);
-    });
-    this.conversationTails.set(conversationId, execution);
-    void execution.finally(() => {
-      if (this.conversationTails.get(conversationId) === execution) {
-        this.conversationTails.delete(conversationId);
-      }
-    }).catch(() => undefined);
-    return execution;
-  }
-
-  clear() {
-    this.generation += 1;
-    this.activeRequests.clear();
-    this.activeConversationRequests.clear();
-    this.conversationTails.clear();
-    this.pendingSubmissions.clear();
-  }
+export function clearOwnedProcessingStage(conversation, requestId) {
+  if (conversation?.processingStage?.requestId !== requestId) return false;
+  delete conversation.processingStage;
+  return true;
 }

@@ -1,6 +1,6 @@
 # 云枢产品需求 / Yunspire Product Requirements
 
-当前版本 / Current version: `0.1.1`
+当前版本 / Current version: `0.1.2`
 
 ## 中文
 
@@ -59,6 +59,9 @@ AI助手是默认入口。它必须：
 - 只向用户展示必要进度、结果、失败原因和下一步选择。
 - 对可选择的下一步提供结构化选项，用户选择后恢复原任务。
 - 用规范化富文本渲染标题、段落、列表、加粗、代码、链接和表格。
+- 同一对话中的请求按先进先出顺序执行，不同对话拥有独立队列并可并行；创建新对话时不受其他对话运行状态限制。
+- 取消令牌贯穿模型请求、内容分析和后续执行；观察到取消后不得继续发起网络、模型或写入调用。
+- 明确操作意图的回执只能兑换一次与规范参数、调用方和有效期绑定的执行票据；参数替换、并发重复提交和重放必须被拒绝。
 
 AI助手不得打开或修改设置，不得把用户内容提升为系统指令，不得绕过 Command Bus、Policy Engine、Task Runtime 或操作日志。
 
@@ -124,7 +127,7 @@ macOS 的 PDF、视频和语音链分别使用 PDFKit、AVFoundation/ImageIO 与
 
 ### 8. 搜索与创作
 
-搜索支持当前 Vault、显式跨 Vault、文件名、正文、Properties、标签、链接、来源、修改时间和内容类型。结果展示来源路径与匹配片段，并支持在云枢内只读查看或明确跳转 Obsidian。
+搜索支持当前 Vault、显式跨 Vault、文件名、正文、Properties、标签、链接、来源、修改时间和内容类型。中文词法索引使用 CJK 字符对；本地特征向量从字符、词项、标题、路径、标签和 Wiki Link 确定性生成。两路候选分别排序后使用标准 RRF `1 / (60 + rank)` 融合，并返回词法名次、向量名次、相似度和标题/路径/关系/时间信号。向量缺失或损坏不得阻断 FTS。结果必须携带 Vault ID 与规范相对路径，展示来源片段，并支持在云枢内只读查看或明确跳转 Obsidian 权威原文。该能力不等同于神经 Embedding 或语义推理。
 
 创作支持 Markdown、Properties、标签、Wiki Links、来源引用和任意位置图片。保存前用户选择目标 Vault 与目录，系统执行冲突检查、检查点和原子写入。下拉框必须来自真实数据或明确的固定枚举，不能是无行为装饰。
 
@@ -134,13 +137,15 @@ macOS 的 PDF、视频和语音链分别使用 PDFKit、AVFoundation/ImageIO 与
 
 每个 Skill 声明标识、版本、输入输出、模型用途、Vault 范围、网络目标、超时、重试、幂等、副作用和来源。第一方 Skill 与处理器必须由我独立设计实现，并通过来源校验；允许使用语言标准库、官方语言运行时和 macOS/Windows 系统框架，不复制或捆绑第三方采集器、解析器、下载器或开源模型。
 
+第一方受控深度研究 Skill 必须按计划、证据收集、矛盾核对、综合、引用和反思六阶段运行。每阶段执行策略、预算、取消和检查点校验；每个可核验主张必须回溯到证据、来源及内容哈希。研究 Skill 不得直接写 Vault、修改设置或扩大网络范围。
+
 ### 10. 任务、报告与优化
 
 任务支持 created、queued、running、awaiting_approval、paused、succeeded、failed 和 cancelled，并提供步骤、进度、预算、检查点、暂停、恢复、重试和失败原因。
 
 报告包含日、周、月、年报，先保存到 Obsidian。后台优化分析任务成功率、用户纠正、回滚、成本、延迟、Skill 效果和知识健康；它只能生成版本化建议，由 AI助手在对话中提交用户审阅，确认后再执行。
 
-后台优化必须以不可变证据游标增量读取，拒绝权限扩张，保存候选、评估和应用版本，并支持回滚到历史版本。长期记忆必须支持查询、指标、纠正、过期、替代和墓碑治理，不通过覆盖历史事件来“修正”用户记录。
+后台优化必须以不可变证据游标增量读取，拒绝权限扩张，保存候选、评估和应用版本，并支持回滚到历史版本。长期记忆派生层分为 `user_episode`、`user_profile`、`agent_case`、`agent_skill` 四轨，按 user、agent、app、project、session 五维精确隔离，并保存证据、置信度、版本、替代、过期和墓碑。反思先生成不可召回草稿，只有用户审阅批准后才能激活；系统不得通过覆盖历史事件来“修正”记录。
 
 ### 11. 数据与隐私
 
@@ -155,7 +160,7 @@ macOS 的 PDF、视频和语音链分别使用 PDFKit、AVFoundation/ImageIO 与
 ### 12. 当前明确不包含
 
 - 账户注册、登录、退出和跨账户数据隔离。
-- 实体图谱、实体消歧、关系类型、多跳查询、向量索引和混合检索。
+- 实体图谱、实体消歧、关系类型、多跳查询、神经 Embedding、远程向量数据库和学习式语义重排。
 - 未经用户配置的外部消息发送或通用远程控制。
 - 规避第三方平台访问控制的能力。
 
@@ -188,7 +193,7 @@ Yunspire has no standalone graph page. It improves Obsidian's native Graph throu
 
 ### 4. AI Assistant
 
-The Assistant uses configured real models for conversation and intent analysis; accepts files and images with the prompt; supports editable conversation names; exposes real slash-command candidates; implements `/clear`; compresses context near the configured token limit instead of by message count; routes conversation, analysis, and image requests to user-selected models; keeps operational work in the same conversation; renders structured rich text; and resumes a task after a user selects a requested next action.
+The Assistant uses configured real models for conversation and intent analysis; accepts files and images with the prompt; supports editable conversation names; exposes real slash-command candidates; implements `/clear`; compresses context near the configured token limit instead of by message count; routes conversation, analysis, and image requests to user-selected models; keeps operational work in the same conversation; renders structured rich text; and resumes a task after a user selects a requested next action. Requests execute FIFO within one conversation and concurrently across conversations, so a running request never disables a new conversation. Cancellation spans model, analysis, and follow-on execution. A model receipt can mint only one execution ticket bound to canonical arguments, caller, and expiry; substitution, concurrent duplicate submission, and replay fail closed.
 
 User files have no per-file or per-selection total size ceiling. The desktop client transfers them in bounded chunks and the native runtime writes them as streams before model-sized batching. A newly attached image is analyzed once into a persisted summary, visible-text, tag, entity, key-point, model, and timestamp record. Historical context sends that record rather than the original bytes. Only an explicit filename, ordinal, or multi-image reference may reload the corresponding originals for another visual pass. If an original is no longer available in the current window, the Assistant asks the user to add it again. The user can choose a built-in Emoji avatar, persisted with the Assistant name, language, and style.
 
@@ -216,7 +221,7 @@ Office v2 extraction is position preserving. Word retains body/story order, tabl
 
 External images in webpage body flow, Markdown image syntax, and OOXML image relationships use a dedicated localizer that accepts only public `http/https` images, resolves DNS and every redirect, rejects private/loopback/link-local destinations, verifies MIME and actual image format, streams into isolation, and hashes with SHA-256. A successful asset returns to the exact paragraph, Markdown line/column, Word position, Excel anchor, or PowerPoint element through an `attachment://<reference_id>` placeholder. Identical bytes deduplicate by `asset_id`; configured-model analysis runs once per unique asset, while the deterministic writer places the resulting observation, visible text, context, evidence, and confidence at every occurrence-level `reference_id`. Original bytes remain untouched; if a temporary model derivative is necessary, each request binds its asset ID, original/derivative SHA-256, byte lengths, and allowed reference IDs, validates the transmitted derivative, and releases it after its bounded batch. Dynamic disk, available-memory, decode, and request gates are safety conditions rather than product file-size limits.
 
-Ordinary embedded URLs remain inert with `auto_open=false` and `auto_fetch=false` until the user explicitly requests a separate capture. A linked-image download, redirect, type, hash, staging, or placement failure blocks complete ingestion and reports its precise cause. The selected Vault, or Personal by default, receives source-faithful Markdown, in-place assets, full structure JSON, and provenance. The Agent Vault receives model-interpreted Markdown, per-image analysis, tags, Wiki Links, and related notes under `资料库/原文/`. Both writes and their assets use stable targets with the full normalized content SHA-256 as a directory and the readable title as the basename, so Obsidian Graph shows readable node names; they share one analysis receipt and commit as one cross-Vault batch. Equal titles with different content never collide, and capture batches cannot overwrite existing targets. Full structure and attachments are preserved while model requests are byte-bounded batches rather than file truncation. Entity graphs, vector indexes, and hybrid retrieval remain deferred.
+Ordinary embedded URLs remain inert with `auto_open=false` and `auto_fetch=false` until the user explicitly requests a separate capture. A linked-image download, redirect, type, hash, staging, or placement failure blocks complete ingestion and reports its precise cause. The selected Vault, or Personal by default, receives source-faithful Markdown, in-place assets, full structure JSON, and provenance. The Agent Vault receives model-interpreted Markdown, per-image analysis, tags, Wiki Links, and related notes under `资料库/原文/`. Both writes and their assets use stable targets with the full normalized content SHA-256 as a directory and the readable title as the basename, so Obsidian Graph shows readable node names; they share one analysis receipt and commit as one cross-Vault batch. Equal titles with different content never collide, and capture batches cannot overwrite existing targets. Full structure and attachments are preserved while model requests are byte-bounded batches rather than file truncation. Entity graphs remain deferred; search maintains rebuildable local feature vectors and RRF hybrid ranking.
 
 Yunspire does not bypass login, cookies, CAPTCHA, DRM, encrypted media, or platform access control. It guides users through lawful authorization and processes only content they may access or have exported.
 
@@ -224,16 +229,16 @@ Yunspire does not bypass login, cookies, CAPTCHA, DRM, encrypted media, or platf
 
 Users may add or remove providers, assign multiple models behind one endpoint/key or across different providers, and select final models for conversation, analysis, and image generation. The primary UI shows selected models rather than every discovered model. Chat, analysis, image generation, and image editing use role-correct provider endpoints. Request usage records capture model, role, tokens, duration, cost source, and errors without credentials, and long-running requests can be cancelled. Errors expose the real provider, endpoint, or model cause.
 
-Search covers current or explicit cross-Vault scope, filenames, content, Properties, tags, links, sources, timestamps, and content types. Results show provenance and support an in-app read-only viewer plus an explicit Obsidian launch action.
+Search covers current or explicit cross-Vault scope, filenames, content, Properties, tags, links, sources, timestamps, and content types. Chinese lexical search uses CJK character pairs. A deterministic local feature vector uses characters, terms, titles, paths, tags, and Wiki Links. The two ranks are fused with standard `1 / (60 + rank)` RRF and expose lexical rank, vector rank, similarity, and metadata/time signals. Missing or corrupt vectors never disable FTS. Results retain Vault IDs and canonical relative paths, show provenance, and support an in-app read-only viewer plus an explicit Obsidian launch action. This feature similarity is not a neural embedding or semantic-reasoning claim.
 
-Creation supports Markdown, Properties, tags, Wiki Links, sources, and inline images with real target Vault/folder choices and atomic writes. System Skills remain hidden in the background; the Skills page manages only user-created Skills. Every Skill declares version, I/O, model role, Vault scope, network target, timeout, retry, idempotency, side effects, and origin.
+Creation supports Markdown, Properties, tags, Wiki Links, sources, and inline images with real target Vault/folder choices and atomic writes. System Skills remain hidden in the background; the Skills page manages only user-created Skills. Every Skill declares version, I/O, model role, Vault scope, network target, timeout, retry, idempotency, side effects, and origin. The first-party controlled Deep Research Skill runs plan, evidence collection, contradiction review, synthesis, citations, and reflection under policy, budget, cancellation, checkpoint, and provenance controls without direct Vault writes or permission expansion.
 
 ### 8. Tasks, reports, optimization, and privacy
 
-Tasks expose durable states, steps, progress, budgets, checkpoints, pause, resume, retry, and failure reasons. Daily, weekly, monthly, and annual reports are saved to Obsidian first. Background optimization uses immutable evidence cursors, rejects permission expansion, preserves candidate/evaluation/application versions, and supports rollback; the Assistant submits every change for user review. Long-term memory supports query, metrics, correction, expiry, replacement, and tombstone governance without silently rewriting history.
+Tasks expose durable states, steps, progress, budgets, checkpoints, pause, resume, retry, and failure reasons. Daily, weekly, monthly, and annual reports are saved to Obsidian first. Background optimization uses immutable evidence cursors, rejects permission expansion, preserves candidate/evaluation/application versions, and supports rollback; the Assistant submits every change for user review. Memory V2 separates `user_episode`, `user_profile`, `agent_case`, and `agent_skill`, requires exact user/agent/app/project/session scope, retains evidence, confidence, versions, replacement, expiry, and tombstones, and excludes reflection drafts from recall until user approval.
 
 Vaults, tasks, schedules, Skills, reports, conversations, operation events, and configuration stay local. API keys use AES-256-GCM; long-term memory excludes credentials and complete binary attachments; SQLite uses transactions, WAL, migrations, backups, and integrity checks. External connectors require user-configured HTTPS endpoints, encrypted credentials, deterministic policy, and user confirmation. Update protection snapshots SQLite and connected Vaults before installation and creates another safety point before rollback; automatic download, signing, and notarization are not claimed. Source packages exclude Vaults, databases, keys, logs, caches, screenshots, and machine-specific paths.
 
 ### 9. Explicitly deferred
 
-The current version does not include accounts, entity graphs, entity disambiguation, typed entity relations, multi-hop queries, vector indexes, hybrid retrieval, unconfigured external delivery, generic remote control, or bypasses for third-party access controls.
+Version 0.1.2 does not include accounts, entity graphs, entity disambiguation, typed entity relations, multi-hop queries, neural embedding pipelines, remote vector databases, learned semantic reranking, unconfigured external delivery, generic remote control, or bypasses for third-party access controls.

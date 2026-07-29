@@ -2,6 +2,9 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "bundle": {
     "resources": {
+      "../LICENSE": "legal/LICENSE",
+      "../NOTICE": "legal/NOTICE",
+      "target/yunspire-licenses/THIRD_PARTY_NOTICES.txt": "legal/THIRD_PARTY_NOTICES.txt",
       "target/yunspire-runtime/python/": "runtime/python/",
       "target/yunspire-native/yunspire_pdf_windows.exe": "skills/document-content-analysis/scripts/yunspire_pdf_windows.exe",
       "target/yunspire-native/yunspire_image_windows.exe": "skills/document-content-analysis/scripts/yunspire_image_windows.exe",

@@ -14,7 +14,6 @@
 
 ```text
 npm run verify
-npm run native:clippy
 ```
 
 ## 回滚 / Rollback

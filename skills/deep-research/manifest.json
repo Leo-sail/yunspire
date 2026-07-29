@@ -1,0 +1,45 @@
+{
+  "id": "deep-research",
+  "display_name": "受控深度研究",
+  "description": "在策略和预算范围内分阶段规划、收集证据、核对矛盾、综合结论、生成可回溯引用并反思研究缺口。",
+  "status": "active",
+  "user_editable": false,
+  "instructions_path": "skills/deep-research/SKILL.md",
+  "input_schema": "skills/deep-research/input.schema.json",
+  "output_schema": "skills/deep-research/output.schema.json",
+  "capabilities": {
+    "vault_read": ["policy_scoped_notes", "search_index"],
+    "vault_write": [],
+    "network": [],
+    "shell": [],
+    "application_commands": ["search", "report_generate"]
+  },
+  "model_requirements": {
+    "vision": false,
+    "structured_output": true,
+    "tool_calling": true,
+    "minimum_context_tokens": 16384
+  },
+  "workflow": [
+    { "id": "policy_gate", "kind": "approval", "ref": "policy.deep-research", "when": null },
+    { "id": "plan", "kind": "prompt", "ref": "deep-research.plan", "when": "policy_allowed_and_active" },
+    { "id": "plan_checkpoint", "kind": "processor", "ref": "runtime.checkpoint", "when": "plan_valid" },
+    { "id": "evidence_collection", "kind": "skill", "ref": "research.collect-evidence", "when": "active_and_budget_available" },
+    { "id": "evidence_checkpoint", "kind": "processor", "ref": "runtime.checkpoint", "when": "evidence_batch_complete" },
+    { "id": "contradiction_check", "kind": "prompt", "ref": "deep-research.check-contradictions", "when": "evidence_sufficient" },
+    { "id": "contradiction_checkpoint", "kind": "processor", "ref": "runtime.checkpoint", "when": "contradictions_checked" },
+    { "id": "synthesis", "kind": "prompt", "ref": "deep-research.synthesize", "when": "active_and_budget_available" },
+    { "id": "synthesis_checkpoint", "kind": "processor", "ref": "runtime.checkpoint", "when": "claims_structured" },
+    { "id": "citations", "kind": "processor", "ref": "scripts/validate-research-result.mjs", "when": "synthesis_complete" },
+    { "id": "citations_checkpoint", "kind": "processor", "ref": "runtime.checkpoint", "when": "citations_valid" },
+    { "id": "reflection", "kind": "prompt", "ref": "deep-research.reflect", "when": "citations_valid_and_active" },
+    { "id": "reflection_checkpoint", "kind": "processor", "ref": "runtime.checkpoint", "when": "reflection_complete" },
+    { "id": "final_validation", "kind": "processor", "ref": "scripts/validate-research-result.mjs", "when": "reflection_checkpointed" }
+  ],
+  "timeout_seconds": 3600,
+  "retry": { "max_attempts": 1, "backoff_seconds": 0 },
+  "side_effects": [],
+  "approval": "policy",
+  "created_by": "system",
+  "created_at": "2026-07-29T00:00:00-04:00"
+}

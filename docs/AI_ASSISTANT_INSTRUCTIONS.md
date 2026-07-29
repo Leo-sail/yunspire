@@ -1,6 +1,6 @@
 # AI助手工作契约 / AI Assistant Operating Contract
 
-当前版本 / Current version: `0.1.1`
+当前版本 / Current version: `0.1.2`
 
 本文件记录我为云枢 AI助手定义的产品与工程契约。运行时仍以 `desktop-ui/app.js`、Rust 命令、Schema 和策略代码为事实来源。
 
@@ -27,6 +27,8 @@ AI助手是云枢的自然语言入口。它负责正常对话、理解目标、
 11. 后台优化只能形成版本化建议，必须由用户审阅后执行。
 12. 密钥、Cookie、令牌和私密配置不能进入长期记忆、Obsidian 正文或模型上下文摘要。
 13. 导入内容必须同时生成忠实原文与 Agent 结构化理解稿；AI助手不得用摘要替代原文，也不得在关键图片缺失时报告完整成功。
+14. 每个对话必须拥有独立的请求队列和取消作用域；一个对话正在执行时不得阻塞新建或其他对话发送。
+15. 模型意图回执只能兑换一次与规范参数绑定的执行票据；任何参数替换、并发重复提交或重放都必须失败。
 
 ### 3. 对话能力
 
@@ -40,6 +42,7 @@ AI助手是云枢的自然语言入口。它负责正常对话、理解目标、
 - 新图片先由分析模型建立持久化视觉记录；普通历史上下文只能使用记录，不得重复携带原图。只有用户明确指定文件名、图片序号或具体多图范围时，才重新读取对应图片进一步分析。
 - 用户文件通过本地分块通道读取，不得因单文件或一次选择总大小直接拒绝；模型上下文仍需分批和汇总。
 - 需要用户决定下一步时返回有限、清晰、互斥的选项；用户选择后恢复原任务。
+- 同一对话按先进先出顺序处理请求，不同对话可以并行；取消令牌必须贯穿对话、分析和后续执行，并在观察到取消后停止发起新调用。
 
 ### 4. 模型与能力路由
 
@@ -52,6 +55,7 @@ AI助手是云枢的自然语言入口。它负责正常对话、理解目标、
 | Obsidian 修改 | 对话/分析模型 | Command Bus、Policy、Adapter |
 | 定时采集与报告 | 对话/分析模型 | Scheduler、Task Runtime、Report Service |
 | 用户 Skill 管理 | 对话/分析模型 | Skill Registry 与验证器 |
+| 多来源深度研究 | 对话/分析模型 | 第一方 Deep Research、Task Runtime、受控检索 |
 
 没有配置对应用途模型时，AI助手必须说明缺少的配置，不能用错误模型伪装完成。
 
@@ -121,10 +125,12 @@ The AI Assistant is Yunspire's natural-language entry point. It provides normal 
 11. Background optimization produces versioned proposals that require user review before execution.
 12. Keys, cookies, tokens, and private configuration never enter long-term memory, Obsidian text, or compressed model context.
 13. Imports produce both a source-faithful record and an Agent interpreted record. The Assistant cannot replace source content with a summary or report complete success while a required image is missing.
+14. Every conversation has an independent request queue and cancellation scope; a running request cannot block sends in a new or separate conversation.
+15. A model-intent receipt can exchange for only one execution ticket bound to canonical arguments; substitution, concurrent duplicate submission, and replay fail closed.
 
 ### 3. Conversation contract
 
-The Assistant supports multi-turn conversation, combined text-and-attachment requests, editable conversation names, a built-in Emoji avatar, structured Markdown rendering, real slash-command discovery, `/clear`, token-aware context compression, and resumable choice prompts. Compression must preserve unfinished objectives, choices, constraints, file references, and task IDs. New images receive one persisted visual analysis; ordinary history reuses that record without original bytes, and only an explicit filename, ordinal, or multi-image reference triggers another visual pass. User files enter through a chunked local channel without a per-file or per-selection total size rejection, while model requests remain batched.
+The Assistant supports multi-turn conversation, combined text-and-attachment requests, editable conversation names, a built-in Emoji avatar, structured Markdown rendering, real slash-command discovery, `/clear`, token-aware context compression, and resumable choice prompts. Compression must preserve unfinished objectives, choices, constraints, file references, and task IDs. New images receive one persisted visual analysis; ordinary history reuses that record without original bytes, and only an explicit filename, ordinal, or multi-image reference triggers another visual pass. User files enter through a chunked local channel without a per-file or per-selection total size rejection, while model requests remain batched. Requests execute FIFO within one conversation and concurrently across conversations; a cancellation token spans conversation, analysis, and follow-on execution and stops new calls once observed.
 
 ### 4. Routing contract
 

@@ -10,6 +10,15 @@ This file records material public-version changes only. It excludes local valida
 
 _暂无。_
 
+### 0.1.2 - 2026-07-29
+
+- AI 请求改为按对话先进先出排队、跨对话并行执行；取消令牌贯穿模型、分析和后续执行链，新建对话不再被其他对话阻塞。
+- 长期记忆升级为四轨 Memory V2，增加五维作用域、证据与置信度、版本替代、过期和墓碑治理；反思草稿只有经用户批准后才可召回。
+- 搜索增加面向中文的 CJK 字符对与标题、路径、标签、Wiki Link、时间等多信号词法排序，并保持到 Obsidian 原文的可打开回链。
+- Command Bus 增加一次性执行票据，拒绝参数替换、并发重复提交和重放；跨 Vault 写入增加持久 manifest、崩溃恢复、冲突保护和目录同步。
+- 增加云枢第一方受控深度研究 Skill，按计划、证据、矛盾、综合、引用和反思六阶段执行，并校验预算、取消、检查点、来源链与引用完整性。
+- 增加 macOS/Windows 双平台质量门禁和未签名安装包发布流水线，并对版本、来源树、平台资源、校验和与安装产物执行发布审计。
+
 ### 0.1.1 - 2026-07-26
 
 - 修复 AI助手处理消息时阻塞其他对话发送、Agent 库重复保存原文、搜索结果无法在 Obsidian 中打开，以及知识图谱文本乱码的问题。
@@ -39,6 +48,15 @@ _暂无。_
 ### Unreleased
 
 _None._
+
+### 0.1.2 - 2026-07-29
+
+- Changed AI requests to per-conversation FIFO queues with cross-conversation concurrency; cancellation now spans model, analysis, and follow-on execution, while newly created conversations remain independent.
+- Upgraded long-term memory to four-track Memory V2 with exact five-dimensional scope, evidence and confidence, version replacement, expiry, tombstones, and user approval before reflection drafts become recallable.
+- Added Chinese-friendly CJK character-pair search with title, path, tag, Wiki Link, and time signals while preserving openable links to canonical Obsidian notes.
+- Added single-use execution tickets that reject argument substitution, concurrent duplicate submission, and replay; cross-Vault writes now use durable manifests, crash recovery, conflict protection, and directory synchronization.
+- Added Yunspire's first-party controlled Deep Research Skill with plan, evidence, contradiction, synthesis, citation, and reflection stages plus budget, cancellation, checkpoint, provenance, and citation validation.
+- Added macOS and Windows quality/release workflows for unsigned installers with version, source-tree, platform-resource, checksum, and artifact audits.
 
 ### 0.1.1 - 2026-07-26
 

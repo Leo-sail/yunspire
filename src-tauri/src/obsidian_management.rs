@@ -1,4 +1,5 @@
 use crate::{
+    execution_ticket::{ExecutionTicketState, TicketScope},
     obsidian::{
         atomic_write_file, ensure_long_term_memory_mutation_allowed_for_runtime,
         register_vault_path_for_runtime, remove_vault_registration_for_runtime,
@@ -45,6 +46,8 @@ struct PendingEntryDelete {
     relative_path: Option<String>,
     snapshot: EntrySnapshot,
     delete_vault: bool,
+    execution_ticket: Option<String>,
+    effect_digest: String,
     created_at: SystemTime,
 }
 
@@ -97,6 +100,10 @@ struct TrashManifest {
     entry_count: u64,
     deleted_at: String,
     state: String,
+    #[serde(default)]
+    last_error: Option<String>,
+    #[serde(default)]
+    recovery_target_path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -141,12 +148,138 @@ fn now_string() -> String {
     Utc::now().to_rfc3339()
 }
 
-fn task_context(context: OperationContext) -> Result<(String, Option<String>), String> {
+struct BoundManagementExecution {
+    task_id: String,
+    trace_id: Option<String>,
+    execution_ticket: Option<String>,
+}
+
+fn management_effect_digest(
+    kind: &str,
+    vault_id: &str,
+    relative_paths: &[&str],
+    effect: Value,
+) -> String {
+    let payload = serde_json::json!({
+        "kind": kind,
+        "vaultId": vault_id,
+        "relativePaths": relative_paths,
+        "effect": effect,
+    });
+    let bytes = serde_json::to_vec(&payload).expect("management effect payload is serializable");
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bind_management_execution(
+    ticket_state: Option<&ExecutionTicketState>,
+    workspace_scope: &str,
+    context: OperationContext,
+    capability_ids: &[&str],
+    operations: &[&str],
+    vault_id: &str,
+    relative_paths: &[&str],
+    approval_id: &str,
+    effect_digest: &str,
+) -> Result<BoundManagementExecution, String> {
     let task_id = context
         .task_id
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "Obsidian 管理操作缺少原生任务 ID".to_string())?;
-    Ok((task_id, context.trace_id))
+    let trace_id = context.trace_id.filter(|value| !value.trim().is_empty());
+    let Some(ticket_state) = ticket_state else {
+        return Ok(BoundManagementExecution {
+            task_id,
+            trace_id,
+            execution_ticket: None,
+        });
+    };
+    let execution_ticket = context
+        .execution_ticket
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Obsidian 管理操作缺少能力范围执行票据".to_string())?;
+    if relative_paths.is_empty() {
+        ticket_state.bind_approval(
+            &execution_ticket,
+            TicketScope {
+                workspace_scope,
+                task_id: &task_id,
+                trace_id: trace_id.as_deref(),
+                allowed_capability_ids: capability_ids,
+                allowed_operations: operations,
+                vault_id,
+                relative_path: "",
+                require_declared_path: false,
+            },
+            approval_id,
+            effect_digest,
+        )?;
+    } else {
+        for relative_path in relative_paths {
+            ticket_state.bind_approval(
+                &execution_ticket,
+                TicketScope {
+                    workspace_scope,
+                    task_id: &task_id,
+                    trace_id: trace_id.as_deref(),
+                    allowed_capability_ids: capability_ids,
+                    allowed_operations: operations,
+                    vault_id,
+                    relative_path,
+                    require_declared_path: true,
+                },
+                approval_id,
+                effect_digest,
+            )?;
+        }
+    }
+    Ok(BoundManagementExecution {
+        task_id,
+        trace_id,
+        execution_ticket: Some(execution_ticket),
+    })
+}
+
+fn begin_management_commit(
+    ticket_state: Option<&ExecutionTicketState>,
+    execution: &BoundManagementExecution,
+    workspace_scope: &str,
+    approval_id: &str,
+    effect_digest: &str,
+) -> Result<(), String> {
+    if let (Some(state), Some(token)) = (ticket_state, execution.execution_ticket.as_deref()) {
+        state.begin_commit(
+            token,
+            workspace_scope,
+            &execution.task_id,
+            &[(approval_id, effect_digest)],
+        )?;
+    }
+    Ok(())
+}
+
+fn finish_management_commit(
+    ticket_state: Option<&ExecutionTicketState>,
+    execution_ticket: Option<&str>,
+) -> Result<(), String> {
+    if let (Some(state), Some(token)) = (ticket_state, execution_ticket) {
+        state.complete_commit(token)?;
+    }
+    Ok(())
+}
+
+fn abort_management_commit(
+    ticket_state: Option<&ExecutionTicketState>,
+    execution_ticket: Option<&str>,
+    rolled_back: bool,
+) {
+    if let (Some(state), Some(token)) = (ticket_state, execution_ticket) {
+        if rolled_back {
+            state.release_commit(token);
+        } else if let Err(error) = state.fail_commit(token) {
+            log::warn!("无法封存副作用状态不确定的执行票据：{error}");
+        }
+    }
 }
 
 fn normalized_relative_path(
@@ -400,7 +533,7 @@ fn move_entry(source: &Path, target: &Path) -> Result<(), String> {
     fs::create_dir_all(parent).map_err(|error| format!("无法创建目标目录：{error}"))?;
     match fs::rename(source, target) {
         Ok(()) => Ok(()),
-        Err(error) if error.raw_os_error() == Some(18) => {
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
             copy_entry(source, target)?;
             if let Err(remove_error) = remove_entry(source) {
                 let _ = remove_entry(target);
@@ -412,6 +545,44 @@ fn move_entry(source: &Path, target: &Path) -> Result<(), String> {
         }
         Err(error) => Err(format!("无法移动目标：{error}")),
     }
+}
+
+fn preserve_recovery_manifest(operation_dir: &Path, manifest: &mut TrashManifest, error: &str) {
+    manifest.state = "recovery_required".to_string();
+    manifest.last_error = Some(error.chars().take(4_000).collect());
+    if let Err(manifest_error) = write_json_atomic(&operation_dir.join("manifest.json"), manifest) {
+        log::error!(
+            "无法持久化回收恢复状态 {}：{manifest_error}",
+            operation_dir.display()
+        );
+    }
+}
+
+fn preserve_restore_recovery(
+    operation_dir: &Path,
+    manifest: &mut TrashManifest,
+    target: &Path,
+    error: &str,
+) {
+    manifest.state = "restore_incomplete".to_string();
+    manifest.last_error = Some(error.chars().take(4_000).collect());
+    manifest.recovery_target_path = target
+        .exists()
+        .then(|| target.to_string_lossy().into_owned());
+    if let Err(manifest_error) = write_json_atomic(&operation_dir.join("manifest.json"), manifest) {
+        log::error!(
+            "无法持久化恢复中断状态 {}：{manifest_error}",
+            operation_dir.display()
+        );
+    }
+}
+
+fn rollback_trashed_entry(pending: &PendingEntryDelete, payload_path: &Path) -> Result<(), String> {
+    move_entry(payload_path, &pending.source_path)?;
+    if pending.delete_vault {
+        register_vault_path_for_runtime(&pending.source_path)?;
+    }
+    Ok(())
 }
 
 fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<(), String> {
@@ -480,8 +651,32 @@ fn append_event(
     Ok(committed_at)
 }
 
+fn enqueue_markdown_index_with_trace(
+    database: &RuntimeDatabase,
+    vault_id: &str,
+    root: &Path,
+    path: &Path,
+    trace_id: &str,
+) {
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+    {
+        return;
+    }
+    if let Err(error) = database.enqueue_vault_index_path_with_trace(vault_id, root, path, trace_id)
+    {
+        log::warn!(
+            "Markdown 操作已提交，但无法继承 Trace 入队索引 {}：{error}",
+            path.display()
+        );
+    }
+}
+
 #[tauri::command]
 pub fn prepare_vault_entry_delete(
+    ticket_state: State<'_, ExecutionTicketState>,
     state: State<'_, ObsidianManagementState>,
     database: State<'_, RuntimeDatabase>,
     vault_id: String,
@@ -492,6 +687,7 @@ pub fn prepare_vault_entry_delete(
     prepare_vault_entry_delete_inner(
         state.inner(),
         database.inner(),
+        Some(ticket_state.inner()),
         vault_id,
         relative_path,
         delete_vault,
@@ -502,21 +698,13 @@ pub fn prepare_vault_entry_delete(
 fn prepare_vault_entry_delete_inner(
     state: &ObsidianManagementState,
     database: &RuntimeDatabase,
+    ticket_state: Option<&ExecutionTicketState>,
     vault_id: String,
     relative_path: Option<String>,
     delete_vault: Option<bool>,
     operation_context: OperationContext,
 ) -> Result<EntryDeletePreview, String> {
     let workspace_scope = database.local_workspace_scope()?;
-    let (task_id, trace_id) = task_context(operation_context)?;
-    database.ensure_runtime_task_authorized(
-        &workspace_scope,
-        &task_id,
-        &["system:delete", "system:vaults"],
-        &["delete"],
-        Some(&vault_id),
-        &["awaiting_approval", "running"],
-    )?;
     let (vault_name, root) = canonical_root(&vault_id)?;
     let delete_vault = delete_vault.unwrap_or(false);
     let (source_path, normalized_relative) = if delete_vault {
@@ -538,6 +726,38 @@ fn prepare_vault_entry_delete_inner(
     };
     let snapshot = entry_snapshot(&source_path)?;
     let approval_id = Uuid::new_v4().to_string();
+    let effect_paths = normalized_relative
+        .as_deref()
+        .map(|path| vec![path])
+        .unwrap_or_default();
+    let effect_digest = management_effect_digest(
+        "delete",
+        &vault_id,
+        &effect_paths,
+        serde_json::json!({
+            "deleteVault": delete_vault,
+            "fingerprint": snapshot.fingerprint,
+        }),
+    );
+    let execution = bind_management_execution(
+        ticket_state,
+        &workspace_scope,
+        operation_context,
+        &["system:delete", "system:vaults"],
+        &["delete"],
+        &vault_id,
+        &effect_paths,
+        &approval_id,
+        &effect_digest,
+    )?;
+    database.ensure_runtime_task_authorized(
+        &workspace_scope,
+        &execution.task_id,
+        &["system:delete", "system:vaults"],
+        &["delete"],
+        Some(&vault_id),
+        &["awaiting_approval", "running"],
+    )?;
     let mut pending = state
         .pending_deletes
         .lock()
@@ -553,8 +773,8 @@ fn prepare_vault_entry_delete_inner(
     pending.insert(
         approval_id.clone(),
         PendingEntryDelete {
-            task_id,
-            trace_id,
+            task_id: execution.task_id,
+            trace_id: execution.trace_id,
             vault_id: vault_id.clone(),
             vault_name: vault_name.clone(),
             vault_root: root,
@@ -562,6 +782,8 @@ fn prepare_vault_entry_delete_inner(
             relative_path: normalized_relative.clone(),
             snapshot: snapshot.clone(),
             delete_vault,
+            execution_ticket: execution.execution_ticket,
+            effect_digest,
             created_at: SystemTime::now(),
         },
     );
@@ -608,6 +830,7 @@ fn discard_vault_entry_delete_inner(
 #[tauri::command]
 pub fn commit_vault_entry_delete(
     app: AppHandle,
+    ticket_state: State<'_, ExecutionTicketState>,
     state: State<'_, ObsidianManagementState>,
     database: State<'_, RuntimeDatabase>,
     approval_id: String,
@@ -616,13 +839,22 @@ pub fn commit_vault_entry_delete(
         .path()
         .app_data_dir()
         .map_err(|error| format!("无法定位应用数据目录：{error}"))?;
-    commit_vault_entry_delete_inner(&app_data, state.inner(), database.inner(), &approval_id)
+    let receipt = commit_vault_entry_delete_inner(
+        &app_data,
+        state.inner(),
+        database.inner(),
+        Some(ticket_state.inner()),
+        &approval_id,
+    )?;
+    crate::vault_watcher::request_vault_index_refresh(&app);
+    Ok(receipt)
 }
 
 fn commit_vault_entry_delete_inner(
     app_data: &Path,
     state: &ObsidianManagementState,
     database: &RuntimeDatabase,
+    ticket_state: Option<&ExecutionTicketState>,
     approval_id: &str,
 ) -> Result<VaultMutationReceipt, String> {
     let approval_id = approval_id.trim();
@@ -688,39 +920,104 @@ fn commit_vault_entry_delete_inner(
         entry_count: pending.snapshot.entry_count,
         deleted_at: now_string(),
         state: "prepared".to_string(),
+        last_error: None,
+        recovery_target_path: None,
     };
     fs::create_dir_all(&operation_dir).map_err(|error| format!("无法创建云枢回收记录：{error}"))?;
     write_json_atomic(&operation_dir.join("manifest.json"), &manifest)?;
     let checkpoint =
         create_checkpoint_at(app_data, &operation_id, "trash-manifest.json", &manifest)?;
-    if let Err(error) = move_entry(&pending.source_path, &payload_path) {
+    if ticket_state.is_some() && pending.execution_ticket.is_none() {
         let _ = fs::remove_dir_all(&operation_dir);
+        return Err("删除确认缺少能力范围执行票据".to_string());
+    }
+    let execution = BoundManagementExecution {
+        task_id: pending.task_id.clone(),
+        trace_id: pending.trace_id.clone(),
+        execution_ticket: pending.execution_ticket.clone(),
+    };
+    let trace_id = database.resolve_operation_trace_id(
+        &workspace_scope,
+        Some(&pending.task_id),
+        pending.trace_id.as_deref(),
+    )?;
+    if let Err(error) = begin_management_commit(
+        ticket_state,
+        &execution,
+        &workspace_scope,
+        approval_id,
+        &pending.effect_digest,
+    ) {
+        let _ = fs::remove_dir_all(&operation_dir);
+        return Err(error);
+    }
+    if let Err(error) = move_entry(&pending.source_path, &payload_path) {
+        let source_exists = pending.source_path.exists();
+        let payload_exists = payload_path.exists();
+        if source_exists {
+            abort_management_commit(ticket_state, pending.execution_ticket.as_deref(), true);
+            let _ = fs::remove_dir_all(&operation_dir);
+        } else {
+            preserve_recovery_manifest(&operation_dir, &mut manifest, &error);
+            abort_management_commit(ticket_state, pending.execution_ticket.as_deref(), false);
+        }
+        if !source_exists && !payload_exists {
+            return Err(format!(
+                "删除移动失败且源与回收副本均不可见，请保留检查点 {}：{error}",
+                checkpoint.display()
+            ));
+        }
         return Err(error);
     }
     if pending.delete_vault {
         if let Err(error) = remove_vault_registration_for_runtime(&pending.vault_id) {
-            let rollback = move_entry(&payload_path, &pending.source_path);
-            let _ = fs::remove_dir_all(&operation_dir);
+            let rollback = rollback_trashed_entry(&pending, &payload_path);
             return match rollback {
-                Ok(()) => Err(format!("无法更新 Obsidian Vault 注册，删除已回滚：{error}")),
-                Err(rollback_error) => Err(format!(
-                    "无法更新 Obsidian Vault 注册，且回滚失败：{error}；{rollback_error}"
-                )),
+                Ok(()) => {
+                    abort_management_commit(
+                        ticket_state,
+                        pending.execution_ticket.as_deref(),
+                        true,
+                    );
+                    let _ = fs::remove_dir_all(&operation_dir);
+                    Err(format!("无法更新 Obsidian Vault 注册，删除已回滚：{error}"))
+                }
+                Err(rollback_error) => {
+                    let detail = format!(
+                        "无法更新 Obsidian Vault 注册，且回滚失败：{error}；{rollback_error}"
+                    );
+                    preserve_recovery_manifest(&operation_dir, &mut manifest, &detail);
+                    abort_management_commit(
+                        ticket_state,
+                        pending.execution_ticket.as_deref(),
+                        false,
+                    );
+                    Err(format!(
+                        "{detail}；唯一回收副本已保留在 {}",
+                        operation_dir.display()
+                    ))
+                }
             };
         }
     }
     manifest.state = "trashed".to_string();
     if let Err(error) = write_json_atomic(&operation_dir.join("manifest.json"), &manifest) {
-        let rollback = move_entry(&payload_path, &pending.source_path);
-        if pending.delete_vault && rollback.is_ok() {
-            let _ = register_vault_path_for_runtime(&pending.source_path);
-        }
-        let _ = fs::remove_dir_all(&operation_dir);
+        let rollback = rollback_trashed_entry(&pending, &payload_path);
         return match rollback {
-            Ok(()) => Err(format!("无法完成回收清单，删除已回滚：{error}")),
-            Err(rollback_error) => Err(format!(
-                "无法完成回收清单，且回滚失败：{error}；{rollback_error}"
-            )),
+            Ok(()) => {
+                abort_management_commit(ticket_state, pending.execution_ticket.as_deref(), true);
+                let _ = fs::remove_dir_all(&operation_dir);
+                Err(format!("无法完成回收清单，删除已回滚：{error}"))
+            }
+            Err(rollback_error) => {
+                let detail = format!("无法完成回收清单，且回滚失败：{error}；{rollback_error}");
+                preserve_recovery_manifest(&operation_dir, &mut manifest, &detail);
+                abort_management_commit(ticket_state, pending.execution_ticket.as_deref(), false);
+                Err(format!(
+                    "{detail}；唯一回收副本已保留在 {}",
+                    operation_dir.display()
+                ))
+            }
         };
     }
     let event_type = match manifest.entry_type.as_str() {
@@ -731,7 +1028,7 @@ fn commit_vault_entry_delete_inner(
     let committed_at = match append_event(
         database,
         &pending.task_id,
-        pending.trace_id.clone(),
+        Some(trace_id.clone()),
         event_type,
         &pending.vault_id,
         pending.relative_path.clone(),
@@ -742,19 +1039,43 @@ fn commit_vault_entry_delete_inner(
     ) {
         Ok(value) => value,
         Err(error) => {
-            let rollback = move_entry(&payload_path, &pending.source_path);
-            if pending.delete_vault && rollback.is_ok() {
-                let _ = register_vault_path_for_runtime(&pending.source_path);
-            }
-            let _ = fs::remove_dir_all(&operation_dir);
+            let rollback = rollback_trashed_entry(&pending, &payload_path);
             return match rollback {
-                Ok(()) => Err(format!("无法记录删除审计，删除已回滚：{error}")),
-                Err(rollback_error) => Err(format!(
-                    "无法记录删除审计，且回滚失败：{error}；{rollback_error}"
-                )),
+                Ok(()) => {
+                    abort_management_commit(
+                        ticket_state,
+                        pending.execution_ticket.as_deref(),
+                        true,
+                    );
+                    let _ = fs::remove_dir_all(&operation_dir);
+                    Err(format!("无法记录删除审计，删除已回滚：{error}"))
+                }
+                Err(rollback_error) => {
+                    let detail = format!("无法记录删除审计，且回滚失败：{error}；{rollback_error}");
+                    preserve_recovery_manifest(&operation_dir, &mut manifest, &detail);
+                    abort_management_commit(
+                        ticket_state,
+                        pending.execution_ticket.as_deref(),
+                        false,
+                    );
+                    Err(format!(
+                        "{detail}；唯一回收副本已保留在 {}",
+                        operation_dir.display()
+                    ))
+                }
             };
         }
     };
+    if manifest.entry_type == "file" && !pending.delete_vault {
+        enqueue_markdown_index_with_trace(
+            database,
+            &pending.vault_id,
+            &pending.vault_root,
+            &pending.source_path,
+            &trace_id,
+        );
+    }
+    finish_management_commit(ticket_state, pending.execution_ticket.as_deref())?;
     state
         .pending_deletes
         .lock()
@@ -786,8 +1107,24 @@ fn read_trash_manifest(operation_id: &str) -> Result<(PathBuf, TrashManifest), S
         .map_err(|error| format!("无法读取回收清单：{error}"))?;
     let manifest = serde_json::from_slice::<TrashManifest>(&bytes)
         .map_err(|error| format!("回收清单格式无效：{error}"))?;
-    if manifest.operation_id != operation_id || manifest.state != "trashed" {
+    if manifest.operation_id != operation_id
+        || !matches!(
+            manifest.state.as_str(),
+            "prepared" | "trashed" | "recovery_required" | "restore_incomplete"
+        )
+    {
         return Err("回收清单状态无效".to_string());
+    }
+    let (payload_relative, _) =
+        normalized_relative_path(&manifest.payload_relative_path, false, true)?;
+    let payload = canonical_operation.join(payload_relative);
+    if payload.exists() {
+        let canonical_payload = payload
+            .canonicalize()
+            .map_err(|error| format!("回收数据路径不可访问：{error}"))?;
+        if !canonical_payload.starts_with(&canonical_operation) {
+            return Err("回收数据路径越过 Yunspire 系统回收区".to_string());
+        }
     }
     Ok((canonical_operation, manifest))
 }
@@ -809,6 +1146,10 @@ pub fn list_yunspire_trash_entries() -> Result<Vec<TrashEntryDescriptor>, String
             continue;
         };
         let payload = operation_dir.join(&manifest.payload_relative_path);
+        let recovery_target_exists = manifest
+            .recovery_target_path
+            .as_deref()
+            .is_some_and(|path| Path::new(path).exists());
         entries.push(TrashEntryDescriptor {
             operation_id,
             vault_id: manifest.vault_id,
@@ -819,7 +1160,7 @@ pub fn list_yunspire_trash_entries() -> Result<Vec<TrashEntryDescriptor>, String
             byte_length: manifest.byte_length,
             entry_count: manifest.entry_count,
             deleted_at: manifest.deleted_at,
-            recoverable: payload.exists(),
+            recoverable: payload.exists() || recovery_target_exists,
         });
     }
     entries.sort_by(|left, right| right.deleted_at.cmp(&left.deleted_at));
@@ -829,6 +1170,7 @@ pub fn list_yunspire_trash_entries() -> Result<Vec<TrashEntryDescriptor>, String
 #[tauri::command]
 pub fn restore_yunspire_trash_entry(
     app: AppHandle,
+    ticket_state: State<'_, ExecutionTicketState>,
     database: State<'_, RuntimeDatabase>,
     operation_id: String,
     target_vault_id: Option<String>,
@@ -839,35 +1181,30 @@ pub fn restore_yunspire_trash_entry(
         .path()
         .app_data_dir()
         .map_err(|error| format!("无法定位应用数据目录：{error}"))?;
-    restore_yunspire_trash_entry_inner(
+    let receipt = restore_yunspire_trash_entry_inner(
         &app_data,
         database.inner(),
+        Some(ticket_state.inner()),
         operation_id,
         target_vault_id,
         target_relative_path,
         operation_context,
-    )
+    )?;
+    crate::vault_watcher::request_vault_index_refresh(&app);
+    Ok(receipt)
 }
 
 fn restore_yunspire_trash_entry_inner(
     app_data: &Path,
     database: &RuntimeDatabase,
+    ticket_state: Option<&ExecutionTicketState>,
     operation_id: String,
     target_vault_id: Option<String>,
     target_relative_path: Option<String>,
     operation_context: OperationContext,
 ) -> Result<VaultMutationReceipt, String> {
     let workspace_scope = database.local_workspace_scope()?;
-    let (task_id, trace_id) = task_context(operation_context)?;
-    database.ensure_runtime_task_authorized(
-        &workspace_scope,
-        &task_id,
-        &["system:vaults"],
-        &["restore"],
-        target_vault_id.as_deref(),
-        &["running"],
-    )?;
-    let (operation_dir, manifest) = read_trash_manifest(operation_id.trim())?;
+    let (operation_dir, mut manifest) = read_trash_manifest(operation_id.trim())?;
     let payload = operation_dir.join(&manifest.payload_relative_path);
     if !payload.exists() {
         return Err("云枢回收区中的数据已经不存在，无法恢复".to_string());
@@ -903,33 +1240,106 @@ fn restore_yunspire_trash_entry_inner(
         database.ensure_vault_write_allowed(&workspace_scope, &vault_id, &normalized)?;
         (vault_id, target, normalized)
     };
-    move_entry(&payload, &target)?;
-    let registered_vault_id = if manifest.entry_type == "vault" {
-        match register_vault_path_for_runtime(&target) {
-            Ok(id) => id,
-            Err(error) => {
-                let rollback = move_entry(&target, &payload);
-                return match rollback {
-                    Ok(()) => Err(format!("无法重新注册恢复的 Vault，恢复已回滚：{error}")),
-                    Err(rollback_error) => Err(format!(
-                        "无法重新注册恢复的 Vault，且回滚失败：{error}；{rollback_error}"
-                    )),
-                };
-            }
-        }
-    } else {
-        vault_id.clone()
-    };
+    let approval_id = Uuid::new_v4().to_string();
+    let effect_paths = (manifest.entry_type != "vault")
+        .then_some(target_label.as_str())
+        .into_iter()
+        .collect::<Vec<_>>();
+    let effect_digest = management_effect_digest(
+        "restore",
+        &vault_id,
+        &effect_paths,
+        serde_json::json!({
+            "trashOperationId": manifest.operation_id,
+            "fingerprint": manifest.fingerprint,
+            "entryType": manifest.entry_type,
+        }),
+    );
+    let execution = bind_management_execution(
+        ticket_state,
+        &workspace_scope,
+        operation_context,
+        &["system:vaults"],
+        &["restore"],
+        &vault_id,
+        &effect_paths,
+        &approval_id,
+        &effect_digest,
+    )?;
+    let trace_id = database.resolve_operation_trace_id(
+        &workspace_scope,
+        Some(&execution.task_id),
+        execution.trace_id.as_deref(),
+    )?;
+    database.ensure_runtime_task_authorized(
+        &workspace_scope,
+        &execution.task_id,
+        &["system:vaults"],
+        &["restore"],
+        Some(&vault_id),
+        &["running"],
+    )?;
     let checkpoint = create_checkpoint_at(
         app_data,
         &manifest.operation_id,
         "restore-manifest.json",
         &manifest,
     )?;
+    begin_management_commit(
+        ticket_state,
+        &execution,
+        &workspace_scope,
+        &approval_id,
+        &effect_digest,
+    )?;
+    if let Err(error) = move_entry(&payload, &target) {
+        let rolled_back = payload.exists() && (!target.exists() || remove_entry(&target).is_ok());
+        abort_management_commit(
+            ticket_state,
+            execution.execution_ticket.as_deref(),
+            rolled_back,
+        );
+        if !rolled_back {
+            preserve_restore_recovery(&operation_dir, &mut manifest, &target, &error);
+        }
+        return Err(error);
+    }
+    let registered_vault_id = if manifest.entry_type == "vault" {
+        match register_vault_path_for_runtime(&target) {
+            Ok(id) => id,
+            Err(error) => {
+                let rollback = move_entry(&target, &payload);
+                return match rollback {
+                    Ok(()) => {
+                        abort_management_commit(
+                            ticket_state,
+                            execution.execution_ticket.as_deref(),
+                            true,
+                        );
+                        Err(format!("无法重新注册恢复的 Vault，恢复已回滚：{error}"))
+                    }
+                    Err(rollback_error) => {
+                        abort_management_commit(
+                            ticket_state,
+                            execution.execution_ticket.as_deref(),
+                            false,
+                        );
+                        let detail = format!(
+                            "无法重新注册恢复的 Vault，且回滚失败：{error}；{rollback_error}"
+                        );
+                        preserve_restore_recovery(&operation_dir, &mut manifest, &target, &detail);
+                        Err(detail)
+                    }
+                };
+            }
+        }
+    } else {
+        vault_id.clone()
+    };
     let committed_at = match append_event(
         database,
-        &task_id,
-        trace_id,
+        &execution.task_id,
+        Some(trace_id.clone()),
         if manifest.entry_type == "vault" {
             "vault.restore"
         } else if manifest.entry_type == "folder" {
@@ -943,20 +1353,55 @@ fn restore_yunspire_trash_entry_inner(
     ) {
         Ok(value) => value,
         Err(error) => {
-            if manifest.entry_type == "vault" {
-                let _ = remove_vault_registration_for_runtime(&registered_vault_id);
-            }
+            let registration_rollback = if manifest.entry_type == "vault" {
+                remove_vault_registration_for_runtime(&registered_vault_id)
+            } else {
+                Ok(())
+            };
             let rollback = move_entry(&target, &payload);
-            return match rollback {
-                Ok(()) => Err(format!("无法记录恢复审计，恢复已回滚：{error}")),
-                Err(rollback_error) => Err(format!(
-                    "无法记录恢复审计，且回滚失败：{error}；{rollback_error}"
-                )),
+            return match (registration_rollback, rollback) {
+                (Ok(()), Ok(())) => {
+                    abort_management_commit(
+                        ticket_state,
+                        execution.execution_ticket.as_deref(),
+                        true,
+                    );
+                    Err(format!("无法记录恢复审计，恢复已回滚：{error}"))
+                }
+                (registration_result, payload_result) => {
+                    abort_management_commit(
+                        ticket_state,
+                        execution.execution_ticket.as_deref(),
+                        false,
+                    );
+                    let rollback_errors = [registration_result.err(), payload_result.err()]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join("；");
+                    let detail =
+                        format!("无法记录恢复审计，且回滚未完整完成：{error}；{rollback_errors}");
+                    preserve_restore_recovery(&operation_dir, &mut manifest, &target, &detail);
+                    Err(detail)
+                }
             };
         }
     };
-    fs::remove_dir_all(&operation_dir)
-        .map_err(|error| format!("数据已恢复，但无法清理回收记录：{error}"))?;
+    if manifest.entry_type == "file" {
+        if let Ok((_, root)) = canonical_root(&registered_vault_id) {
+            enqueue_markdown_index_with_trace(
+                database,
+                &registered_vault_id,
+                &root,
+                &target,
+                &trace_id,
+            );
+        }
+    }
+    finish_management_commit(ticket_state, execution.execution_ticket.as_deref())?;
+    if let Err(error) = fs::remove_dir_all(&operation_dir) {
+        log::warn!("数据已恢复，但无法清理回收记录：{error}");
+    }
     Ok(VaultMutationReceipt {
         operation_id: manifest.operation_id,
         vault_id: registered_vault_id,
@@ -970,30 +1415,62 @@ fn restore_yunspire_trash_entry_inner(
 
 #[tauri::command]
 pub fn create_vault_folder(
+    ticket_state: State<'_, ExecutionTicketState>,
     database: State<'_, RuntimeDatabase>,
     vault_id: String,
     relative_path: String,
     operation_context: OperationContext,
 ) -> Result<VaultMutationReceipt, String> {
     let workspace_scope = database.local_workspace_scope()?;
-    let (task_id, trace_id) = task_context(operation_context)?;
+    let (_, root) = canonical_root(&vault_id)?;
+    let (target, normalized) = resolve_new_entry(&root, &relative_path)?;
+    database.ensure_vault_write_allowed(&workspace_scope, &vault_id, &normalized)?;
+    let operation_id = Uuid::new_v4().to_string();
+    let effect_digest = management_effect_digest(
+        "folder.create",
+        &vault_id,
+        &[&normalized],
+        serde_json::json!({ "operationId": operation_id }),
+    );
+    let execution = bind_management_execution(
+        Some(ticket_state.inner()),
+        &workspace_scope,
+        operation_context,
+        &["system:vaults"],
+        &["create"],
+        &vault_id,
+        &[&normalized],
+        &operation_id,
+        &effect_digest,
+    )?;
     database.ensure_runtime_task_authorized(
         &workspace_scope,
-        &task_id,
+        &execution.task_id,
         &["system:vaults"],
         &["create"],
         Some(&vault_id),
         &["running"],
     )?;
-    let (_, root) = canonical_root(&vault_id)?;
-    let (target, normalized) = resolve_new_entry(&root, &relative_path)?;
-    database.ensure_vault_write_allowed(&workspace_scope, &vault_id, &normalized)?;
-    fs::create_dir_all(&target).map_err(|error| format!("无法创建 Vault 文件夹：{error}"))?;
-    let operation_id = Uuid::new_v4().to_string();
+    begin_management_commit(
+        Some(ticket_state.inner()),
+        &execution,
+        &workspace_scope,
+        &operation_id,
+        &effect_digest,
+    )?;
+    if let Err(error) = fs::create_dir_all(&target) {
+        let rolled_back = !target.exists() || remove_entry(&target).is_ok();
+        abort_management_commit(
+            Some(ticket_state.inner()),
+            execution.execution_ticket.as_deref(),
+            rolled_back,
+        );
+        return Err(format!("无法创建 Vault 文件夹：{error}"));
+    }
     let committed_at = match append_event(
         &database,
-        &task_id,
-        trace_id,
+        &execution.task_id,
+        execution.trace_id.clone(),
         "vault.folder.create",
         &vault_id,
         Some(normalized.clone()),
@@ -1001,10 +1478,24 @@ pub fn create_vault_folder(
     ) {
         Ok(value) => value,
         Err(error) => {
-            let _ = fs::remove_dir(&target);
-            return Err(format!("无法记录文件夹创建审计，创建已回滚：{error}"));
+            let rollback = remove_entry(&target);
+            abort_management_commit(
+                Some(ticket_state.inner()),
+                execution.execution_ticket.as_deref(),
+                rollback.is_ok(),
+            );
+            return match rollback {
+                Ok(()) => Err(format!("无法记录文件夹创建审计，创建已回滚：{error}")),
+                Err(rollback_error) => Err(format!(
+                    "无法记录文件夹创建审计，且回滚失败：{error}；{rollback_error}"
+                )),
+            };
         }
     };
+    finish_management_commit(
+        Some(ticket_state.inner()),
+        execution.execution_ticket.as_deref(),
+    )?;
     Ok(VaultMutationReceipt {
         operation_id,
         vault_id,
@@ -1019,6 +1510,7 @@ pub fn create_vault_folder(
 #[tauri::command]
 pub fn move_vault_entry(
     app: AppHandle,
+    ticket_state: State<'_, ExecutionTicketState>,
     database: State<'_, RuntimeDatabase>,
     vault_id: String,
     source_relative_path: String,
@@ -1026,15 +1518,6 @@ pub fn move_vault_entry(
     operation_context: OperationContext,
 ) -> Result<VaultMutationReceipt, String> {
     let workspace_scope = database.local_workspace_scope()?;
-    let (task_id, trace_id) = task_context(operation_context)?;
-    database.ensure_runtime_task_authorized(
-        &workspace_scope,
-        &task_id,
-        &["system:vaults"],
-        &["move", "rename"],
-        Some(&vault_id),
-        &["running"],
-    )?;
     let (_, root) = canonical_root(&vault_id)?;
     let (source, source_normalized) = resolve_existing_entry(&root, &source_relative_path)?;
     let (target, target_normalized) = resolve_new_entry(&root, &target_relative_path)?;
@@ -1045,6 +1528,39 @@ pub fn move_vault_entry(
     database.ensure_vault_write_allowed(&workspace_scope, &vault_id, &target_normalized)?;
     let operation_id = Uuid::new_v4().to_string();
     let snapshot = entry_snapshot(&source)?;
+    let effect_digest = management_effect_digest(
+        "entry.move",
+        &vault_id,
+        &[&source_normalized, &target_normalized],
+        serde_json::json!({
+            "entryType": snapshot.entry_type,
+            "fingerprint": snapshot.fingerprint,
+        }),
+    );
+    let execution = bind_management_execution(
+        Some(ticket_state.inner()),
+        &workspace_scope,
+        operation_context,
+        &["system:vaults"],
+        &["move", "rename"],
+        &vault_id,
+        &[&source_normalized, &target_normalized],
+        &operation_id,
+        &effect_digest,
+    )?;
+    let trace_id = database.resolve_operation_trace_id(
+        &workspace_scope,
+        Some(&execution.task_id),
+        execution.trace_id.as_deref(),
+    )?;
+    database.ensure_runtime_task_authorized(
+        &workspace_scope,
+        &execution.task_id,
+        &["system:vaults"],
+        &["move", "rename"],
+        Some(&vault_id),
+        &["running"],
+    )?;
     let checkpoint = create_checkpoint(
         &app,
         &operation_id,
@@ -1056,11 +1572,32 @@ pub fn move_vault_entry(
             "fingerprint": snapshot.fingerprint,
         }),
     )?;
-    move_entry(&source, &target)?;
+    begin_management_commit(
+        Some(ticket_state.inner()),
+        &execution,
+        &workspace_scope,
+        &operation_id,
+        &effect_digest,
+    )?;
+    if let Err(error) = move_entry(&source, &target) {
+        let rolled_back = if source.exists() {
+            !target.exists() || remove_entry(&target).is_ok()
+        } else if target.exists() {
+            move_entry(&target, &source).is_ok()
+        } else {
+            false
+        };
+        abort_management_commit(
+            Some(ticket_state.inner()),
+            execution.execution_ticket.as_deref(),
+            rolled_back,
+        );
+        return Err(error);
+    }
     let committed_at = match append_event(
         &database,
-        &task_id,
-        trace_id,
+        &execution.task_id,
+        Some(trace_id.clone()),
         if snapshot.entry_type == "folder" {
             "vault.folder.move"
         } else {
@@ -1073,6 +1610,11 @@ pub fn move_vault_entry(
         Ok(value) => value,
         Err(error) => {
             let rollback = move_entry(&target, &source);
+            abort_management_commit(
+                Some(ticket_state.inner()),
+                execution.execution_ticket.as_deref(),
+                rollback.is_ok(),
+            );
             return match rollback {
                 Ok(()) => Err(format!("无法记录移动审计，移动已回滚：{error}")),
                 Err(rollback_error) => Err(format!(
@@ -1081,7 +1623,15 @@ pub fn move_vault_entry(
             };
         }
     };
-    Ok(VaultMutationReceipt {
+    if snapshot.entry_type == "file" {
+        enqueue_markdown_index_with_trace(&database, &vault_id, &root, &source, &trace_id);
+        enqueue_markdown_index_with_trace(&database, &vault_id, &root, &target, &trace_id);
+    }
+    finish_management_commit(
+        Some(ticket_state.inner()),
+        execution.execution_ticket.as_deref(),
+    )?;
+    let receipt = VaultMutationReceipt {
         operation_id,
         vault_id,
         source_path: Some(source_normalized),
@@ -1089,7 +1639,9 @@ pub fn move_vault_entry(
         entry_type: snapshot.entry_type,
         checkpoint_path: checkpoint.to_string_lossy().into_owned(),
         committed_at,
-    })
+    };
+    crate::vault_watcher::request_vault_index_refresh(&app);
+    Ok(receipt)
 }
 
 fn read_note(root: &Path, relative_path: &str) -> Result<(PathBuf, String, String), String> {
@@ -1247,6 +1799,7 @@ fn parse_property_values(frontmatter: &[String]) -> BTreeMap<String, Value> {
 #[allow(clippy::too_many_arguments)]
 fn write_note_mutation(
     app: &AppHandle,
+    ticket_state: &ExecutionTicketState,
     database: &RuntimeDatabase,
     vault_id: &str,
     relative_path: &str,
@@ -1256,15 +1809,6 @@ fn write_note_mutation(
     next_content: String,
 ) -> Result<NotePropertiesResult, String> {
     let workspace_scope = database.local_workspace_scope()?;
-    let (task_id, trace_id) = task_context(operation_context)?;
-    database.ensure_runtime_task_authorized(
-        &workspace_scope,
-        &task_id,
-        &["system:vaults"],
-        &["update"],
-        Some(vault_id),
-        &["running"],
-    )?;
     let (_, root) = canonical_root(vault_id)?;
     let (target, normalized, current) = read_note(&root, relative_path)?;
     database.ensure_vault_write_allowed(&workspace_scope, vault_id, &normalized)?;
@@ -1276,6 +1820,40 @@ fn write_note_mutation(
         return Err("更新后的笔记超过 8 MB 安全上限".to_string());
     }
     let operation_id = Uuid::new_v4().to_string();
+    let effect_digest = management_effect_digest(
+        "note.update",
+        vault_id,
+        &[&normalized],
+        serde_json::json!({
+            "eventType": event_type,
+            "previousHash": current_hash,
+            "nextHash": content_hash(&next_content),
+        }),
+    );
+    let execution = bind_management_execution(
+        Some(ticket_state),
+        &workspace_scope,
+        operation_context,
+        &["system:vaults"],
+        &["update"],
+        vault_id,
+        &[&normalized],
+        &operation_id,
+        &effect_digest,
+    )?;
+    let trace_id = database.resolve_operation_trace_id(
+        &workspace_scope,
+        Some(&execution.task_id),
+        execution.trace_id.as_deref(),
+    )?;
+    database.ensure_runtime_task_authorized(
+        &workspace_scope,
+        &execution.task_id,
+        &["system:vaults"],
+        &["update"],
+        Some(vault_id),
+        &["running"],
+    )?;
     let checkpoint_root = app
         .path()
         .app_data_dir()
@@ -1286,11 +1864,31 @@ fn write_note_mutation(
         .map_err(|error| format!("无法创建笔记修改检查点：{error}"))?;
     let checkpoint = checkpoint_root.join("before.md");
     atomic_write_file(&checkpoint, current.as_bytes())?;
-    atomic_write_file(&target, next_content.as_bytes())?;
+    begin_management_commit(
+        Some(ticket_state),
+        &execution,
+        &workspace_scope,
+        &operation_id,
+        &effect_digest,
+    )?;
+    if let Err(error) = atomic_write_file(&target, next_content.as_bytes()) {
+        let rollback = atomic_write_file(&target, current.as_bytes());
+        abort_management_commit(
+            Some(ticket_state),
+            execution.execution_ticket.as_deref(),
+            rollback.is_ok(),
+        );
+        return match rollback {
+            Ok(()) => Err(format!("无法写入笔记，原内容已恢复：{error}")),
+            Err(rollback_error) => Err(format!(
+                "无法写入笔记，且原内容恢复失败：{error}；{rollback_error}"
+            )),
+        };
+    }
     let committed_at = match append_event(
         database,
-        &task_id,
-        trace_id,
+        &execution.task_id,
+        Some(trace_id.clone()),
         event_type,
         vault_id,
         Some(normalized.clone()),
@@ -1298,12 +1896,22 @@ fn write_note_mutation(
     ) {
         Ok(value) => value,
         Err(error) => {
-            atomic_write_file(&target, current.as_bytes()).map_err(|rollback_error| {
-                format!("无法记录笔记修改审计，且回滚失败：{error}；{rollback_error}")
-            })?;
-            return Err(format!("无法记录笔记修改审计，修改已回滚：{error}"));
+            let rollback = atomic_write_file(&target, current.as_bytes());
+            abort_management_commit(
+                Some(ticket_state),
+                execution.execution_ticket.as_deref(),
+                rollback.is_ok(),
+            );
+            return match rollback {
+                Ok(()) => Err(format!("无法记录笔记修改审计，修改已回滚：{error}")),
+                Err(rollback_error) => Err(format!(
+                    "无法记录笔记修改审计，且回滚失败：{error}；{rollback_error}"
+                )),
+            };
         }
     };
+    enqueue_markdown_index_with_trace(database, vault_id, &root, &target, &trace_id);
+    finish_management_commit(Some(ticket_state), execution.execution_ticket.as_deref())?;
     let (frontmatter, _) = frontmatter_parts(&next_content);
     Ok(NotePropertiesResult {
         vault_id: vault_id.to_string(),
@@ -1329,6 +1937,7 @@ pub fn read_note_properties(vault_id: String, relative_path: String) -> Result<V
 #[allow(clippy::too_many_arguments)]
 pub fn update_note_properties(
     app: AppHandle,
+    ticket_state: State<'_, ExecutionTicketState>,
     database: State<'_, RuntimeDatabase>,
     vault_id: String,
     relative_path: String,
@@ -1364,6 +1973,7 @@ pub fn update_note_properties(
     let next = mutate_frontmatter(&content, &updates, &remove_keys)?;
     write_note_mutation(
         &app,
+        ticket_state.inner(),
         &database,
         &vault_id,
         &relative_path,
@@ -1392,8 +2002,10 @@ fn normalize_tag(value: &str) -> Result<String, String> {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn update_note_tags(
     app: AppHandle,
+    ticket_state: State<'_, ExecutionTicketState>,
     database: State<'_, RuntimeDatabase>,
     vault_id: String,
     relative_path: String,
@@ -1432,6 +2044,7 @@ pub fn update_note_tags(
     let next = mutate_frontmatter(&content, &updates, &BTreeSet::new())?;
     write_note_mutation(
         &app,
+        ticket_state.inner(),
         &database,
         &vault_id,
         &relative_path,
@@ -1446,6 +2059,7 @@ pub fn update_note_tags(
 #[allow(clippy::too_many_arguments)]
 pub fn update_note_wiki_link(
     app: AppHandle,
+    ticket_state: State<'_, ExecutionTicketState>,
     database: State<'_, RuntimeDatabase>,
     vault_id: String,
     relative_path: String,
@@ -1504,6 +2118,7 @@ pub fn update_note_wiki_link(
     };
     write_note_mutation(
         &app,
+        ticket_state.inner(),
         &database,
         &vault_id,
         &relative_path,
@@ -1516,7 +2131,28 @@ pub fn update_note_wiki_link(
 
 fn graph_config_path(vault_id: &str) -> Result<(PathBuf, PathBuf), String> {
     let (_, root) = canonical_root(vault_id)?;
-    Ok((root.join(".obsidian").join("graph.json"), root))
+    let obsidian_dir = root.join(".obsidian");
+    let metadata = fs::symlink_metadata(&obsidian_dir)
+        .map_err(|error| format!("Obsidian 配置目录不可访问：{error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("Obsidian 配置目录必须是 Vault 内的普通目录".to_string());
+    }
+    let canonical_dir = obsidian_dir
+        .canonicalize()
+        .map_err(|error| format!("Obsidian 配置目录不可访问：{error}"))?;
+    if !canonical_dir.starts_with(&root) {
+        return Err("Obsidian 配置目录越过 Vault 边界".to_string());
+    }
+    let path = canonical_dir.join("graph.json");
+    if path.exists()
+        && fs::symlink_metadata(&path)
+            .map_err(|error| format!("Obsidian Graph 配置不可访问：{error}"))?
+            .file_type()
+            .is_symlink()
+    {
+        return Err("不允许通过云枢修改符号链接形式的 Graph 配置".to_string());
+    }
+    Ok((path, root))
 }
 
 fn merge_json(target: &mut Value, patch: &Value) {
@@ -1549,6 +2185,7 @@ pub fn read_obsidian_graph_config(vault_id: String) -> Result<Value, String> {
 #[tauri::command]
 pub fn update_obsidian_graph_config(
     app: AppHandle,
+    ticket_state: State<'_, ExecutionTicketState>,
     database: State<'_, RuntimeDatabase>,
     vault_id: String,
     patch: Value,
@@ -1559,16 +2196,7 @@ pub fn update_obsidian_graph_config(
         return Err("Obsidian Graph 配置必须是 JSON 对象".to_string());
     }
     let workspace_scope = database.local_workspace_scope()?;
-    let (task_id, trace_id) = task_context(operation_context)?;
-    database.ensure_runtime_task_authorized(
-        &workspace_scope,
-        &task_id,
-        &["system:vaults"],
-        &["update"],
-        Some(&vault_id),
-        &["running"],
-    )?;
-    let (path, root) = graph_config_path(&vault_id)?;
+    let (path, _) = graph_config_path(&vault_id)?;
     database.ensure_vault_write_allowed(&workspace_scope, &vault_id, ".obsidian/graph.json")?;
     let current_exists = path.is_file();
     let current = read_obsidian_graph_config(vault_id.clone())?;
@@ -1587,6 +2215,38 @@ pub fn update_obsidian_graph_config(
         return Err("Obsidian Graph 配置超过 1 MB 安全上限".to_string());
     }
     let operation_id = Uuid::new_v4().to_string();
+    let graph_relative_path = ".obsidian/graph.json";
+    let current_bytes = serde_json::to_vec(&current)
+        .map_err(|error| format!("无法序列化当前 Obsidian Graph 配置：{error}"))?;
+    let effect_digest = management_effect_digest(
+        "graph.config.update",
+        &vault_id,
+        &[graph_relative_path],
+        serde_json::json!({
+            "replace": replace,
+            "previousHash": format!("{:x}", Sha256::digest(&current_bytes)),
+            "nextHash": format!("{:x}", Sha256::digest(&bytes)),
+        }),
+    );
+    let execution = bind_management_execution(
+        Some(ticket_state.inner()),
+        &workspace_scope,
+        operation_context,
+        &["system:vaults"],
+        &["update"],
+        &vault_id,
+        &[graph_relative_path],
+        &operation_id,
+        &effect_digest,
+    )?;
+    database.ensure_runtime_task_authorized(
+        &workspace_scope,
+        &execution.task_id,
+        &["system:vaults"],
+        &["update"],
+        Some(&vault_id),
+        &["running"],
+    )?;
     let checkpoint_root = app
         .path()
         .app_data_dir()
@@ -1597,17 +2257,42 @@ pub fn update_obsidian_graph_config(
         .map_err(|error| format!("无法创建 Graph 配置检查点：{error}"))?;
     let checkpoint = checkpoint_root.join("graph-before.json");
     write_json_atomic(&checkpoint, &current)?;
-    atomic_write_file(&path, &bytes)?;
-    let canonical_path = path
-        .canonicalize()
-        .map_err(|error| format!("Graph 配置写入后不可访问：{error}"))?;
-    if !canonical_path.starts_with(&root) {
-        return Err("Graph 配置越过 Vault 边界".to_string());
+    begin_management_commit(
+        Some(ticket_state.inner()),
+        &execution,
+        &workspace_scope,
+        &operation_id,
+        &effect_digest,
+    )?;
+    if let Err(error) = atomic_write_file(&path, &bytes) {
+        let rollback = if current_exists {
+            serde_json::to_vec_pretty(&current)
+                .map_err(|serialize_error| {
+                    format!("无法序列化 Graph 配置回滚数据：{serialize_error}")
+                })
+                .and_then(|previous| atomic_write_file(&path, &previous))
+        } else if path.exists() {
+            fs::remove_file(&path)
+                .map_err(|remove_error| format!("无法移除未完成的 Graph 配置：{remove_error}"))
+        } else {
+            Ok(())
+        };
+        abort_management_commit(
+            Some(ticket_state.inner()),
+            execution.execution_ticket.as_deref(),
+            rollback.is_ok(),
+        );
+        return match rollback {
+            Ok(()) => Err(format!("无法写入 Graph 配置，原状态已恢复：{error}")),
+            Err(rollback_error) => Err(format!(
+                "无法写入 Graph 配置，且原状态恢复失败：{error}；{rollback_error}"
+            )),
+        };
     }
     let committed_at = match append_event(
         &database,
-        &task_id,
-        trace_id,
+        &execution.task_id,
+        execution.trace_id.clone(),
         "vault.graph.config.update",
         &vault_id,
         Some(".obsidian/graph.json".to_string()),
@@ -1615,21 +2300,33 @@ pub fn update_obsidian_graph_config(
     ) {
         Ok(value) => value,
         Err(error) => {
-            if current_exists {
-                let previous = serde_json::to_vec_pretty(&current).map_err(|serialize_error| {
-                    format!("无法序列化 Graph 配置回滚数据：{serialize_error}")
-                })?;
-                atomic_write_file(&path, &previous).map_err(|rollback_error| {
-                    format!("无法记录 Graph 配置审计，且回滚失败：{error}；{rollback_error}")
-                })?;
+            let rollback = if current_exists {
+                serde_json::to_vec_pretty(&current)
+                    .map_err(|serialize_error| {
+                        format!("无法序列化 Graph 配置回滚数据：{serialize_error}")
+                    })
+                    .and_then(|previous| atomic_write_file(&path, &previous))
             } else {
-                fs::remove_file(&path).map_err(|rollback_error| {
-                    format!("无法记录 Graph 配置审计，且回滚失败：{error}；{rollback_error}")
-                })?;
-            }
-            return Err(format!("无法记录 Graph 配置审计，修改已回滚：{error}"));
+                fs::remove_file(&path)
+                    .map_err(|remove_error| format!("无法移除未提交的 Graph 配置：{remove_error}"))
+            };
+            abort_management_commit(
+                Some(ticket_state.inner()),
+                execution.execution_ticket.as_deref(),
+                rollback.is_ok(),
+            );
+            return match rollback {
+                Ok(()) => Err(format!("无法记录 Graph 配置审计，修改已回滚：{error}")),
+                Err(rollback_error) => Err(format!(
+                    "无法记录 Graph 配置审计，且回滚失败：{error}；{rollback_error}"
+                )),
+            };
         }
     };
+    finish_management_commit(
+        Some(ticket_state.inner()),
+        execution.execution_ticket.as_deref(),
+    )?;
     Ok(VaultMutationReceipt {
         operation_id,
         vault_id,
@@ -1793,12 +2490,14 @@ mod tests {
         let preview = prepare_vault_entry_delete_inner(
             &state,
             &database,
+            None,
             "vault-test".to_string(),
             Some("资料/重要笔记.md".to_string()),
             Some(false),
             OperationContext {
                 task_id: Some(delete_task.clone()),
                 trace_id: Some("trace-delete".to_string()),
+                execution_ticket: None,
             },
         )
         .expect("prepare isolated delete");
@@ -1817,9 +2516,14 @@ mod tests {
                 None,
             )
             .expect("approve native delete task");
-        let deleted =
-            commit_vault_entry_delete_inner(&app_data, &state, &database, &preview.approval_id)
-                .expect("commit isolated delete");
+        let deleted = commit_vault_entry_delete_inner(
+            &app_data,
+            &state,
+            &database,
+            None,
+            &preview.approval_id,
+        )
+        .expect("commit isolated delete");
         assert!(
             !note.exists(),
             "confirmed delete removes the original entry"
@@ -1850,12 +2554,14 @@ mod tests {
         restore_yunspire_trash_entry_inner(
             &app_data,
             &database,
+            None,
             deleted.operation_id,
             Some("vault-test".to_string()),
             None,
             OperationContext {
                 task_id: Some(restore_task),
                 trace_id: Some("trace-restore".to_string()),
+                execution_ticket: None,
             },
         )
         .expect("restore isolated note");
@@ -1891,12 +2597,14 @@ mod tests {
         let folder_preview = prepare_vault_entry_delete_inner(
             &state,
             &database,
+            None,
             "vault-test".to_string(),
             Some("待删除文件夹".to_string()),
             Some(false),
             OperationContext {
                 task_id: Some(folder_delete_task.clone()),
                 trace_id: Some("trace-folder-delete".to_string()),
+                execution_ticket: None,
             },
         )
         .expect("prepare isolated folder delete");
@@ -1915,6 +2623,7 @@ mod tests {
             &app_data,
             &state,
             &database,
+            None,
             &folder_preview.approval_id,
         )
         .expect("commit isolated folder delete");
@@ -1940,12 +2649,14 @@ mod tests {
         restore_yunspire_trash_entry_inner(
             &app_data,
             &database,
+            None,
             folder_deleted.operation_id,
             Some("vault-test".to_string()),
             None,
             OperationContext {
                 task_id: Some(folder_restore_task),
                 trace_id: Some("trace-folder-restore".to_string()),
+                execution_ticket: None,
             },
         )
         .expect("restore isolated folder");
@@ -1965,12 +2676,14 @@ mod tests {
         let vault_preview = prepare_vault_entry_delete_inner(
             &state,
             &database,
+            None,
             "vault-test".to_string(),
             None,
             Some(true),
             OperationContext {
                 task_id: Some(vault_delete_task.clone()),
                 trace_id: Some("trace-vault-delete".to_string()),
+                execution_ticket: None,
             },
         )
         .expect("prepare isolated vault delete");
@@ -1989,6 +2702,7 @@ mod tests {
             &app_data,
             &state,
             &database,
+            None,
             &vault_preview.approval_id,
         )
         .expect("commit isolated vault delete");
@@ -2007,7 +2721,7 @@ mod tests {
             "vaults",
             "system:vaults",
             "restore",
-            None,
+            Some("vault-test"),
             Vec::new(),
         );
         database
@@ -2023,12 +2737,14 @@ mod tests {
         let restored_vault = restore_yunspire_trash_entry_inner(
             &app_data,
             &database,
+            None,
             vault_deleted.operation_id,
             None,
             None,
             OperationContext {
                 task_id: Some(vault_restore_task),
                 trace_id: Some("trace-vault-restore".to_string()),
+                execution_ticket: None,
             },
         )
         .expect("restore isolated vault");

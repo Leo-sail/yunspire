@@ -34,6 +34,8 @@ const windowsPdfHelper = await readText('skills/document-content-analysis/script
 const windowsImageHelper = await readText('skills/document-content-analysis/scripts/yunspire_image_windows.cpp');
 const windowsNativeBuild = await readText('scripts/build-windows-native.mjs');
 const windowsPythonBuild = await readText('scripts/build-windows-python-runtime.mjs');
+const licenseGenerator = await readText('scripts/generate-third-party-notices.mjs');
+const packageConfig = JSON.parse(await readText('package.json'));
 const windowsTauri = JSON.parse(await readText('src-tauri/tauri.windows.conf.json'));
 const externalImageLocalizer = await readText('skills/document-content-analysis/scripts/external_image_localizer.py');
 const webSkill = await readText('skills/web-content-analysis/SKILL.md');
@@ -44,11 +46,18 @@ const windowsMediaHelper = await readText('skills/video-content-analysis/scripts
 const windowsSpeechHelper = await readText('skills/video-content-analysis/scripts/yunspire_speech_windows.cpp');
 const windowsMediaBuild = await readText('scripts/build-windows-media-helper.mjs');
 const windowsReleaseVerifier = await readText('scripts/verify-windows-release.mjs');
+const releaseWorkflow = await readText('.github/workflows/release.yml');
 const officeParsers = Object.fromEntries(await Promise.all(['ooxml_word.py', 'ooxml_excel.py', 'ooxml_ppt.py'].map(async (fileName) => [
   fileName,
   await readText('skills/document-content-analysis/scripts', fileName),
 ])));
 const tauri = JSON.parse(await readText('src-tauri/tauri.conf.json'));
+const thirdPartyNotices = await readText(
+  'src-tauri',
+  'target',
+  'yunspire-licenses',
+  'THIRD_PARTY_NOTICES.txt',
+).catch(() => '');
 const csp = tauri.app?.security?.csp || '';
 if (!csp.includes("default-src 'self'")) failures.push('CSP must default to self');
 if (csp.includes("script-src 'self' 'unsafe-inline'")) failures.push('inline scripts must remain disabled');
@@ -77,6 +86,21 @@ for (const requiredInteraction of [
   "toggleAttribute('inert'",
 ]) {
   if (!appSource.includes(requiredInteraction)) failures.push(`core interaction handler missing: ${requiredInteraction}`);
+}
+for (const hybridSearchPrimitive of [
+  'function mergeKnowledgeSearchResults(',
+  'function compareKnowledgeSearchResults(',
+  'function indexedKnowledgeSignalBonus(',
+  'result?.rankingSignals',
+  "add(indexedItems, 'hybrid')",
+  '1000 + (Number.isFinite(score) ? score : 0)',
+]) {
+  if (!appSource.includes(hybridSearchPrimitive)) {
+    failures.push(`hybrid search frontend ranking is missing: ${hybridSearchPrimitive}`);
+  }
+}
+if (appSource.includes('Math.round(rawScore)')) {
+  failures.push('hybrid RRF score is still rounded to an integer');
 }
 if (!/\.view\s*\{[^}]*overflow-y:\s*auto/isu.test(styles)) failures.push('page-level vertical scrolling is missing');
 if (!/\.task-drawer\s*\{[^}]*position:\s*fixed/isu.test(styles)) failures.push('task drawer must remain a fixed overlay');
@@ -312,11 +336,37 @@ for (const runtimePrimitive of [
   'f6cca216a359be84797cabb54149ce5e062afb16cc7567eb7fc51cacb2d86b65',
   'EXPECTED_SHA256',
   'EXPECTED_MD5',
+  'EXPECTED_LICENSE_SHA256',
+  '62bec384df47b0328307db41455ff6ea2559e5546b394ac69148561b21703120',
   'YUNSPIRE_RUNTIME.json',
   'python313._pth',
+  'LICENSE.txt',
+  'licenseSha256',
   'await smokeTest()',
 ]) {
   if (!windowsPythonBuild.includes(runtimePrimitive)) failures.push(`Windows embedded Python runtime gate is missing: ${runtimePrimitive}`);
+}
+for (const verifierPrimitive of [
+  'EXPECTED_PYTHON_LICENSE_SHA256',
+  '62bec384df47b0328307db41455ff6ea2559e5546b394ac69148561b21703120',
+  'installedRuntimeManifest.licenseSha256 !== EXPECTED_PYTHON_LICENSE_SHA256',
+  'await sha256(installedRuntimeLicense) !== EXPECTED_PYTHON_LICENSE_SHA256',
+]) {
+  if (!windowsReleaseVerifier.includes(verifierPrimitive)) {
+    failures.push(`Windows CPython license verification is missing: ${verifierPrimitive}`);
+  }
+}
+for (const workflowPrimitive of [
+  'verify_resource_hash()',
+  'shasum -a 256',
+  'Contents/Resources/legal/LICENSE',
+  'Contents/Resources/legal/NOTICE',
+  'Contents/Resources/legal/THIRD_PARTY_NOTICES.txt',
+  'src-tauri/target/yunspire-licenses/THIRD_PARTY_NOTICES.txt',
+]) {
+  if (!releaseWorkflow.includes(workflowPrimitive)) {
+    failures.push(`macOS legal resource hash gate is missing: ${workflowPrimitive}`);
+  }
 }
 if (!capturePipeline.includes('yunspire-runtime') || !capturePipeline.includes('python.exe')) {
   failures.push('Windows packaged Python runtime is not resolved by the native capture pipeline');
@@ -328,6 +378,51 @@ for (const [source, destination] of [
   ['target/yunspire-native/yunspire_image_windows.exe', 'skills/document-content-analysis/scripts/yunspire_image_windows.exe'],
 ]) {
   if (windowsResources[source] !== destination) failures.push(`Windows native bundle resource mapping is missing: ${source}`);
+}
+const legalResources = [
+  ['../LICENSE', 'legal/LICENSE'],
+  ['../NOTICE', 'legal/NOTICE'],
+  ['target/yunspire-licenses/THIRD_PARTY_NOTICES.txt', 'legal/THIRD_PARTY_NOTICES.txt'],
+];
+if (tauri.bundle?.licenseFile !== '../LICENSE') failures.push('Tauri bundle licenseFile must use the Yunspire source license');
+for (const [source, destination] of legalResources) {
+  if (tauri.bundle?.resources?.[source] !== destination) failures.push(`Main legal bundle resource mapping is missing: ${source}`);
+  if (windowsResources[source] !== destination) failures.push(`Windows legal bundle resource mapping is missing: ${source}`);
+}
+if (!packageConfig.scripts?.build?.includes('generate-third-party-notices.mjs')) {
+  failures.push('production build must generate third-party notices before bundling');
+}
+for (const primitive of [
+  'package-lock.json',
+  'cargo',
+  '--locked',
+  '--filter-platform',
+  'YUNSPIRE_LICENSE_TARGETS',
+  'package-lock.json 包路径越过 node_modules',
+  'cargoLockChecksums',
+  'licenseNamePattern',
+  'reviewedTextlessPackages',
+  '未命中版本与哈希审查白名单',
+  'npmPackageHasPlatformConstraint',
+  '锁定的 npm 包未安装',
+  'npm 安装内容与锁文件不一致',
+  'THIRD_PARTY_NOTICES.txt',
+  'Reviewed Packages Without an Upstream License File',
+]) {
+  if (!licenseGenerator.includes(primitive)) failures.push(`third-party notice generator is missing: ${primitive}`);
+}
+if (thirdPartyNotices.length < 100_000
+  || !thirdPartyNotices.includes('Yunspire Third-Party Notices')
+  || !thirdPartyNotices.includes('Package Inventory')
+  || !thirdPartyNotices.includes('Reviewed Packages Without an Upstream License File')
+  || !thirdPartyNotices.includes('integrity: sha256-')
+  || !thirdPartyNotices.includes('integrity: sha512-')
+  || !thirdPartyNotices.includes('Bundled License Texts')
+  || !thirdPartyNotices.includes('MPL-2.0')) {
+  failures.push('generated third-party notices are missing or incomplete');
+}
+if (/\/Users\/[^/\s]+\/|[A-Za-z]:\\Users\\/u.test(thirdPartyNotices)) {
+  failures.push('generated third-party notices expose an absolute user path');
 }
 for (const [fileName, source] of Object.entries(officeParsers)) {
   if (!source.includes('attachment://')) failures.push(`${fileName} does not preserve Obsidian attachment placeholders`);

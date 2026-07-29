@@ -12,6 +12,7 @@ pub enum TaskControlAction {
     Resume,
     Cancel,
     Retry,
+    Checkpoint,
     Succeed,
     Fail,
 }
@@ -45,7 +46,7 @@ pub struct NativeRuntimeTask {
 fn target_state(action: &TaskControlAction) -> &'static str {
     match action {
         TaskControlAction::Queue | TaskControlAction::Retry | TaskControlAction::Resume => "queued",
-        TaskControlAction::Start => "running",
+        TaskControlAction::Start | TaskControlAction::Checkpoint => "running",
         TaskControlAction::Pause => "paused",
         TaskControlAction::Cancel => "cancelled",
         TaskControlAction::Succeed => "succeeded",
@@ -76,7 +77,7 @@ fn default_progress(action: &TaskControlAction, current: u8) -> u8 {
     match action {
         TaskControlAction::Queue | TaskControlAction::Retry | TaskControlAction::Resume => current,
         TaskControlAction::Start => current.max(1),
-        TaskControlAction::Pause => current,
+        TaskControlAction::Pause | TaskControlAction::Checkpoint => current,
         TaskControlAction::Cancel | TaskControlAction::Fail => current,
         TaskControlAction::Succeed => 100,
     }
@@ -88,8 +89,12 @@ pub fn transition_runtime_task(
     input: TaskTransitionInput,
 ) -> Result<NativeRuntimeTask, String> {
     let workspace_scope = database.local_workspace_scope()?;
-    let target = target_state(&input.action);
     let current = database.runtime_task(&workspace_scope, &input.task_id)?;
+    let target = if matches!(&input.action, TaskControlAction::Checkpoint) {
+        current.state.as_str()
+    } else {
+        target_state(&input.action)
+    };
     let progress = input
         .progress
         .unwrap_or_else(|| default_progress(&input.action, current.progress))
@@ -131,6 +136,7 @@ mod tests {
     fn maps_control_actions_to_states() {
         assert_eq!(target_state(&TaskControlAction::Start), "running");
         assert_eq!(target_state(&TaskControlAction::Pause), "paused");
+        assert_eq!(target_state(&TaskControlAction::Checkpoint), "running");
         assert_eq!(target_state(&TaskControlAction::Succeed), "succeeded");
     }
 

@@ -9,6 +9,7 @@ const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const schemaDirectories = [
   resolve(projectRoot, "docs/schemas"),
   resolve(projectRoot, "skills/beautify-markdown"),
+  resolve(projectRoot, "skills/deep-research"),
 ];
 
 const schemaPaths = (await Promise.all(schemaDirectories.map(async (directory) =>

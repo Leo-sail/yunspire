@@ -35,15 +35,19 @@
 /src-tauri/target/
 /src-tauri/gen/
 /release/
+/installers/
+/artifacts/
 *.app
 *.dmg
+*.msi
+*.exe
 *.zip
+*.sig
+*.sha256
 __pycache__/
 *.py[cod]
 
 # Local verification artifacts
-/artifacts/
-/installers/
 /design-qa/
 /screenshots/
 /test-results/

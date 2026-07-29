@@ -19,6 +19,7 @@ const runtimeDirectory = join(root, 'src-tauri', 'target', 'yunspire-runtime', '
 const artifactDirectory = join(root, 'artifacts', 'windows');
 const windowsConfigPath = join(root, 'src-tauri', 'tauri.windows.conf.json');
 const packagePath = join(root, 'package.json');
+const EXPECTED_PYTHON_LICENSE_SHA256 = '62bec384df47b0328307db41455ff6ea2559e5546b394ac69148561b21703120';
 const helperResources = [
   {
     source: 'target/yunspire-native/yunspire_pdf_windows.exe',
@@ -39,6 +40,15 @@ const helperResources = [
     source: 'target/yunspire-native/yunspire-speech.exe',
     destination: 'skills/video-content-analysis/scripts/bin/yunspire-speech.exe',
     path: join(nativeDirectory, 'yunspire-speech.exe'),
+  },
+];
+const legalResources = [
+  { source: '../LICENSE', destination: 'legal/LICENSE', path: join(root, 'LICENSE') },
+  { source: '../NOTICE', destination: 'legal/NOTICE', path: join(root, 'NOTICE') },
+  {
+    source: 'target/yunspire-licenses/THIRD_PARTY_NOTICES.txt',
+    destination: 'legal/THIRD_PARTY_NOTICES.txt',
+    path: join(root, 'src-tauri', 'target', 'yunspire-licenses', 'THIRD_PARTY_NOTICES.txt'),
   },
 ];
 
@@ -488,10 +498,16 @@ async function verifyRuntime(resources) {
   await fileSize(python);
   await assertPortableExecutable(python);
   const manifest = JSON.parse(await readFile(join(runtimeDirectory, 'YUNSPIRE_RUNTIME.json'), 'utf8'));
+  const license = join(runtimeDirectory, 'LICENSE.txt');
+  await fileSize(license);
+  const licenseSha256 = await sha256(license);
   if (manifest.schema !== 'yunspire.windows-python-runtime.v1'
     || manifest.architecture !== 'x64'
     || !/^https:\/\/www\.python\.org\//u.test(manifest.sourceUrl || '')
-    || !/^[a-f0-9]{64}$/u.test(manifest.archiveSha256 || '')) {
+    || !/^[a-f0-9]{64}$/u.test(manifest.archiveSha256 || '')
+    || manifest.licenseFile !== 'LICENSE.txt'
+    || manifest.licenseSha256 !== EXPECTED_PYTHON_LICENSE_SHA256
+    || licenseSha256 !== EXPECTED_PYTHON_LICENSE_SHA256) {
     throw new Error('嵌入式 Python 运行时清单不完整或来源无效');
   }
   const unicodeProbe = '云枢中文输出/资料库';
@@ -512,7 +528,7 @@ async function verifyRuntime(resources) {
     || !smoke.stdout.includes(unicodeProbe)) {
     throw new Error(`嵌入式 Python 独立模式冒烟失败\n${smoke.stdout || ''}\n${smoke.stderr || ''}`.trim());
   }
-  return { path: python, manifest };
+  return { path: python, license, manifest };
 }
 
 async function verifyHelpers() {
@@ -526,6 +542,12 @@ async function verifyHelpers() {
     const size = await fileSize(helper.path);
     await assertPortableExecutable(helper.path);
     files.push({ path: helper.path, size, sha256: await sha256(helper.path) });
+  }
+  for (const legal of legalResources) {
+    if (resources[legal.source] !== legal.destination) {
+      throw new Error(`Windows 法律资源映射错误：${legal.source}`);
+    }
+    await fileSize(legal.path);
   }
 
   const mediaSmoke = await smokeMediaHelpers();
@@ -712,6 +734,13 @@ async function verifyInstalledBundle(installer) {
         throw new Error(`安装后的原生资源哈希不一致：${helper.destination}`);
       }
     }
+    for (const legal of legalResources) {
+      const installed = join(installDirectory, legal.destination);
+      await fileSize(installed);
+      if (await sha256(installed) !== await sha256(legal.path)) {
+        throw new Error(`安装后的法律资源哈希不一致：${legal.destination}`);
+      }
+    }
     const installedPython = join(installDirectory, 'runtime', 'python', 'python.exe');
     await assertPortableExecutable(installedPython);
     if (await sha256(installedPython) !== await sha256(join(runtimeDirectory, 'python.exe'))) {
@@ -723,6 +752,14 @@ async function verifyInstalledBundle(installer) {
     ));
     if (installedRuntimeManifest.schema !== 'yunspire.windows-python-runtime.v1') {
       throw new Error('安装后的 Python 运行时清单无效');
+    }
+    if (installedRuntimeManifest.licenseSha256 !== EXPECTED_PYTHON_LICENSE_SHA256) {
+      throw new Error('安装后的 Python 运行时清单许可哈希无效');
+    }
+    const installedRuntimeLicense = join(installDirectory, 'runtime', 'python', 'LICENSE.txt');
+    await fileSize(installedRuntimeLicense);
+    if (await sha256(installedRuntimeLicense) !== EXPECTED_PYTHON_LICENSE_SHA256) {
+      throw new Error('安装后的 Python 许可文件哈希不一致');
     }
     return {
       unicodeSilentInstall: true,
@@ -766,6 +803,8 @@ async function packageBundle() {
   const resourceFiles = [
     ...helperResources.map((helper) => ({ name: `resources/${basename(helper.path)}`, path: helper.path })),
     { name: 'resources/python.exe', path: join(runtimeDirectory, 'python.exe') },
+    { name: 'resources/python-LICENSE.txt', path: join(runtimeDirectory, 'LICENSE.txt') },
+    ...legalResources.map((legal) => ({ name: `resources/${legal.destination}`, path: legal.path })),
   ];
   const installerSha256 = await sha256(artifactInstaller);
   const resourceManifest = [];

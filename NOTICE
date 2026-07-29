@@ -15,6 +15,11 @@ Windows 安装包包含 Python Software Foundation 发布的官方 CPython
 不是我的原创实现，适用其随包 `LICENSE.txt` 中的 PSF 许可；构建时会对
 官方归档执行固定 SHA-256 和发布校验值验证。
 
+安装包还会在 `legal/THIRD_PARTY_NOTICES.txt` 中携带实际构建依赖声明的
+许可证、来源位置、锁文件完整性校验和包内许可正文。没有独立许可文件的
+依赖必须命中精确版本与哈希审查清单。该文件由锁定依赖元数据生成，
+不属于云枢第一方原创权利声明。
+
 任何商业使用均须事先取得我的书面商业授权。
 联系邮箱：leochang210@gmail.com
 
@@ -35,6 +40,12 @@ Yunspire's first-party processing scripts. The runtime is not claimed as my
 work and remains governed by the PSF terms in its bundled `LICENSE.txt`.
 The build verifies the official archive with a pinned SHA-256 and release
 checksum before packaging it.
+
+Installers also include `legal/THIRD_PARTY_NOTICES.txt`, generated from the
+locked build dependencies with their declared licenses, source locations,
+lock-integrity values, and license texts shipped by those packages. A package
+without a separate license file must match an exact reviewed version and hash.
+That file is outside Yunspire's first-party authorship claim.
 
 Every commercial use requires my prior written commercial authorization.
 Contact: leochang210@gmail.com

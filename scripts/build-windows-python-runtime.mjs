@@ -10,6 +10,7 @@ const ARCHIVE_NAME = `python-${PYTHON_VERSION}-embed-amd64.zip`;
 const DOWNLOAD_URL = `https://www.python.org/ftp/python/${PYTHON_VERSION}/${ARCHIVE_NAME}`;
 const EXPECTED_SHA256 = 'f6cca216a359be84797cabb54149ce5e062afb16cc7567eb7fc51cacb2d86b65';
 const EXPECTED_MD5 = '77f294ec267596827a2ab06e8fa3f18c';
+const EXPECTED_LICENSE_SHA256 = '62bec384df47b0328307db41455ff6ea2559e5546b394ac69148561b21703120';
 const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024;
 
 if (process.platform !== 'win32') {
@@ -23,6 +24,7 @@ const runtimeDirectory = join(outputRoot, 'python');
 const archivePath = join(outputRoot, ARCHIVE_NAME);
 const manifestPath = join(runtimeDirectory, 'YUNSPIRE_RUNTIME.json');
 const pythonExecutable = join(runtimeDirectory, 'python.exe');
+const licensePath = join(runtimeDirectory, 'LICENSE.txt');
 
 async function isFile(path) {
   try {
@@ -38,13 +40,18 @@ function digest(algorithm, bytes) {
 }
 
 async function runtimeIsCurrent() {
-  if (!await isFile(pythonExecutable) || !await isFile(manifestPath)) return false;
+  if (!await isFile(pythonExecutable) || !await isFile(manifestPath) || !await isFile(licensePath)) return false;
   try {
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    const license = await readFile(licensePath);
+    const licenseSha256 = digest('sha256', license);
     return manifest.version === PYTHON_VERSION
       && manifest.archiveSha256 === EXPECTED_SHA256
       && manifest.archiveMd5 === EXPECTED_MD5
-      && manifest.sourceUrl === DOWNLOAD_URL;
+      && manifest.sourceUrl === DOWNLOAD_URL
+      && manifest.licenseFile === 'LICENSE.txt'
+      && licenseSha256 === EXPECTED_LICENSE_SHA256
+      && manifest.licenseSha256 === EXPECTED_LICENSE_SHA256;
   } catch {
     return false;
   }
@@ -108,6 +115,12 @@ async function extractArchive() {
 async function configureRuntime() {
   const pthPath = join(runtimeDirectory, 'python313._pth');
   if (!await isFile(pthPath)) throw new Error('Python 嵌入式运行时缺少 python313._pth');
+  const license = await readFile(licensePath).catch(() => null);
+  if (!license?.length) throw new Error('Python 嵌入式运行时缺少非空 LICENSE.txt');
+  const licenseSha256 = digest('sha256', license);
+  if (licenseSha256 !== EXPECTED_LICENSE_SHA256) {
+    throw new Error(`Python 嵌入式运行时 LICENSE.txt 校验失败：SHA-256=${licenseSha256}`);
+  }
   await writeFile(pthPath, [
     'python313.zip',
     '.',
@@ -121,6 +134,7 @@ async function configureRuntime() {
     archiveSha256: EXPECTED_SHA256,
     archiveMd5: EXPECTED_MD5,
     licenseFile: 'LICENSE.txt',
+    licenseSha256: EXPECTED_LICENSE_SHA256,
   }, null, 2) + '\n', 'utf8');
 }
 

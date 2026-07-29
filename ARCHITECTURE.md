@@ -1,6 +1,6 @@
 # 云枢系统架构 / Yunspire System Architecture
 
-当前版本 / Current version: `0.1.1`
+当前版本 / Current version: `0.1.2`
 
 ![云枢系统架构 / Yunspire system architecture](docs/assets/architecture-overview.svg)
 
@@ -16,7 +16,7 @@
 - Tauri/Rust 内核负责命令、策略、任务、调度、模型适配、采集、Obsidian 文件边界和本地持久化。
 - Obsidian Vault 是 Markdown、Properties、附件、标签和 Wiki Links 的知识权威来源。
 - SQLite 是任务、会话、计划、配置、回执、检查点和操作事件的结构化运行数据权威来源。
-- FTS 和未来的向量索引只能是可从 Vault 重建的派生层。
+- FTS 和确定性本地特征向量只能是可从 Vault 重建的派生层。
 - AI助手是受控应用服务，不是能够自行扩大权限的超级提示词。
 
 ### 2. 不可破坏的系统约束
@@ -33,6 +33,8 @@
 10. 凭据不能进入 Obsidian 正文、长期记忆、日志导出或源代码仓库。
 11. 用户指定 Vault 保存忠实原文与原位附件；Agent 库保存模型理解稿，二者不能互相替代或混写。
 12. 必需外链图片未成功本地化时，质量门禁必须阻断完整入库，不能把缺图文档报告为成功。
+13. 模型意图只能兑换与其规范参数绑定的一次性执行票据；参数替换、并发重复提交和重放必须被拒绝。
+14. Memory V2 草稿在用户批准前不能进入召回结果，任何缺失作用域都不能被解释为跨域通配。
 
 ### 3. 运行链路
 
@@ -51,7 +53,7 @@
 → 原对话中的最终结果
 ```
 
-普通聊天只保存到本地会话，不创建任务、不写入 Obsidian。明确执行意图必须携带一次性模型意图回执；Command Bus 消费回执后才能持久化任务，防止前端伪造“模型已分析”。
+普通聊天只保存到本地会话，不创建任务、不写入 Obsidian。明确执行意图必须携带一次性模型意图回执；Command Bus 将回执兑换为绑定规范参数和调用方的一次性执行票据，原子消费票据后才能持久化任务，防止前端伪造“模型已分析”、参数替换、并发重复提交或重放。
 
 #### 3.2 采集
 
@@ -79,7 +81,7 @@ Office 抽取统一输出 v2 结构。Word 的正文、表格、页眉页脚、�
 
 普通网页或文件内链接始终是 `untrusted_data`。抽取器保存显示文字、关系目标和段落/单元格/幻灯片来源，但设置 `auto_open=false`、`auto_fetch=false`；只有用户明确提出“采集文件内链接”时，AI助手才把选定目标转换为新的类型化采集命令。确定图片位置的窄范围本地化不会改变这条普通链接策略。
 
-模型分析必须覆盖全部本地化图片。相同字节只按内容级 `asset_id` 送模型一次，`image_observations` 保存观察、画面文字、上下文、证据和置信度；确定性写入层再根据附件元数据把观察展开到每个位置级 `reference_id`。原件永远不因模型分析而改写；必要时在隔离区生成临时 JPEG 派生图，并以 `asset_id`、原件/派生 SHA-256、原件/派生字节数和允许的 `reference_id` 形成结构化 binding。原生侧校验派生实际字节与哈希，模型返回的未知位置标识会被拒绝或规范化；前端只在一个模型批次内保留派生图，提交后释放。用户指定 Vault（未指定时为个人库）的 `资料库/原文/` 保存未被模型重写的忠实 Markdown、原位附件与来源证据；Agent 库的 `资料库/原文/` 保存模型形成的结构化理解稿、原位逐图分析、标签、Wiki Links 与相关笔记。两份文件与附件使用“完整内容 SHA-256 目录 + 可读标题文件名”的稳定目标路径，使 Obsidian Graph 显示可读节点名称；它们复用同一模型分析回执并作为同一批次提交，同标题不同内容不会碰撞，采集批次不允许覆盖已有目标。实体名称只用于候选笔记匹配，当前不建立实体图谱、向量索引或混合检索。
+模型分析必须覆盖全部本地化图片。相同字节只按内容级 `asset_id` 送模型一次，`image_observations` 保存观察、画面文字、上下文、证据和置信度；确定性写入层再根据附件元数据把观察展开到每个位置级 `reference_id`。原件永远不因模型分析而改写；必要时在隔离区生成临时 JPEG 派生图，并以 `asset_id`、原件/派生 SHA-256、原件/派生字节数和允许的 `reference_id` 形成结构化 binding。原生侧校验派生实际字节与哈希，模型返回的未知位置标识会被拒绝或规范化；前端只在一个模型批次内保留派生图，提交后释放。用户指定 Vault（未指定时为个人库）的 `资料库/原文/` 保存未被模型重写的忠实 Markdown、原位附件与来源证据；Agent 库的 `资料库/原文/` 保存模型形成的结构化理解稿、原位逐图分析、标签、Wiki Links 与相关笔记。两份文件与附件使用“完整内容 SHA-256 目录 + 可读标题文件名”的稳定目标路径，使 Obsidian Graph 显示可读节点名称；它们复用同一模型分析回执并作为同一批次提交，同标题不同内容不会碰撞，采集批次不允许覆盖已有目标。实体名称只用于候选笔记匹配，当前不建立实体图谱；搜索派生层会同步建立本地特征向量并执行 RRF 混合排序。
 
 对话图片走独立的视觉记忆链：首次图片只发送给分析模型一次，生成摘要、OCR/画面文字、标签、实体、关键点、模型 ID 和时间并随消息持久化。普通历史上下文只携带这份分析记录，不包含 Data URL。引用解析器只有在用户明确使用文件名、图片序号或多图指代表达时，才从当前会话原图句柄重新生成视觉输入并更新进一步分析记录。
 
@@ -173,7 +175,7 @@ Adapter 负责：
 
 外部连接器只能由用户在设置中创建，地址必须是规范化 HTTPS 目标，凭据使用本地设备密钥加密。AI助手可以在模型确认真实正文和连接器类型后发起候选投递，但 Policy Engine 仍将外部发送视为高风险副作用并要求用户确认。
 
-更新模块只查询项目 GitHub 仓库的稳定 Release。安装前保护点由 SQLite 在线备份和所有已连接 Vault 的文件快照组成；符号链接不会跟随。回滚前再次建立当前状态安全保护点，然后只覆盖旧快照中存在的文件，不删除更新后新增文件。`0.1.1` 不包含自动下载安装、Apple 签名或公证。
+更新模块只查询项目 GitHub 仓库的稳定 Release。安装前保护点由 SQLite 在线备份和所有已连接 Vault 的文件快照组成；符号链接不会跟随。回滚前再次建立当前状态安全保护点，然后只覆盖旧快照中存在的文件，不删除更新后新增文件。`0.1.2` 不包含自动下载安装、Apple 签名或公证。
 
 ### 5. 数据模型
 
@@ -187,9 +189,15 @@ Adapter 负责：
 
 #### 5.3 长期记忆
 
-长期记忆记录用户在云枢中的必要行为和对话事件，采用追加式事件结构。写入分为暂存、Vault 原子写入、数据库提交三个阶段；崩溃后可重放未完成事件。密钥、Cookie、令牌、完整二进制附件和无关系统隐私不得进入长期记忆。
+长期记忆的原始层保留必要行为和对话事件的追加式审计账本。派生层采用 Memory V2 的 `user_episode`、`user_profile`、`agent_case`、`agent_skill` 四轨结构，并保存来源文档、内容哈希、最小证据、置信度、版本、替代关系、过期时间和墓碑状态。检索必须精确匹配 user、agent、app、project、session 五维作用域，缺失维度不会扩大查询范围。
 
-长期记忆支持查询、指标、纠正、过期、替代和墓碑治理；历史事件保持追加式，不通过静默覆盖改写。后台优化使用不可变证据游标读取任务、纠正、回滚和知识健康信号，候选必须通过权限扩张检查和确定性评估，由用户审阅后才能成为新版本。
+后台反思作为原生持久任务运行，先形成不可召回草稿；只有用户审阅批准后才进入活动索引。查询、指标、纠正、过期、替代和墓碑治理保持历史追加式，不通过静默覆盖改写。密钥、Cookie、令牌、完整二进制附件和无关系统隐私不得进入长期记忆。详见 `docs/MEMORY_V2.md`。
+
+#### 5.4 搜索与研究
+
+Vault 搜索对中文建立 CJK 字符对索引，并从中文字符、词项、标题、相对路径、标签和 Wiki Link 建立固定维度的本地特征向量。每篇笔记的标题与关系元数据完整进入向量，正文特征明确限制为前 250,000 个规范化字符；该预算只约束可重建向量，不截断 FTS 或 Vault 原文。词法候选与向量候选分别排序，再用标准 RRF `1 / (60 + rank)` 融合；结果返回两路名次、分数和元数据信号，并始终携带 Vault ID 与规范相对路径。向量损坏或尚未重建时自动保留 FTS 结果。这是确定性特征相似度，不是神经 Embedding 或语义推理。
+
+第一方受控深度研究 Skill 按计划、证据收集、矛盾核对、综合、引用和反思运行。每阶段受策略、预算、取消令牌和持久检查点约束；引用必须从主张回溯到证据、来源及内容哈希。Skill 不能直接写 Vault、修改设置或扩大网络范围。
 
 ### 6. 可靠性与安全
 
@@ -205,10 +213,10 @@ Adapter 负责：
 
 ### 7. 当前未实现范围
 
-以下能力不属于 `0.1.1` 已实现范围：
+以下能力不属于 `0.1.2` 已实现范围：
 
 - 实体知识图谱、实体消歧、类型化实体关系和多跳查询。
-- 向量索引、Embedding 管线和关键词/向量混合排序。
+- 神经 Embedding 管线、远程向量数据库和学习式语义重排。
 - 通用远程控制入口和未经用户配置的外部消息投递。
 - 绕过登录、Cookie、验证码、DRM、加密流媒体或平台访问控制。
 
@@ -228,7 +236,7 @@ The boundaries are:
 - The Tauri/Rust kernel owns commands, policy, tasks, schedules, model adapters, capture, Obsidian file boundaries, and local persistence.
 - Obsidian Vaults are authoritative for Markdown, Properties, attachments, tags, and Wiki Links.
 - SQLite is authoritative for structured runtime state such as tasks, conversations, schedules, configuration, receipts, checkpoints, and operation events.
-- FTS and future vector indexes are rebuildable derivatives.
+- FTS and deterministic local feature vectors are rebuildable derivatives.
 - The AI Assistant is a controlled application service, not a privileged prompt that can expand its own access.
 
 ### 2. System invariants
@@ -245,6 +253,8 @@ The boundaries are:
 10. Credentials never enter Obsidian text, long-term memory, diagnostic exports, or the source repository.
 11. The selected Vault stores source-faithful Markdown and in-place assets; the Agent Vault stores model-interpreted records. Neither may overwrite or masquerade as the other.
 12. A required linked image that cannot be localized blocks complete ingestion instead of producing a false success.
+13. A model-intent receipt can mint only one execution ticket bound to canonical arguments and its caller; substitution, concurrent duplicate submission, and replay are rejected.
+14. Memory V2 drafts remain excluded from recall until user approval, and a missing scope dimension never becomes a cross-scope wildcard.
 
 ### 3. Runtime paths
 
@@ -263,7 +273,7 @@ user message and attachments
 → verified outcome in the original conversation
 ```
 
-Ordinary conversation is stored locally without creating a task or writing to Obsidian. Operational intent carries a short-lived, single-use model receipt that the Command Bus consumes before persisting a task.
+Ordinary conversation is stored locally without creating a task or writing to Obsidian. Operational intent carries a short-lived model receipt that the Command Bus exchanges for an execution ticket bound to canonical arguments and caller identity. The ticket is consumed atomically before task persistence, preventing forged analysis, argument substitution, concurrent duplicate submission, and replay.
 
 Capture follows:
 
@@ -291,7 +301,7 @@ Webpage body images, Markdown image syntax, and OOXML image relationships are me
 
 Ordinary embedded links remain `untrusted_data` with `auto_open=false` and `auto_fetch=false`. Their visible text, target, and paragraph/cell/slide provenance are preserved, and only an explicit request creates a new typed capture command. Deterministic image localization does not broaden this ordinary-link policy.
 
-Every localized image enters configured-model analysis once per unique `asset_id`. Its observation, visible text, context, evidence, and confidence are reused at every occurrence-level `reference_id` by the deterministic writer. Original bytes are never rewritten for analysis. When needed, a temporary JPEG derivative is created in isolation and structurally bound by asset ID, original/derivative SHA-256, original/derivative byte lengths, and allowed reference IDs. Native code validates the transmitted bytes and normalizes or rejects model-invented placement IDs; the UI retains derivatives for one bounded request batch and then releases them. `资料库/原文/` in the selected Vault, or Personal Vault by default, receives source-faithful Markdown, in-place assets, and provenance. The same path in the Agent Vault receives model-interpreted Markdown with in-place image analysis, tags, Wiki Links, and related notes. Both plans and their assets use stable targets with the full normalized content SHA-256 as a directory and the readable title as the basename, so Obsidian Graph shows readable node names; they share one analysis receipt and commit as one batch. Equal titles with different content cannot collide, and a capture batch cannot overwrite an existing target. Entity names may suggest existing notes, but entity graphs, vector indexes, and hybrid retrieval remain disabled.
+Every localized image enters configured-model analysis once per unique `asset_id`. Its observation, visible text, context, evidence, and confidence are reused at every occurrence-level `reference_id` by the deterministic writer. Original bytes are never rewritten for analysis. When needed, a temporary JPEG derivative is created in isolation and structurally bound by asset ID, original/derivative SHA-256, original/derivative byte lengths, and allowed reference IDs. Native code validates the transmitted bytes and normalizes or rejects model-invented placement IDs; the UI retains derivatives for one bounded request batch and then releases them. `资料库/原文/` in the selected Vault, or Personal Vault by default, receives source-faithful Markdown, in-place assets, and provenance. The same path in the Agent Vault receives model-interpreted Markdown with in-place image analysis, tags, Wiki Links, and related notes. Both plans and their assets use stable targets with the full normalized content SHA-256 as a directory and the readable title as the basename, so Obsidian Graph shows readable node names; they share one analysis receipt and commit as one batch. Equal titles with different content cannot collide, and a capture batch cannot overwrite an existing target. Entity names may suggest existing notes, but entity graphs remain disabled; the search derivative layer builds local feature vectors and applies RRF hybrid ranking.
 
 Conversation images use a separate visual-memory path. A new image is sent to the analysis model once and persisted with summary, visible text, tags, entities, key points, model ID, and timestamp. Ordinary history carries this record without a Data URL. The original is reloaded only when the user explicitly references a filename, image ordinal, or a specific group such as the previous two images.
 
@@ -311,16 +321,18 @@ System Skills carry first-party provenance, explicit input/output, scoped capabi
 
 The Obsidian Adapter discovers Vaults, initializes the default Agent and Personal Vaults, writes source-faithful records and in-place assets to the selected Vault, writes interpreted records and native Obsidian links to the Agent Vault, manages notes/folders/properties/tags/links/attachments/Graph configuration, creates diffs and checkpoints, commits batches atomically, watches external changes, rebuilds indexes, and appends long-term-memory events. Deletion first creates a plan and moves confirmed targets to Yunspire Trash; permanent physical deletion requires an explicit user action.
 
-User-created external connectors accept normalized HTTPS endpoints and device-key-encrypted credentials. Model-analyzed delivery still passes deterministic policy and user confirmation. The updater checks only stable project Releases, creates online SQLite and connected-Vault snapshots, skips symlinks, creates a safety point before rollback, and never deletes files added after a snapshot. Version `0.1.1` does not claim automatic download, signing, or notarization.
+User-created external connectors accept normalized HTTPS endpoints and device-key-encrypted credentials. Model-analyzed delivery still passes deterministic policy and user confirmation. The updater checks only stable project Releases, creates online SQLite and connected-Vault snapshots, skips symlinks, creates a safety point before rollback, and never deletes files added after a snapshot. Version `0.1.2` does not claim automatic download, signing, or notarization.
 
 ### 5. Data and reliability
 
-Obsidian stores human-readable knowledge, sources, reports, and reusable artifacts. The selected Vault is the source-faithful layer; the Agent Vault is the model-interpreted layer. Content-level `asset_id` values deduplicate image bytes, occurrence-level `reference_id` values preserve placement, and Agent image observations bind both. SQLite stores workspace snapshots, providers, conversations, tasks, steps, schedules, capture records, receipts, managed resources, operation events, FTS, memory-delivery state, and migrations.
+Obsidian stores human-readable knowledge, sources, reports, and reusable artifacts. The selected Vault is the source-faithful layer; the Agent Vault is the model-interpreted layer. Content-level `asset_id` values deduplicate image bytes, occurrence-level `reference_id` values preserve placement, and Agent image observations bind both. SQLite stores workspace snapshots, providers, conversations, tasks, steps, schedules, capture records, receipts, managed resources, operation events, FTS, rebuildable local feature vectors, memory-delivery state, and migrations.
 
-Long-term memory is an append-only event stream for necessary user activity and conversation history. Delivery is staged, atomically written to the Agent Vault, then committed in SQLite so interrupted writes can be replayed. Query, metrics, correction, expiry, replacement, and tombstone governance preserve history without silent overwrite. Background optimization reads immutable evidence cursors, rejects permission expansion, and applies only evaluated, user-reviewed, reversible versions. Secrets, tokens, full binary attachments, and unrelated system privacy are excluded.
+The raw long-term-memory layer is an append-only audit stream for necessary activity and conversation events. Memory V2 derives four separate tracks, `user_episode`, `user_profile`, `agent_case`, and `agent_skill`, with provenance, minimal evidence, confidence, versions, replacement, expiry, and tombstones. Recall requires an exact user/agent/app/project/session scope. Native durable reflection jobs first create non-recallable drafts; only user approval activates them. Secrets, tokens, full binary attachments, and unrelated system privacy are excluded.
+
+Vault search builds CJK character pairs and deterministic local feature vectors from characters, terms, titles, relative paths, tags, and Wiki Links. Titles and relation metadata are included in full; body features have an explicit 250,000-normalized-character budget that does not truncate FTS or canonical Vault content. Lexical and vector ranks are fused with standard `1 / (60 + rank)` RRF while bounded time and relation signals remain explicit. Corrupt or missing vectors are skipped without disabling FTS. Every result retains its Vault ID and canonical relative path for reopening the Obsidian source. This is feature similarity, not a neural embedding or semantic-reasoning claim. The first-party controlled Deep Research Skill runs plan, evidence collection, contradiction review, synthesis, citations, and reflection under policy, budget, cancellation, and durable-checkpoint controls. Claims must trace through evidence to source provenance and content hashes, and the Skill cannot directly write a Vault, change Settings, or expand network scope.
 
 Reliability controls include same-directory temporary files, flush and atomic replacement, version/hash conflict checks, stable idempotency keys, startup recovery, trace IDs, append-only operation events, linked-image completeness gates, cross-Vault batch integrity, locked dependencies, first-party Skill provenance checks, and a release boundary that excludes local data and generated output.
 
 ### 6. Deferred scope
 
-Version `0.1.1` does not claim entity graphs, entity disambiguation, typed entity relations, multi-hop queries, vector indexes, embedding pipelines, hybrid ranking, generic remote control, unconfigured external delivery, or bypasses for login, CAPTCHA, DRM, encrypted media, or platform access controls. I will develop these as explicit future versions rather than describe planned behavior as current capability.
+Version `0.1.2` does not claim entity graphs, entity disambiguation, typed entity relations, multi-hop queries, neural embedding pipelines, remote vector databases, learned semantic reranking, generic remote control, unconfigured external delivery, or bypasses for login, CAPTCHA, DRM, encrypted media, or platform access controls. I will develop these as explicit future versions rather than describe planned behavior as current capability.

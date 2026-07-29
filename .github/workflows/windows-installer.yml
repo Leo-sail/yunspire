@@ -16,7 +16,7 @@ concurrency:
 jobs:
   verify-and-package:
     name: Verify and package unsigned NSIS
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 90
     env:
       CARGO_TERM_COLOR: always
@@ -25,10 +25,10 @@ jobs:
       RUST_BACKTRACE: "1"
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -38,28 +38,19 @@ jobs:
         run: npm run audit:release
 
       - name: Set up Rust 1.88 x64 MSVC
-        uses: dtolnay/rust-toolchain@1.88.0
+        uses: dtolnay/rust-toolchain@39b0b3842c7e8bbf6904c0bfc3d9006fdd4dc4e0 # 1.88.0
         with:
           targets: x86_64-pc-windows-msvc
           components: rustfmt, clippy
 
       - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: src-tauri
 
       - name: Install locked JavaScript dependencies
         id: locked_dependencies
         run: npm ci
-
-      - name: Build Windows Python runtime
-        run: npm run build:windows-python-runtime
-
-      - name: Build Windows document and image helpers
-        run: node scripts/build-windows-native.mjs
-
-      - name: Build Windows media and speech helpers
-        run: npm run build:windows-media-helper
 
       - name: Run complete product verification
         id: product_verification
@@ -79,7 +70,7 @@ jobs:
         run: node scripts/verify-windows-release.mjs bundle
 
       - name: Upload unsigned installer and checksums
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Yunspire-${{ github.sha }}-Windows-x64-unsigned
           path: artifacts/windows/*

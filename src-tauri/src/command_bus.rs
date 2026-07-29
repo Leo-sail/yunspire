@@ -1,4 +1,5 @@
 use crate::{
+    execution_ticket::{ExecutionTicketReceipt, ExecutionTicketState},
     model_provider::ModelIntentState,
     policy::{self, ApplicationCommand, PolicyDecision, PolicyOutcome},
     runtime_db::RuntimeDatabase,
@@ -6,7 +7,6 @@ use crate::{
 use chrono::Utc;
 use serde::Serialize;
 use tauri::State;
-use uuid::Uuid;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,6 +16,7 @@ pub struct CommandReceipt {
     trace_id: String,
     duplicate: bool,
     decision: PolicyDecision,
+    execution_ticket: Option<ExecutionTicketReceipt>,
     accepted_at: String,
 }
 
@@ -23,6 +24,7 @@ pub struct CommandReceipt {
 pub fn submit_application_command(
     database: State<'_, RuntimeDatabase>,
     intent_state: State<'_, ModelIntentState>,
+    ticket_state: State<'_, ExecutionTicketState>,
     command: ApplicationCommand,
 ) -> Result<CommandReceipt, String> {
     let workspace_scope = database.local_workspace_scope()?;
@@ -31,7 +33,8 @@ pub fn submit_application_command(
         .trace_id
         .clone()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+        .unwrap_or_else(crate::trace::new_trace_id);
+    crate::trace::validate_trace_id(&trace_id)?;
     let accepted_at = Utc::now().to_rfc3339();
     let persist = || -> Result<(Option<String>, bool), String> {
         let result = database.persist_application_command(
@@ -62,12 +65,25 @@ pub fn submit_application_command(
     } else {
         persist()?
     };
+    // A duplicate command already owns the original execution grant. Minting a
+    // second token would turn an idempotent retry into a replay primitive.
+    let execution_ticket = if duplicate {
+        None
+    } else {
+        task_id
+            .as_deref()
+            .map(|task_id| {
+                ticket_state.issue(&workspace_scope, task_id, &trace_id, &command, &decision)
+            })
+            .transpose()?
+    };
     Ok(CommandReceipt {
         command_id: command.id,
         task_id,
         trace_id,
         duplicate,
         decision,
+        execution_ticket,
         accepted_at,
     })
 }

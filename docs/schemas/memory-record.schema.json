@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yunspire.local/schemas/memory-record.schema.json",
+  "title": "MemoryRecordV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "track", "title", "content", "scope", "sourceDocId", "evidence", "confidence", "version", "state", "createdAt", "updatedAt"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "track": { "type": "string", "enum": ["user_episode", "user_profile", "agent_case", "agent_skill"] },
+    "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+    "content": { "type": "string", "minLength": 1, "maxLength": 524288 },
+    "scope": { "$ref": "#/$defs/scope" },
+    "sourceDocId": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "sourceRelativePath": { "type": ["string", "null"], "maxLength": 2048 },
+    "sourceContentHash": { "type": ["string", "null"], "pattern": "^(sha256:)?[a-f0-9]{64}$" },
+    "evidence": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "$ref": "#/$defs/evidence" } },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "version": { "type": "integer", "minimum": 1 },
+    "supersedesId": { "type": ["string", "null"], "maxLength": 160 },
+    "state": { "type": "string", "enum": ["draft", "active", "superseded", "tombstone"] },
+    "expiresAt": { "type": ["string", "null"], "format": "date-time" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["userId", "agentId", "appId", "projectId", "sessionId"],
+      "properties": {
+        "userId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "agentId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "appId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "projectId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "sessionId": { "type": "string", "minLength": 1, "maxLength": 160 }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceId", "excerpt"],
+      "properties": {
+        "sourceId": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "excerpt": { "type": "string", "maxLength": 4000 },
+        "contentHash": { "type": ["string", "null"], "pattern": "^(sha256:)?[a-f0-9]{64}$" },
+        "relativePath": { "type": ["string", "null"], "maxLength": 2048 }
+      }
+    }
+  }
+}

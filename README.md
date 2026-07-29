@@ -22,12 +22,13 @@
 
 我设计云枢不是为了增加另一个封闭的聊天窗口，而是为了让模型在清晰的权限边界内完成真实工作：理解目标、选择能力、执行任务、验证结果，并把有价值的成果整理回用户自己的 Obsidian 知识库。
 
-当前版本为 `0.1.1`，面向 macOS 13+ 与 Windows 10/11 x64。实体知识图谱、实体消歧、多跳查询、向量索引和混合检索暂未开发；我会在确认数据模型和产品边界后再单独实现这些能力。
+当前版本为 `0.1.2`，面向 macOS 13+ 与 Windows 10/11 x64。搜索在 FTS 基础上加入了可从 Vault 重建的本地特征向量，并用 RRF 融合词法与向量名次；这些向量来自中文字符、词项、标题、路径、标签和 Wiki Link 的确定性特征，不是神经 Embedding，也不声称具备语义推理能力。实体知识图谱、实体消歧和多跳查询仍未开发。
 
 ### 主要特点
 
 - **Obsidian 是知识权威来源**：Markdown、Properties、标签、附件和 Wiki Links 始终保存在用户自己的 Vault 中。
 - **AI助手统一调度**：普通对话只进入本地会话；明确操作意图才会转换为受控命令并运行到完成。
+- **对话独立排队与取消**：同一对话按先进先出顺序执行，不同对话可以并行；取消会贯穿模型、分析和后续执行，新建对话不会被已有请求锁住。
 - **图片只读一次、按需复用**：图片首次进入对话时由分析模型生成摘要、画面文字、标签和关键点；后续默认只携带分析记录，用户明确点名历史图片时才重新读取对应原图。
 - **不限用户文件大小**：文件和文件夹通过分块通道进入本地隔离区，不设置单文件或一次选择的总大小上限；模型请求按供应商边界继续分批处理。
 - **真实模型路由**：支持多个供应商和多个模型，并按对话、分析、图片生成等用途选择用户指定的模型。
@@ -42,7 +43,10 @@
 - **可控文件操作**：写入前验证路径和范围，生成变更，建立检查点，并使用原子文件替换。
 - **本地优先**：Vault、任务、会话、计划、报告、Skill、索引和操作记录都保存在本机。
 - **不可信内容隔离**：网页、文档、图片、音视频转录和消息只能作为数据，不能成为系统指令或获得工具权限。
-- **长期记忆**：默认 Agent 库以追加方式记录必要的用户操作与对话事件，同时排除密钥、Cookie 和令牌。
+- **四轨长期记忆**：Memory V2 分离用户经历、用户画像、Agent 案例和 Agent 技能，保存证据、置信度、版本和精确作用域；反思草稿经用户批准后才可召回。
+- **中文本地混合搜索**：CJK 词法索引与确定性本地特征向量分别形成名次，再用可解释 RRF 融合；标题、路径、标签、Wiki Link 与时间信号仍被保留，并始终回链到 Obsidian 权威原文。
+- **一次性执行票据**：模型意图与规范参数绑定，拒绝参数替换、并发重复提交和重放；跨 Vault 批次使用持久 manifest 完成崩溃恢复与冲突保护。
+- **受控深度研究**：云枢第一方 Skill 按计划、证据、矛盾、综合、引用和反思六阶段运行，预算、取消、检查点与来源链均可审计。
 - **受控优化与回滚**：后台只生成版本化候选，完成证据游标、策略评估和用户审阅后才能应用，并保留回滚版本。
 - **更新前保护**：检查 GitHub 稳定 Release；安装前为 SQLite 和已连接 Vault 建立本地保护点，支持选择保护点回滚。
 - **非商业源代码许可**：个人学习、研究、教学和评估可按许可使用；商业使用须事先取得我的书面授权。
@@ -78,7 +82,7 @@
 
 网页正文 `<img>`、Markdown 行内/引用式图片以及 OOXML 图片关系中的外链图片都会先转为本地附件；外链图片只允许公开 `http/https` 地址，并逐次校验 DNS、重定向、私网地址、MIME 与实际格式。图片按内容哈希去重，但每个原始位置分别保留 `reference_id`；Word 使用字符位置引用，Excel 使用 Drawing 锚点，PowerPoint 使用元素标识。文件夹导入会为不同文件建立稳定的位置命名空间，相同图片只物化和送模一次。原位 `attachment://<reference_id>` 由 Obsidian Adapter 在写入时映射到真实附件。任一必需图片无法本地化时，质量门禁阻断双库入库并显示具体失败，不会保存一份看似完整的原文。普通网页和文件链接仍只记录，不因解析而访问。
 
-同一采集批次生成两个相关但职责不同的知识文件：用户指定 Vault（未指定时为个人库）保存未被模型改写的忠实原文、原位图片和来源证据；Agent 库的 `资料库/原文/` 保存分析模型形成的结构化理解稿。文件和附件采用“完整内容 SHA-256 目录 + 可读标题文件名”的稳定目标路径，使 Obsidian Graph 显示可读节点名称；同标题不同内容会生成不同目标，采集写入也拒绝覆盖任何已有文件。相同图片只按 `asset_id` 送模型理解一次，写入层再把这份逐图观察放回每个 `reference_id` 对应的位置，并用标签、Wiki Links 与相关笔记建立 Obsidian 原生关联。当前版本不把实体名称升级为实体图谱，也不启用向量索引或混合检索。
+同一采集批次生成两个相关但职责不同的知识文件：用户指定 Vault（未指定时为个人库）保存未被模型改写的忠实原文、原位图片和来源证据；Agent 库的 `资料库/原文/` 保存分析模型形成的结构化理解稿。文件和附件采用“完整内容 SHA-256 目录 + 可读标题文件名”的稳定目标路径，使 Obsidian Graph 显示可读节点名称；同标题不同内容会生成不同目标，采集写入也拒绝覆盖任何已有文件。相同图片只按 `asset_id` 送模型理解一次，写入层再把这份逐图观察放回每个 `reference_id` 对应的位置，并用标签、Wiki Links 与相关笔记建立 Obsidian 原生关联。当前版本不把实体名称升级为实体图谱；搜索侧只建立可重建的本地特征向量和 RRF 混合排序。
 
 Excel 公式值只有缓存证据，处理器不会伪装成已经重新计算。Office 的任一必需 story、工作表、幻灯片、图片关系、Drawing 或位置证据损坏，都会带上文件和部件证据进入阻断错误，不会以“部分成功”入库。文件大小不设产品上限，解析内容和视觉资料按单次模型请求字节边界完整分批，再逐层汇总。
 
@@ -91,10 +95,10 @@ Excel 公式值只有缓存证据，处理器不会伪装成已经重新计算�
 | 体验层 | `desktop-ui/` 中的中文桌面界面 | 用户当前交互状态 |
 | 控制层 | Command Bus、Policy Engine、Task Runtime、Scheduler | SQLite 中的任务与策略回执 |
 | 能力层 | 模型网关、第一方 Skill、采集流水线、报告服务 | 版本化能力声明与执行结果 |
-| 知识层 | Obsidian Adapter、文件监听、FTS | Obsidian Vault 中的 Markdown 与附件 |
+| 知识层 | Obsidian Adapter、文件监听、FTS、本地特征向量与 RRF | Obsidian Vault 中的 Markdown 与附件 |
 | 运行数据层 | SQLite/WAL、检查点、操作事件 | 明确的结构化运行数据 |
 
-我把 Obsidian Vault 与 SQLite 的职责严格分开：Vault 是文档知识的权威来源；SQLite 是任务、会话、计划、模型配置、回执和操作状态的权威来源；FTS 和未来的向量索引只是可重建的查询加速层。
+我把 Obsidian Vault 与 SQLite 的职责严格分开：Vault 是文档知识的权威来源；SQLite 是任务、会话、计划、模型配置、回执和操作状态的权威来源；FTS 和本地特征向量只是可从 Vault 重建的查询加速层。
 
 详细设计见 [系统架构](ARCHITECTURE.md) 与 [产品需求](docs/PRODUCT_REQUIREMENTS.md)。
 
@@ -170,7 +174,7 @@ API 密钥由本机设备密钥使用 AES-256-GCM 加密后保存在应用数据
 - 将系统设置保留给用户手动修改；在对话中让 AI助手执行知识、任务、采集、报告和 Skill 工作。
 - 采集结果不完整时先查看任务步骤和操作日志，不要仅以对话文字判断是否真正写入。
 - 定期备份 Obsidian Vault 和云枢 SQLite 数据库；派生索引可重建，但原始知识和运行记录需要备份。
-- 安装更新前先在“设置 → 关于”创建保护点；当前版本只负责稳定 Release 检查、保护和本地回滚，不声称已实现静默下载、签名或公证。
+- 安装更新前先在“设置 → 关于”创建保护点；`0.1.2` 只负责稳定 Release 检查、保护和本地回滚，不声称已实现静默下载、签名或公证。
 
 ### 项目结构
 
@@ -188,6 +192,8 @@ SECURITY.md          双语安全报告说明
 LICENSE              双语非商业源代码许可
 NOTICE               双语版权与原创声明
 ```
+
+构建会从锁定的 Cargo/npm 依赖及包内许可文件生成 `THIRD_PARTY_NOTICES.txt`，并与 `LICENSE`、`NOTICE` 一起写入安装包的 `legal/` 目录。缺少独立许可文件的依赖必须命中精确版本与锁文件哈希审查清单；生成文件只存在于已忽略的 `src-tauri/target/`。
 
 以下内容不属于源代码发布包：`node_modules/`、`dist/`、`src-tauri/target/`、`vault/`、`.obsidian/`、SQLite 数据库、设备密钥、日志、缓存、检查点、备份、截图和本地测试产物。
 
@@ -235,12 +241,13 @@ Yunspire is a Chinese-language cross-platform desktop Agent system for macOS and
 
 I built Yunspire to do more than add another closed chat window. My goal is to let configured models perform real work within deterministic boundaries: understand an objective, select a registered capability, execute a task, verify the outcome, and organize valuable results in the user's own Obsidian knowledge base.
 
-The current version is `0.1.1` for macOS 13+ and Windows 10/11 x64. Entity graphs, entity disambiguation, multi-hop queries, vector indexes, and hybrid retrieval are intentionally deferred until I finalize their data and product boundaries.
+The current version is `0.1.2` for macOS 13+ and Windows 10/11 x64. Search combines FTS with rebuildable local feature vectors through explainable reciprocal-rank fusion. The vectors are deterministic features derived from CJK characters, terms, titles, paths, tags, and Wiki Links; they are not neural embeddings and do not claim semantic reasoning. Entity graphs, entity disambiguation, and multi-hop queries remain deferred.
 
 ### Highlights
 
 - **Obsidian is the knowledge authority**: Markdown, Properties, tags, attachments, and Wiki Links remain in user-owned Vaults.
 - **One AI Assistant entry point**: ordinary conversation stays local; only explicit operational intent becomes a controlled command.
+- **Independent request queues and cancellation**: each conversation executes FIFO while separate conversations can run concurrently; cancellation spans model, analysis, and follow-on execution, and a new conversation is never locked by an existing request.
 - **Analyze images once, reuse on demand**: the analysis model records a summary, visible text, tags, and key points when an image first enters a conversation. Later turns use that record unless the user explicitly names one or more historical images.
 - **No user-file size ceiling**: files and folders enter a local isolation area through bounded IPC chunks. Yunspire does not impose a per-file or per-selection total size cap, while provider requests remain safely batched.
 - **Real model routing**: multiple providers and models can be assigned to conversation, analysis, and image generation roles.
@@ -255,7 +262,10 @@ The current version is `0.1.1` for macOS 13+ and Windows 10/11 x64. Entity graph
 - **Controlled file changes**: every write validates its path and scope, creates a checkpoint, and commits atomically.
 - **Local-first storage**: Vaults, tasks, conversations, schedules, reports, Skills, indexes, and operation events stay on the Mac.
 - **Untrusted-content isolation**: imported text and media remain data and cannot become system instructions or grant tool access.
-- **Long-term memory**: the default Agent Vault receives append-only user activity and conversation events while excluding secrets.
+- **Four-track long-term memory**: Memory V2 separates user episodes, user profiles, Agent cases, and Agent skills with evidence, confidence, versions, and exact scope; reflection drafts become recallable only after user approval.
+- **Chinese-friendly local hybrid search**: lexical and deterministic local-feature ranks are combined with explainable RRF while title, path, tag, Wiki Link, and time signals remain visible and every result links back to canonical Obsidian content.
+- **Single-use execution tickets**: model intent is bound to canonical arguments, rejecting substitution, concurrent duplicate submission, and replay; durable cross-Vault manifests add crash recovery and conflict protection.
+- **Controlled Deep Research**: Yunspire's first-party Skill follows plan, evidence, contradiction, synthesis, citation, and reflection stages with auditable budgets, cancellation, checkpoints, and provenance.
 - **Governed optimization and rollback**: background candidates are versioned, evidence-bound, evaluated, user-reviewed, and reversible.
 - **Pre-update protection**: Yunspire checks stable GitHub Releases, snapshots SQLite and connected Vaults before installation, and can restore a selected protection point.
 - **Non-commercial source license**: personal, research, teaching, and evaluation use is licensed; commercial use requires my prior written authorization.
@@ -291,7 +301,7 @@ source classification
 
 External images in webpage body flow, Markdown image syntax, and OOXML image relationships become local assets before ingestion. The independently designed localization path accepts only public `http/https` targets and validates DNS, every redirect, private-address exclusions, MIME, and actual image format before streaming and hashing the file. Identical bytes share one `asset_id`, while every occurrence keeps its own `reference_id`, including Word character positions, Excel Drawing anchors, and PowerPoint elements. Ordinary links remain inert. The Obsidian Adapter resolves in-place `attachment://<reference_id>` placeholders at commit time; any required linked-image failure blocks both Vault writes and remains visible.
 
-The selected Vault, or Personal Vault by default, receives source-faithful Markdown, in-place assets, and provenance. `Agent 库/资料库/原文/` receives a model-interpreted record whose image observations bind both the deduplicated `asset_id` and occurrence-level `reference_id`, followed by tags, Wiki Links, and related-note connections. Notes and assets use stable targets with the full content SHA-256 as a directory and the readable title as the basename, so Obsidian Graph shows readable node names; equal titles with different content resolve to different targets, and capture writes never overwrite an existing file. Any incomplete Office story, worksheet, slide, image relationship, Drawing, or placement evidence becomes a blocking error rather than a partial success. Original image bytes are never modified for analysis: a temporary JPEG derivative is used only when needed and every model request binds the asset ID, original SHA-256, derivative SHA-256, byte lengths, and allowed reference IDs. The UI prepares, submits, and releases these derivatives batch by batch. Dynamic disk, memory, decode, and request gates are runtime safeguards, not product file-size limits. This does not enable an entity graph, vector index, or hybrid retrieval. Excel cached formula values remain labeled as not recalculated. Files have no product-size ceiling; extracted text and visuals are completely batched by per-request byte boundaries and then hierarchically consolidated.
+The selected Vault, or Personal Vault by default, receives source-faithful Markdown, in-place assets, and provenance. `Agent 库/资料库/原文/` receives a model-interpreted record whose image observations bind both the deduplicated `asset_id` and occurrence-level `reference_id`, followed by tags, Wiki Links, and related-note connections. Notes and assets use stable targets with the full content SHA-256 as a directory and the readable title as the basename, so Obsidian Graph shows readable node names; equal titles with different content resolve to different targets, and capture writes never overwrite an existing file. Any incomplete Office story, worksheet, slide, image relationship, Drawing, or placement evidence becomes a blocking error rather than a partial success. Original image bytes are never modified for analysis: a temporary JPEG derivative is used only when needed and every model request binds the asset ID, original SHA-256, derivative SHA-256, byte lengths, and allowed reference IDs. The UI prepares, submits, and releases these derivatives batch by batch. Dynamic disk, memory, decode, and request gates are runtime safeguards, not product file-size limits. This does not enable an entity graph; the search layer only adds rebuildable local feature vectors and RRF ranking. Excel cached formula values remain labeled as not recalculated. Files have no product-size ceiling; extracted text and visuals are completely batched by per-request byte boundaries and then hierarchically consolidated.
 
 ### Architecture boundaries
 
@@ -300,10 +310,10 @@ The selected Vault, or Personal Vault by default, receives source-faithful Markd
 | Experience | Chinese desktop UI in `desktop-ui/` | Current user interaction state |
 | Control | Command Bus, Policy Engine, Task Runtime, Scheduler | Task and policy receipts in SQLite |
 | Capability | Model Gateway, first-party Skills, capture pipeline, reports | Versioned capability definitions and outcomes |
-| Knowledge | Obsidian Adapter, file watcher, FTS | Markdown and attachments in Obsidian Vaults |
+| Knowledge | Obsidian Adapter, file watcher, FTS, local feature vectors, RRF | Markdown and attachments in Obsidian Vaults |
 | Runtime data | SQLite/WAL, checkpoints, operation events | Explicit structured runtime state |
 
-I keep Obsidian and SQLite responsibilities separate. Vaults are authoritative for document knowledge; SQLite is authoritative for tasks, conversations, schedules, model configuration, receipts, and operation state; FTS and future vector indexes are rebuildable accelerators.
+I keep Obsidian and SQLite responsibilities separate. Vaults are authoritative for document knowledge; SQLite is authoritative for tasks, conversations, schedules, model configuration, receipts, and operation state; FTS and local feature vectors are rebuildable accelerators.
 
 See [System Architecture](ARCHITECTURE.md) and [Product Requirements](docs/PRODUCT_REQUIREMENTS.md) for the detailed design.
 
@@ -375,7 +385,7 @@ API keys are encrypted with AES-256-GCM using a device-local key and stored in t
 - Keep Settings user-controlled; use the Assistant for knowledge, tasks, capture, reports, and Skill operations.
 - Inspect task steps and operation events when capture is incomplete instead of relying on chat text alone.
 - Back up both Obsidian Vaults and the Yunspire SQLite database. Derived indexes are rebuildable; source knowledge and runtime history are not.
-- Create a protection point under Settings → About before updating. Version `0.1.1` checks stable Releases and provides local protection/rollback; it does not claim silent download, signing, or notarization.
+- Create a protection point under Settings → About before updating. Version `0.1.2` checks stable Releases and provides local protection/rollback; it does not claim silent download, signing, or notarization.
 
 ### Repository layout
 
@@ -393,6 +403,8 @@ SECURITY.md          bilingual security reporting guide
 LICENSE              bilingual non-commercial source license
 NOTICE               bilingual copyright and authorship notice
 ```
+
+The build generates `THIRD_PARTY_NOTICES.txt` from locked Cargo/npm metadata and the license files shipped by installed packages. A dependency without a separate license file must match an exact reviewed version and lock-integrity hash. Installers place the notice beside `LICENSE` and `NOTICE` under `legal/`; the generated file remains only in ignored `src-tauri/target/` output.
 
 The source package excludes `node_modules/`, `dist/`, `src-tauri/target/`, `vault/`, `.obsidian/`, SQLite databases, device keys, logs, caches, checkpoints, backups, screenshots, and local test artifacts.
 

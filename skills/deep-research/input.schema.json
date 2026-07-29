@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yunspire.local/skills/deep-research/input.schema.json",
+  "title": "DeepResearchInput",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["query", "budget", "control", "policy", "output"],
+  "properties": {
+    "research_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" },
+    "query": { "type": "string", "minLength": 3, "maxLength": 4000 },
+    "objectives": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 500 },
+      "maxItems": 12,
+      "uniqueItems": true
+    },
+    "seed_sources": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/seedSource" },
+      "maxItems": 50
+    },
+    "vault_queries": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 500 },
+      "maxItems": 20,
+      "uniqueItems": true
+    },
+    "budget": { "$ref": "#/$defs/budget" },
+    "control": { "$ref": "#/$defs/control" },
+    "policy": { "$ref": "#/$defs/policy" },
+    "output": { "$ref": "#/$defs/outputPreferences" }
+  },
+  "$defs": {
+    "stage": {
+      "type": "string",
+      "enum": ["plan", "evidence_collection", "contradiction_check", "synthesis", "citations", "reflection"]
+    },
+    "seedSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "vault_id", "relative_path"],
+          "properties": {
+            "kind": { "const": "local_vault" },
+            "vault_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "relative_path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024,
+              "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+"
+            },
+            "content_hash": { "$ref": "#/$defs/contentHash" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "label", "content"],
+          "properties": {
+            "kind": { "const": "user_text" },
+            "label": { "type": "string", "minLength": 1, "maxLength": 300 },
+            "content": { "type": "string", "minLength": 1, "maxLength": 200000 },
+            "content_hash": { "$ref": "#/$defs/contentHash" }
+          }
+        }
+      ]
+    },
+    "contentHash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_elapsed_seconds",
+        "max_sources",
+        "max_network_requests",
+        "max_model_calls",
+        "max_input_tokens",
+        "max_output_tokens",
+        "max_download_bytes"
+      ],
+      "properties": {
+        "max_elapsed_seconds": { "type": "integer", "minimum": 30, "maximum": 7200 },
+        "max_sources": { "type": "integer", "minimum": 1, "maximum": 200 },
+        "max_network_requests": { "type": "integer", "const": 0 },
+        "max_model_calls": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "max_input_tokens": { "type": "integer", "minimum": 1024, "maximum": 2000000 },
+        "max_output_tokens": { "type": "integer", "minimum": 256, "maximum": 200000 },
+        "max_download_bytes": { "type": "integer", "const": 0 },
+        "deadline_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cancellation_token", "request_revision", "approval_checkpoint_stages"],
+      "properties": {
+        "cancellation_token": { "type": "string", "minLength": 8, "maxLength": 256 },
+        "request_revision": { "type": "integer", "minimum": 0 },
+        "approval_checkpoint_stages": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/stage" },
+          "uniqueItems": true
+        },
+        "resume_checkpoint_ref": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "idempotency_key": { "type": "string", "minLength": 8, "maxLength": 256 }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "network_access",
+        "allowed_domains",
+        "blocked_domains",
+        "allowed_vault_ids",
+        "minimum_independent_sources",
+        "require_primary_sources_for_key_claims",
+        "authenticated_access",
+        "respect_access_controls",
+        "allow_vault_write",
+        "allow_external_delivery"
+      ],
+      "properties": {
+        "network_access": {
+          "type": "string",
+          "const": "disabled"
+        },
+        "allowed_domains": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,63}$"
+          },
+          "maxItems": 0,
+          "uniqueItems": true
+        },
+        "blocked_domains": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,63}$"
+          },
+          "maxItems": 100,
+          "uniqueItems": true
+        },
+        "allowed_vault_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "maxItems": 20,
+          "uniqueItems": true
+        },
+        "minimum_independent_sources": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "require_primary_sources_for_key_claims": { "type": "boolean" },
+        "authenticated_access": { "const": "deny" },
+        "respect_access_controls": { "const": true },
+        "allow_vault_write": { "const": false },
+        "allow_external_delivery": { "const": false },
+        "maximum_source_age_days": { "type": ["integer", "null"], "minimum": 0, "maximum": 36500 }
+      }
+    },
+    "outputPreferences": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["language", "citation_style", "max_answer_characters", "include_evidence_excerpts"],
+      "properties": {
+        "language": { "type": "string", "minLength": 2, "maxLength": 35 },
+        "citation_style": { "const": "inline_source_ids" },
+        "max_answer_characters": { "type": "integer", "minimum": 500, "maximum": 100000 },
+        "include_evidence_excerpts": { "type": "boolean" }
+      }
+    }
+  }
+}

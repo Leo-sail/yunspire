@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,22 +14,49 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
-    runs-on: macos-14
-    timeout-minutes: 45
+  quality:
+    name: Quality (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS
+            os: macos-14
+          - platform: Windows
+            os: windows-2022
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
+      RUST_BACKTRACE: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
-      - run: npm run audit:release
-      - uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Set up Rust 1.88
+        uses: dtolnay/rust-toolchain@39b0b3842c7e8bbf6904c0bfc3d9006fdd4dc4e0 # 1.88.0
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: src-tauri
-      - run: npm ci
-      - run: npm run verify
-      - run: npm run tauri:build:debug
+
+      - name: Install locked JavaScript dependencies
+        run: npm ci
+
+      - name: Run product verification
+        run: npm run verify
+
+      - name: Validate Windows release resources
+        if: matrix.platform == 'Windows'
+        run: node scripts/verify-release-artifact.mjs source --require-windows true

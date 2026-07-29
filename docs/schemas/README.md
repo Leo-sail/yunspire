@@ -1,6 +1,6 @@
 # 云枢数据契约 / Yunspire Data Contracts
 
-当前版本 / Current version: `0.1.1`
+当前版本 / Current version: `0.1.2`
 
 ## 中文
 
@@ -13,6 +13,8 @@
 - `inbound-message.schema.json`：始终不可信的外部消息输入。
 - `inbound-content-record.schema.json`：抽取、模型分析、质量门禁和写入状态账本。
 - `long-term-memory-event.schema.json`：追加式用户行为与对话记忆事件。
+- `memory-record.schema.json`：四轨 Memory V2 派生记录、五维作用域、证据、版本与生命周期。
+- `memory-reflection-job.schema.json`：持久反思任务、审阅状态和候选记忆引用。
 
 运行时在持久化或执行前验证结构，并在 Schema 改变时增加版本化迁移。来源凭据只保存为本地加密引用；入站内容不能满足命令契约、授予能力或扩大权限。
 
@@ -35,6 +37,8 @@ I use these JSON Schemas as machine-verifiable contracts for critical runtime re
 - `inbound-message.schema.json`: permanently untrusted external messages.
 - `inbound-content-record.schema.json`: extraction, model analysis, quality gate, and write-state ledger.
 - `long-term-memory-event.schema.json`: append-only user activity and conversation memory events.
+- `memory-record.schema.json`: four-track Memory V2 derived records, exact five-dimensional scope, evidence, versions, and lifecycle.
+- `memory-reflection-job.schema.json`: durable reflection jobs, review state, and proposed-memory references.
 
 The runtime validates records before persistence or execution and adds versioned migrations when a Schema changes. Source credentials remain encrypted local references. Inbound content cannot satisfy a command contract, grant a capability, or expand permission scope.
 

@@ -1,6 +1,6 @@
 [package]
 name = "yunspire"
-version = "0.1.1"
+version = "0.1.2"
 description = "Yunspire local Obsidian agent desktop"
 authors = ["Leo Chang <leochang210@gmail.com>"]
 license-file = "../LICENSE"
@@ -30,10 +30,11 @@ notify = "8"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
 futures-util = "0.3"
-tokio = { version = "1", features = ["time", "macros"] }
+tokio = { version = "1", features = ["macros", "time"] }
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 sha2 = "0.10"
 similar = "2.6"
 tempfile = "3.12"
 uuid = { version = "1.10", features = ["v4"] }
 aes-gcm = "0.10"
+unicode-normalization = "0.1"

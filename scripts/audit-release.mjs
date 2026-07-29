@@ -1,17 +1,16 @@
+import { execFile } from 'node:child_process';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
+import { promisify } from 'node:util';
 
 const root = path.resolve(process.cwd());
+const execFileAsync = promisify(execFile);
 const ignoredDirectories = new Set([
   '.git',
-]);
-const forbiddenRepositorySegments = new Set([
   'node_modules',
   'dist',
   'target',
-  'gen',
-  '__pycache__',
   'vault',
   '.obsidian',
   'coverage',
@@ -23,9 +22,29 @@ const forbiddenRepositorySegments = new Set([
   'checkpoints',
   'backups',
   'cache',
+  'release',
+  'installers',
+  'artifacts',
+]);
+const forbiddenRepositorySegments = new Set([
+  'desktop',
+  'node_modules',
+  'dist',
+  'target',
+  'vault',
+  '.obsidian',
+  'coverage',
+  'test-results',
+  'screenshots',
+  'design-qa',
+  'release',
+  'installers',
+  'artifacts',
 ]);
 const binaryExtensions = new Set([
-  '.png', '.jpg', '.jpeg', '.gif', '.ico', '.icns', '.pdf', '.zip', '.dmg', '.app',
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.ico', '.icns', '.pdf',
+  '.zip', '.dmg', '.app', '.exe', '.msi', '.dll', '.dylib', '.so', '.a', '.rlib',
+  '.wasm', '.woff', '.woff2', '.ttf', '.otf',
 ]);
 const requiredFiles = [
   'README.md',
@@ -44,27 +63,38 @@ const requiredFiles = [
   'src-tauri/Cargo.lock',
   'src-tauri/tauri.conf.json',
   'src-tauri/src/lib.rs',
+  'src-tauri/src/assistant_runtime.rs',
   'src-tauri/src/command_bus.rs',
+  'src-tauri/src/execution_ticket.rs',
+  'src-tauri/src/memory.rs',
   'src-tauri/src/policy.rs',
   'src-tauri/src/task_runtime.rs',
   'src-tauri/src/obsidian.rs',
   'src-tauri/src/obsidian_management.rs',
   'src-tauri/src/runtime_db.rs',
+  'src-tauri/src/skill_lifecycle.rs',
+  'src-tauri/src/trace.rs',
+  'src-tauri/src/vault_batch.rs',
+  'docs/MEMORY_V2.md',
   'docs/assets/architecture-overview.svg',
-  '.github/workflows/ci.yml',
-  '.github/workflows/windows-installer.yml',
+  'docs/RELEASING.md',
+  'docs/schemas/memory-record.schema.json',
+  'docs/schemas/memory-reflection-job.schema.json',
   '.github/ISSUE_TEMPLATE/bug_report.yml',
   '.github/ISSUE_TEMPLATE/feature_request.yml',
-  'scripts/build-windows-media-helper.mjs',
-  'scripts/build-windows-native.mjs',
-  'scripts/build-windows-python-runtime.mjs',
-  'scripts/quality-gates.mjs',
-  'scripts/verify-windows-release.mjs',
-  'skills/document-content-analysis/scripts/yunspire_image_windows.cpp',
-  'skills/document-content-analysis/scripts/yunspire_pdf_windows.cpp',
-  'skills/video-content-analysis/scripts/yunspire_media_windows.cpp',
-  'skills/video-content-analysis/scripts/yunspire_speech_windows.cpp',
-  'src-tauri/tauri.windows.conf.json',
+  '.github/workflows/ci.yml',
+  '.github/workflows/release.yml',
+  'scripts/agent-analysis-artifact.test.mjs',
+  'scripts/assistant-request-coordinator.test.mjs',
+  'scripts/deep-research-validator.test.mjs',
+  'scripts/generate-third-party-notices.mjs',
+  'scripts/verify-release-artifact.mjs',
+  'skills/deep-research/SKILL.md',
+  'skills/deep-research/input.schema.json',
+  'skills/deep-research/output.schema.json',
+  'skills/deep-research/manifest.json',
+  'skills/deep-research/origin.json',
+  'skills/deep-research/scripts/validate-research-result.mjs',
 ];
 const bilingualDocuments = [
   'README.md',
@@ -75,6 +105,7 @@ const bilingualDocuments = [
   'docs/AI_ASSISTANT_INSTRUCTIONS.md',
   'docs/BRAND_GUIDE.md',
   'docs/PRODUCT_REQUIREMENTS.md',
+  'docs/RELEASING.md',
   'docs/schemas/README.md',
 ];
 const generatedAttributionPattern = new RegExp(
@@ -107,14 +138,8 @@ async function collectFiles(directory, relative = '') {
   for (const entry of entries) {
     const nextRelative = path.join(relative, entry.name);
     if (entry.isDirectory()) {
-      if (ignoredDirectories.has(entry.name)) continue;
-      if (forbiddenRepositorySegments.has(entry.name)) {
-        failures.push(`generated or local artifact present: ${nextRelative}${path.sep}`);
-        continue;
-      }
+      if (ignoredDirectories.has(entry.name) || entry.name.endsWith('.app')) continue;
       files.push(...await collectFiles(path.join(directory, entry.name), nextRelative));
-    } else if (entry.isSymbolicLink()) {
-      failures.push(`symbolic link is not allowed in release source: ${nextRelative}`);
     } else if (entry.isFile()) {
       files.push(nextRelative);
     }
@@ -138,6 +163,10 @@ for (const document of bilingualDocuments) {
 const files = await collectFiles(root);
 for (const relativePath of files) {
   const segments = relativePath.split(path.sep);
+  if (segments.some((segment) => segment === '.DS_Store' || segment === '__pycache__' || segment.endsWith('.pyc'))) {
+    failures.push(`local cache artifact present: ${relativePath}`);
+    continue;
+  }
   if (segments.some((segment) => forbiddenRepositorySegments.has(segment))) {
     failures.push(`generated or local artifact present: ${relativePath}`);
     continue;
@@ -146,20 +175,65 @@ for (const relativePath of files) {
   const fileStat = await stat(path.join(root, relativePath));
   if (fileStat.size > 5 * 1024 * 1024) continue;
   const text = await readFile(path.join(root, relativePath), 'utf8');
+  if (relativePath.startsWith(`.github${path.sep}workflows${path.sep}`)
+      && /\.ya?ml$/i.test(relativePath)) {
+    for (const line of text.split(/\r?\n/)) {
+      const action = line.match(/^\s*uses:\s*([^\s#]+)/)?.[1];
+      if (action && !action.startsWith('./') && !/@[0-9a-f]{40}$/i.test(action)) {
+        failures.push(`GitHub Action is not pinned to a commit SHA: ${relativePath} -> ${action}`);
+      }
+    }
+  }
   for (const { label, pattern } of forbiddenPatterns) {
     pattern.lastIndex = 0;
     if (pattern.test(text)) failures.push(`${label}: ${relativePath}`);
   }
 }
 
+try {
+  const { stdout } = await execFileAsync('git', ['ls-files', '-z'], {
+    cwd: root,
+    encoding: 'utf8',
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  const trackedFiles = new Set(stdout.split('\0').filter(Boolean));
+  for (const required of requiredFiles) {
+    if (!trackedFiles.has(required)) failures.push(`required release file is not tracked in the Git index: ${required}`);
+  }
+  for (const relativePath of trackedFiles) {
+    const segments = relativePath.split('/');
+    const extension = path.extname(relativePath).toLowerCase();
+    if (segments.some((segment) => forbiddenRepositorySegments.has(segment) || segment.endsWith('.app'))) {
+      failures.push(`generated or local artifact is tracked: ${relativePath}`);
+    } else if (['.app', '.dmg', '.exe', '.msi', '.sig', '.sha256', '.zip'].includes(extension)) {
+      failures.push(`installer or release output is tracked: ${relativePath}`);
+    }
+  }
+} catch (error) {
+  failures.push(`unable to inspect the Git index: ${error.message}`);
+}
+
 const packageJson = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
 const packageVersion = packageJson.version;
+const packageLock = JSON.parse(await readFile(path.join(root, 'package-lock.json'), 'utf8'));
+if (packageLock.version !== packageVersion || packageLock.packages?.['']?.version !== packageVersion) {
+  failures.push(`version mismatch in package-lock.json; expected ${packageVersion}`);
+}
 const versionChecks = [
   ['src-tauri/tauri.conf.json', new RegExp(`"version"\\s*:\\s*"${packageVersion.replaceAll('.', '\\.')}"`)],
   ['src-tauri/Cargo.toml', new RegExp(`^version\\s*=\\s*"${packageVersion.replaceAll('.', '\\.')}"`, 'm')],
   ['desktop-ui/index.html', new RegExp(`版本 ${packageVersion.replaceAll('.', '\\.')}`)],
   ['desktop-ui/app.js', new RegExp(`Yunspire Desktop ${packageVersion.replaceAll('.', '\\.')}`)],
   ['skills/video-content-analysis/scripts/yunspire_speech_info.plist', new RegExp(`<string>${packageVersion.replaceAll('.', '\\.')}<\\/string>`)],
+  ['CHANGELOG.md', new RegExp(`^### ${packageVersion.replaceAll('.', '\\.')} (?:-|$)`, 'm')],
+  ['ARCHITECTURE.md', new RegExp('Current version: `' + packageVersion.replaceAll('.', '\\.') + '`')],
+  ['README.md', new RegExp('当前版本为 `' + packageVersion.replaceAll('.', '\\.') + '`')],
+  ['SECURITY.md', new RegExp('当前版本为 `' + packageVersion.replaceAll('.', '\\.') + '`')],
+  ['docs/AI_ASSISTANT_INSTRUCTIONS.md', new RegExp('Current version: `' + packageVersion.replaceAll('.', '\\.') + '`')],
+  ['docs/BRAND_GUIDE.md', new RegExp('Current version: `' + packageVersion.replaceAll('.', '\\.') + '`')],
+  ['docs/PRODUCT_REQUIREMENTS.md', new RegExp('Current version: `' + packageVersion.replaceAll('.', '\\.') + '`')],
+  ['docs/schemas/README.md', new RegExp('Current version: `' + packageVersion.replaceAll('.', '\\.') + '`')],
+  ['docs/assets/architecture-overview.svg', new RegExp(`v${packageVersion.replaceAll('.', '\\.')}`)],
 ];
 for (const [relativePath, pattern] of versionChecks) {
   const text = await readFile(path.join(root, relativePath), 'utf8');

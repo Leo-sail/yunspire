@@ -1,6 +1,9 @@
+mod assistant_runtime;
 mod capture_pipeline;
 mod command_bus;
 mod connectors;
+mod execution_ticket;
+mod memory;
 mod model_config;
 mod model_provider;
 mod obsidian;
@@ -8,8 +11,11 @@ mod obsidian_management;
 mod policy;
 mod runtime_db;
 mod scheduler;
+mod skill_lifecycle;
 mod task_runtime;
+mod trace;
 mod updater;
+mod vault_batch;
 mod vault_watcher;
 
 use std::sync::{
@@ -17,7 +23,7 @@ use std::sync::{
     mpsc::{self, Receiver},
     Arc, Mutex,
 };
-use tauri::{AppHandle, Manager, State};
+use tauri::{path::BaseDirectory, AppHandle, Manager, State};
 
 struct BackgroundVaultIndexTask {
     cancellation: Arc<AtomicBool>,
@@ -32,8 +38,9 @@ struct LocalRuntimeInitializationState {
     index_task: Mutex<Option<BackgroundVaultIndexTask>>,
 }
 
-const COMMANDS_AVAILABLE_WITHOUT_APPLICATION_AUTHORIZATION: [&str; 2] = [
+const COMMANDS_AVAILABLE_WITHOUT_APPLICATION_AUTHORIZATION: [&str; 3] = [
     "load_application_authorization",
+    "load_third_party_notices",
     "update_application_authorization",
 ];
 
@@ -75,6 +82,16 @@ fn initialize_local_runtime(
         memory_state.inner(),
     ) {
         log::warn!("无法重放长期记忆待写入事件：{error}");
+    }
+    if let Err(error) = obsidian::recover_vault_batch_manifests_for_runtime(app, database) {
+        log::warn!("无法完整恢复中断的跨 Vault 批次：{error}");
+    }
+    database.recover_vault_index_changes()?;
+    if let Err(error) = memory::recover_reflection_jobs(database) {
+        log::warn!("无法恢复中断的记忆反思任务：{error}");
+    }
+    if let Err(error) = assistant_runtime::recover_requests_for_startup(database) {
+        log::warn!("无法恢复中断的 AI助手请求：{error}");
     }
     let vaults = obsidian::discover_vaults_for_runtime().unwrap_or_default();
     database.sync_vault_registry(&vaults)?;
@@ -141,6 +158,7 @@ fn activate_local_runtime(
 ) {
     state.initialized.store(true, Ordering::Release);
     scheduler::start_scheduler(app);
+    vault_watcher::start_vault_index_worker(app);
     start_background_vault_indexing(app, vaults, generation);
 }
 
@@ -280,6 +298,16 @@ fn update_application_authorization(
     }
 }
 
+#[tauri::command]
+fn load_third_party_notices(app: AppHandle) -> Result<String, String> {
+    let path = app
+        .path()
+        .resolve("legal/THIRD_PARTY_NOTICES.txt", BaseDirectory::Resource)
+        .map_err(|error| format!("无法定位第三方许可清单：{error}"))?;
+    std::fs::read_to_string(&path)
+        .map_err(|error| format!("无法读取第三方许可清单 {}：{error}", path.display()))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -294,6 +322,7 @@ pub fn run() {
         .manage(model_provider::ModelAnalysisState::default())
         .manage(model_provider::ModelIntentState::default())
         .manage(model_provider::ModelRequestState::default())
+        .manage(execution_ticket::ExecutionTicketState::default())
         .manage(capture_pipeline::CaptureAuthorizationState::default())
         .manage(capture_pipeline::CaptureTaskState::default())
         .manage(capture_pipeline::CaptureUploadState::default())
@@ -305,8 +334,24 @@ pub fn run() {
                 model_config::save_model_provider,
                 model_config::load_model_providers,
                 model_config::delete_model_provider,
+                memory::upsert_memory_record,
+                memory::tombstone_memory_record,
+                memory::search_memory_records,
+                memory::begin_memory_reflection,
+                memory::complete_memory_reflection,
+                memory::review_memory_reflection,
+                memory::fail_memory_reflection,
+                memory::memory_backend_status,
+                assistant_runtime::enqueue_assistant_request,
+                assistant_runtime::claim_assistant_request,
+                assistant_runtime::assemble_assistant_request_context,
+                assistant_runtime::finish_assistant_request,
+                assistant_runtime::cancel_assistant_runtime_request,
+                assistant_runtime::advance_assistant_conversation_revision,
+                assistant_runtime::recover_assistant_requests,
                 command_bus::evaluate_application_command,
                 command_bus::submit_application_command,
+                execution_ticket::retire_execution_ticket,
                 connectors::save_external_connector,
                 connectors::load_external_connectors,
                 connectors::delete_external_connector,
@@ -332,6 +377,7 @@ pub fn run() {
                 obsidian::list_vault_folders,
                 obsidian::search_vault_notes,
                 obsidian::read_vault_note,
+                obsidian::open_obsidian_note,
                 obsidian::open_vault_note_in_obsidian,
                 obsidian::list_vault_notes,
                 obsidian::save_creation_draft_asset,
@@ -361,6 +407,7 @@ pub fn run() {
                 obsidian_management::update_obsidian_graph_config,
                 runtime_db::load_workspace_snapshot,
                 runtime_db::load_application_authorization,
+                load_third_party_notices,
                 update_application_authorization,
                 runtime_db::save_workspace_snapshot,
                 runtime_db::database_health,
@@ -372,6 +419,17 @@ pub fn run() {
                 runtime_db::govern_long_term_memory,
                 runtime_db::export_long_term_memory,
                 runtime_db::long_term_memory_metrics,
+                skill_lifecycle::save_skill_draft,
+                skill_lifecycle::list_user_skills,
+                skill_lifecycle::list_routable_skills,
+                skill_lifecycle::evaluate_skill_candidate,
+                skill_lifecycle::decide_skill_candidate,
+                skill_lifecycle::change_skill_activation,
+                skill_lifecycle::retire_skill,
+                skill_lifecycle::rollback_skill,
+                skill_lifecycle::list_skill_versions,
+                trace::query_runtime_trace,
+                trace::validate_runtime_trace,
                 runtime_db::read_optimization_evidence,
                 runtime_db::create_optimization_candidate,
                 runtime_db::evaluate_optimization_candidate,
@@ -454,6 +512,9 @@ mod tests {
         ));
         assert!(command_available_without_application_authorization(
             "update_application_authorization"
+        ));
+        assert!(command_available_without_application_authorization(
+            "load_third_party_notices"
         ));
         assert!(!command_available_without_application_authorization(
             "discover_obsidian_vaults"

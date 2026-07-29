@@ -76,6 +76,22 @@ pub struct PolicyDecision {
     pub approval_type: Option<String>,
 }
 
+pub(crate) fn command_authorization_binding(command: &ApplicationCommand) -> Value {
+    serde_json::json!({
+        "commandType": command.command_type,
+        "origin": command.origin,
+        "intent": command.intent,
+        "capabilityId": command.capability_id,
+        "operation": command.operation,
+        "parameters": command.parameters,
+        "vaultId": command.vault_id,
+        "relativePaths": command.relative_paths,
+        "networkTargets": command.network_targets,
+        "declaredScope": command.declared_scope,
+        "budget": command.budget,
+    })
+}
+
 fn valid_identifier(value: &str, max: usize) -> bool {
     let value = value.trim();
     !value.is_empty()
