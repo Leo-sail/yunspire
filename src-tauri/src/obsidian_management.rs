@@ -497,10 +497,18 @@ fn copy_entry(source: &Path, target: &Path) -> Result<(), String> {
     if metadata.is_file() {
         let parent = target.parent().ok_or("回收目标缺少父目录")?;
         fs::create_dir_all(parent).map_err(|error| format!("无法创建回收目录：{error}"))?;
-        fs::copy(source, target).map_err(|error| format!("无法复制目标到云枢回收区：{error}"))?;
-        File::open(target)
-            .and_then(|file| file.sync_all())
+        let mut source_file =
+            File::open(source).map_err(|error| format!("无法打开跨磁盘回收源文件：{error}"))?;
+        let mut target_file =
+            File::create(target).map_err(|error| format!("无法创建跨磁盘回收文件：{error}"))?;
+        std::io::copy(&mut source_file, &mut target_file)
+            .map_err(|error| format!("无法复制目标到云枢回收区：{error}"))?;
+        target_file
+            .sync_all()
             .map_err(|error| format!("无法同步回收文件：{error}"))?;
+        drop(target_file);
+        fs::set_permissions(target, metadata.permissions())
+            .map_err(|error| format!("无法保留回收文件权限：{error}"))?;
         return Ok(());
     }
     if metadata.is_dir() {
@@ -2343,6 +2351,21 @@ mod tests {
     use super::*;
     use crate::policy::{self, ApplicationCommand, CommandBudget, CommandOrigin};
     use std::ffi::OsString;
+
+    #[test]
+    fn cross_device_copy_syncs_content_with_a_writable_handle() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let source = directory.path().join("source.md");
+        let target = directory.path().join("trash").join("target.md");
+        fs::write(&source, "跨磁盘回收内容").expect("write source");
+
+        copy_entry(&source, &target).expect("copy and sync entry");
+
+        assert_eq!(
+            fs::read_to_string(&target).expect("read copied entry"),
+            "跨磁盘回收内容"
+        );
+    }
 
     struct EnvironmentGuard(Vec<(&'static str, Option<OsString>)>);
 

@@ -321,10 +321,8 @@ pub(crate) fn prepare_batch_manifest(
         }
         if let Some(backup_relative_path) = item.backup_relative_path.as_deref() {
             let backup = directory.join(backup_relative_path);
-            fs::copy(&target, &backup).map_err(|error| format!("无法保存批次检查点：{error}"))?;
-            File::open(&backup)
-                .and_then(|file| file.sync_all())
-                .map_err(|error| format!("无法同步批次检查点：{error}"))?;
+            durable_atomic_copy(&backup, &target)
+                .map_err(|error| format!("无法保存批次检查点：{error}"))?;
             if current_hash(&backup)? != item.previous_hash {
                 return Err(format!("批次检查点哈希不一致：{}", item.relative_path));
             }
