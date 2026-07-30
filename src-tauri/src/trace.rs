@@ -337,8 +337,7 @@ pub(crate) fn record_trace_event_in_connection(
         .is_some_and(|value| value != trace_id)
     {
         return Err(format!(
-            "{} {} 已绑定其他 Trace，拒绝重新生成追踪链",
-            entity_kind, entity_id
+            "{entity_kind} {entity_id} 已绑定其他 Trace，拒绝重新生成追踪链"
         ));
     }
     let event_id = Uuid::new_v4().to_string();
