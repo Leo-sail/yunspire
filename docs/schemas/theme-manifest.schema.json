@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yunspire.local/schemas/theme-manifest.schema.json",
+  "title": "CreationThemeManifest",
+  "description": "First-party creation theme metadata and deterministic rendering tokens. A manifest contains no copied upstream templates or assets.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "manifestType",
+    "catalogVersion",
+    "id",
+    "version",
+    "displayName",
+    "description",
+    "status",
+    "category",
+    "tags",
+    "legacyIds",
+    "palette",
+    "typography",
+    "spacing",
+    "features",
+    "supportedComponentIds",
+    "renderers",
+    "compatibility",
+    "source",
+    "license"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "manifestType": { "const": "theme" },
+    "catalogVersion": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,79}$" },
+    "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "displayName": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "status": { "type": "string", "enum": ["active", "experimental", "deprecated"] },
+    "category": { "type": "string", "enum": ["longform", "tutorial", "commentary", "report", "lifestyle", "brand", "visual"] },
+    "tags": { "type": "array", "maxItems": 30, "items": { "type": "string", "minLength": 1, "maxLength": 60 }, "uniqueItems": true },
+    "legacyIds": { "type": "array", "maxItems": 20, "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,79}$" }, "uniqueItems": true },
+    "palette": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["accent", "accentSoft", "text", "muted", "border", "quote", "heading", "background"],
+      "properties": {
+        "accent": { "$ref": "#/$defs/color" },
+        "accentSoft": { "$ref": "#/$defs/color" },
+        "text": { "$ref": "#/$defs/color" },
+        "muted": { "$ref": "#/$defs/color" },
+        "border": { "$ref": "#/$defs/color" },
+        "quote": { "$ref": "#/$defs/color" },
+        "heading": { "$ref": "#/$defs/color" },
+        "background": { "$ref": "#/$defs/color" }
+      }
+    },
+    "typography": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["defaultFamily", "fallbackStack", "baseSize", "lineHeight", "headingWeight", "bodyWeight"],
+      "properties": {
+        "defaultFamily": { "type": "string", "enum": ["sans", "serif", "kaiti"] },
+        "fallbackStack": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "baseSize": { "type": "integer", "minimum": 10, "maximum": 32 },
+        "lineHeight": { "type": "number", "minimum": 1, "maximum": 3 },
+        "headingWeight": { "type": "integer", "minimum": 100, "maximum": 900, "multipleOf": 100 },
+        "bodyWeight": { "type": "integer", "minimum": 100, "maximum": 900, "multipleOf": 100 }
+      }
+    },
+    "spacing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paragraph", "section", "pageX", "pageY"],
+      "properties": {
+        "paragraph": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "section": { "type": "integer", "minimum": 0, "maximum": 200 },
+        "pageX": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "pageY": { "type": "integer", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["autoNumbering", "keywordUnderline", "tableOfContents", "introduction", "signature", "spanLeaf", "cjkSpacing", "externalLinkFootnotes"],
+      "properties": {
+        "autoNumbering": { "type": "boolean" },
+        "keywordUnderline": { "type": "boolean" },
+        "tableOfContents": { "type": "boolean" },
+        "introduction": { "type": "boolean" },
+        "signature": { "type": "boolean" },
+        "spanLeaf": { "type": "boolean" },
+        "cjkSpacing": { "type": "boolean" },
+        "externalLinkFootnotes": { "type": "boolean" }
+      }
+    },
+    "supportedComponentIds": { "type": "array", "maxItems": 100, "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,79}$" }, "uniqueItems": true },
+    "renderers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["markdown", "html", "wechatRichText"],
+      "properties": {
+        "markdown": { "type": "string", "pattern": "^[a-z][a-z0-9._-]{0,119}$" },
+        "html": { "type": "string", "pattern": "^[a-z][a-z0-9._-]{0,119}$" },
+        "wechatRichText": { "type": "string", "pattern": "^[a-z][a-z0-9._-]{0,119}$" }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targets", "wechatCertification", "minRuntimeVersion"],
+      "properties": {
+        "targets": { "type": "array", "minItems": 1, "items": { "type": "string", "enum": ["markdown", "html", "wechatRichText"] }, "uniqueItems": true },
+        "wechatCertification": { "type": "string", "enum": ["notApplicable", "legacyCompatible", "candidate", "certified"] },
+        "minRuntimeVersion": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" }
+      }
+    },
+    "source": { "$ref": "#/$defs/source" },
+    "license": { "$ref": "#/$defs/license" }
+  },
+  "$defs": {
+    "color": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy", "authoredBy", "repository", "upstreamCodeCopied", "researchBoundary"],
+      "properties": {
+        "policy": { "const": "yunspire_first_party" },
+        "authoredBy": { "const": "Yunspire" },
+        "repository": { "const": "https://github.com/Leo-sail/yunspire" },
+        "upstreamCodeCopied": { "const": false },
+        "researchBoundary": { "type": "string", "minLength": 1, "maxLength": 1000 }
+      }
+    },
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "notice", "thirdPartyAssets"],
+      "properties": {
+        "scope": { "const": "yunspire_first_party_project_asset" },
+        "notice": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "thirdPartyAssets": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 500 }, "uniqueItems": true }
+      }
+    }
+  }
+}

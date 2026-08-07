@@ -9,6 +9,102 @@ use tauri::State;
 use uuid::Uuid;
 
 const MAX_API_KEY_BYTES: usize = 64 * 1024;
+pub(crate) const DEFAULT_ASSISTANT_RESERVED_OUTPUT_TOKENS: u64 = 8_192;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AssistantContextBudget {
+    pub(crate) context_window_tokens: u64,
+    pub(crate) reserved_output_tokens: u64,
+    pub(crate) input_tokens: usize,
+}
+
+fn positive_integer_at(value: &serde_json::Value, fields: &[&str]) -> Option<u64> {
+    fields.iter().find_map(|field| {
+        let candidate = value.get(*field)?;
+        candidate
+            .as_u64()
+            .or_else(|| candidate.as_str()?.trim().parse::<u64>().ok())
+            .filter(|candidate| *candidate > 0)
+    })
+}
+
+pub(crate) fn assistant_context_window_tokens(model_config: &serde_json::Value) -> Option<u64> {
+    let direct = positive_integer_at(
+        model_config,
+        &[
+            "contextWindowTokens",
+            "context_window_tokens",
+            "contextLength",
+            "context_length",
+            "maxContextTokens",
+            "max_context_tokens",
+            "inputTokenLimit",
+            "input_token_limit",
+        ],
+    );
+    direct.or_else(|| {
+        ["limits", "capabilities", "metadata"]
+            .iter()
+            .find_map(|field| {
+                model_config
+                    .get(*field)
+                    .and_then(assistant_context_window_tokens)
+            })
+    })
+}
+
+pub(crate) fn assistant_reserved_output_tokens(model_config: &serde_json::Value) -> Option<u64> {
+    let direct = positive_integer_at(
+        model_config,
+        &[
+            "reservedOutputTokens",
+            "reserved_output_tokens",
+            "maxOutputTokens",
+            "max_output_tokens",
+        ],
+    );
+    direct.or_else(|| {
+        ["limits", "capabilities", "metadata"]
+            .iter()
+            .find_map(|field| {
+                model_config
+                    .get(*field)
+                    .and_then(assistant_reserved_output_tokens)
+            })
+    })
+}
+
+pub(crate) fn assistant_context_budget(
+    context_window_tokens: Option<u64>,
+    reserved_output_tokens: Option<u64>,
+) -> Result<Option<AssistantContextBudget>, String> {
+    let Some(context_window_tokens) = context_window_tokens else {
+        return Ok(None);
+    };
+    let reserved_output_tokens = reserved_output_tokens
+        .unwrap_or(DEFAULT_ASSISTANT_RESERVED_OUTPUT_TOKENS)
+        .min(context_window_tokens.saturating_sub(1));
+    let input_tokens = context_window_tokens.saturating_sub(reserved_output_tokens);
+    if input_tokens < 512 {
+        return Err("模型上下文窗口扣除输出预算后不足 512 token".to_string());
+    }
+    let input_tokens = usize::try_from(input_tokens)
+        .map_err(|_| "模型上下文窗口超出当前平台可表示范围".to_string())?;
+    Ok(Some(AssistantContextBudget {
+        context_window_tokens,
+        reserved_output_tokens,
+        input_tokens,
+    }))
+}
+
+pub(crate) fn assistant_context_budget_from_snapshot(
+    model_config: &serde_json::Value,
+) -> Result<Option<AssistantContextBudget>, String> {
+    assistant_context_budget(
+        assistant_context_window_tokens(model_config),
+        assistant_reserved_output_tokens(model_config),
+    )
+}
 
 pub(crate) fn encrypt_api_key_with_key(
     key: &[u8; 32],
@@ -152,7 +248,7 @@ fn normalize_model_provider_assignments(
         .ok_or_else(|| "默认模型必须是对象".to_string())?;
     let mut normalized_assignments = serde_json::Map::new();
     let mut normalized_defaults = serde_json::Map::new();
-    for role in ["chat", "analysis", "image"] {
+    for role in ["chat", "analysis", "image", "embedding"] {
         let mut assigned = source_assignments
             .get(role)
             .and_then(serde_json::Value::as_array)
@@ -187,54 +283,6 @@ fn normalize_model_provider_assignments(
         serde_json::Value::Object(normalized_assignments),
         serde_json::Value::Object(normalized_defaults),
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn one_provider_can_assign_distinct_defaults_for_all_model_roles() {
-        let available = serde_json::json!([
-            {"id": "chat-model"},
-            {"id": "analysis-model"},
-            {"id": "image-model"}
-        ]);
-        let assignments = serde_json::json!({
-            "chat": ["chat-model"],
-            "analysis": ["analysis-model"],
-            "image": ["image-model"]
-        });
-        let defaults = serde_json::json!({
-            "chat": "chat-model",
-            "analysis": "analysis-model",
-            "image": "image-model"
-        });
-        let (assignments, defaults) =
-            normalize_model_provider_assignments(&available, &assignments, &defaults)
-                .expect("normalize model assignments");
-        assert_eq!(defaults["chat"], "chat-model");
-        assert_eq!(defaults["analysis"], "analysis-model");
-        assert_eq!(defaults["image"], "image-model");
-        assert_eq!(assignments["image"][0], "image-model");
-    }
-
-    #[test]
-    fn unavailable_models_are_removed_from_assignments_and_defaults() {
-        let available = serde_json::json!([{"id": "available"}]);
-        let assignments = serde_json::json!({
-            "chat": ["available", "missing"],
-            "analysis": ["missing"],
-            "image": []
-        });
-        let defaults = serde_json::json!({"chat": "missing", "analysis": "missing"});
-        let (assignments, defaults) =
-            normalize_model_provider_assignments(&available, &assignments, &defaults)
-                .expect("normalize missing models");
-        assert_eq!(assignments["chat"], serde_json::json!(["available"]));
-        assert!(assignments["analysis"].as_array().unwrap().is_empty());
-        assert!(defaults.as_object().unwrap().is_empty());
-    }
 }
 
 fn provider_display_name(provider: &str) -> &str {

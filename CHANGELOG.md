@@ -8,7 +8,16 @@ This file records material public-version changes only. It excludes local valida
 
 ### 未发布
 
-_暂无。_
+- 完成 Hermes 融合 P0 任务契约与调度闭环：原生版本化类型 DAG、确定性 `all_of` 完成契约、不可变计划/证据、frontier、原子 claim、lease/reclaim、硬预算、只读并行、副作用屏障、父子取消栅栏和 Rust 可信步骤回执。
+- 完成 Hermes 融合 P1 能力编排主链路：AI助手使用 `capability-main -> verify-result` 计划，真实能力通过 `origin=runtime` 子命令执行；子命令绑定父任务/步骤/claim，不能复用模型凭证或扩大 capability、操作、Trace、Vault、路径、网络、声明范围和预算。
+- 强化调度 occurrence：每个到期时间创建稳定 occurrence 与 wrapper 任务；只有核验真实 Command Bus/Policy 子任务绑定后才确认派发，历史 occurrence 不随日程删除。
+- 完成 Hermes 融合 P1 反思与 Skill 记忆闭环：Skill 效果追加 `started/succeeded/failed/cancelled`，反思冻结效果快照并持久化 claim/lease/recovery；批准追加 `acceptance`，拒绝或重做追加 `correction`，候选、草稿和反馈按事务一致性更新。
+- 增加 schema 37 任务步骤运行表、schema 38 反思与 Skill 效果表、schema 39 反思候选绑定；公共 IPC 拒绝 Renderer 伪造保留的 runtime/scheduler 证据。
+- 增加 schema 40 任务恢复 replacement key 与唯一 replacement 任务绑定；自动恢复先封锁并取消旧父子任务和活动 claim，再创建和绑定新任务，同 key 重放幂等并拒绝绑定漂移。
+- 增加 schema 41 不可变 Runtime 副作用重放账本；优化候选 create、evaluate、apply、rollback 和反思候选原子审批五类 handler 强制使用精确 Runtime 上下文，按 command、handler 与规范请求哈希返回原提交结果并拒绝参数替换，completion key 避免重放重复结算可信用量。
+- 强化反思崩溃恢复：worker 先按反思 job 稳定 ID 复用原生候选，启动时从 `awaiting_review` job 与 `pending_review` candidate 恢复审阅草稿，不重新生成已持久化候选。
+- 保留 Hermes 融合会话记忆边界：入队时冻结五维 MemoryScope，拒绝跨会话作用域或完成回执替换原请求作用域。
+- 增加 schema 36 本地会话全文检索：SQLite FTS5 支持 ASCII/CJK 正文、严格工作区隔离、事务更新删除、旧版本回填和桌面端迟到查询失效。
 
 ### 0.1.2 - 2026-07-29
 
@@ -47,7 +56,16 @@ _暂无。_
 
 ### Unreleased
 
-_None._
+- Completed the Hermes-fusion P0 task-contract and scheduling loop: versioned typed DAGs, deterministic `all_of` completion contracts, immutable plans/evidence, frontier discovery, atomic claims, lease/reclaim, hard budgets, read-only fan-out, effectful barriers, parent-child cancellation fences, and Rust-generated trusted step receipts.
+- Completed the Hermes-fusion P1 orchestration path: the Assistant uses a `capability-main -> verify-result` plan and executes real work through `origin=runtime` child commands bound to the parent task/step/claim. Children cannot reuse model authority or expand capability, operation, trace, Vault/path/network/declared scope, or budget.
+- Strengthened native scheduling so every due timestamp creates a stable occurrence and wrapper task; dispatch completes only after Rust verifies real Command Bus/Policy child-task bindings, and schedule deletion retains occurrence history.
+- Completed the Hermes-fusion P1 reflection and Skill-memory loop: Skill effects append `started/succeeded/failed/cancelled`, reflection freezes effect snapshots and supports durable claim/lease/recovery, approval appends `acceptance`, and rejection or revision appends `correction` transactionally.
+- Added schema 37 task-step runtime tables, schema 38 reflection/Skill-effect tables, schema 39 reflection-candidate bindings, and public IPC rejection of forged runtime/scheduler evidence.
+- Added schema 40 recovery replacement keys and unique replacement-task bindings; automatic recovery fences and cancels the old parent, children, and active claim before creating and binding a new task, makes identical-key replay idempotent, and rejects binding drift.
+- Added the immutable schema 41 Runtime effect-mutation replay ledger. The five optimization handlers for candidate creation, evaluation, application, rollback, and atomic reflection approval now require exact Runtime context, return the original committed result by command, handler, and canonical request hash, reject parameter substitution, and use completion keys to avoid double-accounting trusted usage on replay.
+- Strengthened reflection crash recovery so workers reuse native candidates identified by the stable reflection-job ID and startup reconstructs review drafts from `awaiting_review` jobs bound to `pending_review` candidates instead of regenerating persisted candidates.
+- Retained the Hermes-fusion conversation-memory boundary: enqueue freezes the five-dimensional MemoryScope, and cross-session scope or completion-receipt substitution is rejected.
+- Added schema 36 local conversation full-text search: SQLite FTS5 covers ASCII/CJK bodies with strict workspace isolation, transactional refresh/deletion, legacy backfill, and stale-query invalidation in the desktop UI.
 
 ### 0.1.2 - 2026-07-29
 

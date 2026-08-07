@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "template",
+  "catalogVersion": "0.4.0",
+  "id": "xhs-list",
+  "version": "1.0.0",
+  "displayName": "小红书清单",
+  "description": "用短句、序号和选择理由整理一组值得保存的清单。",
+  "status": "active",
+  "contentType": "xiaohongshu",
+  "artifactType": "socialPost",
+  "tags": [
+    "小红书",
+    "清单",
+    "推荐",
+    "原创模板",
+    "本地知识库"
+  ],
+  "inputFormats": [
+    "plainText",
+    "markdown",
+    "image"
+  ],
+  "outputFormats": [
+    "markdown",
+    "html",
+    "png",
+    "jpeg"
+  ],
+  "entrypoint": "xhs-list/template.md",
+  "files": [
+    {
+      "path": "xhs-list/template.md",
+      "kind": "markdown",
+      "editable": true,
+      "contentHash": "sha256:056d84d5722d8de586e3f74cc1653e49966f1962dcf6f1220cb52cc5c4581d70"
+    }
+  ],
+  "editableSurfaces": [
+    "content"
+  ],
+  "agentCapabilities": [
+    "creation.generate",
+    "creation.edit"
+  ],
+  "sandbox": {
+    "network": false,
+    "shell": false,
+    "vaultWrite": false,
+    "allowTopNavigation": false,
+    "allowPopups": false,
+    "allowExternalScripts": false
+  },
+  "compatibility": {
+    "minRuntimeVersion": "0.1.2",
+    "previewMode": "sandboxedIframe"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This template is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire template manifest and Markdown entrypoint; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

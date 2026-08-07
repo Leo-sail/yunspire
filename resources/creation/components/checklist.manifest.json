@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "component",
+  "catalogVersion": "0.4.0",
+  "id": "checklist",
+  "version": "1.0.0",
+  "displayName": "核对清单",
+  "description": "把发布、交付或研究流程变成可勾选的检查项。",
+  "status": "active",
+  "category": "navigation",
+  "legacyIds": [],
+  "blockKind": "collection",
+  "slots": [
+    {
+      "id": "items",
+      "kind": "list",
+      "required": true,
+      "maxLength": 10000
+    }
+  ],
+  "semantics": {
+    "role": "list",
+    "ariaLabel": "核对清单",
+    "markdownFallback": "list"
+  },
+  "constraints": {
+    "minItems": 1,
+    "maxItems": 50,
+    "allowNestedComponents": false,
+    "spanLeaf": true,
+    "allowScripts": false,
+    "allowExternalStyles": false
+  },
+  "templateMarkdown": "### 核对清单\n\n- [ ] **内容准确：** [填写基于知识库的内容]\n- [ ] **来源完整：** [填写基于知识库的内容]\n- [ ] **目标端预览：** [填写基于知识库的内容]\n\n**来源：** [[替换为实际笔记标题]]",
+  "renderers": {
+    "markdown": "creation.component.checklist.markdown.v1",
+    "html": "creation.component.checklist.html.v1",
+    "wechatRichText": "creation.component.checklist.wechat.v1"
+  },
+  "compatibility": {
+    "targets": [
+      "markdown",
+      "html",
+      "wechatRichText"
+    ],
+    "minRuntimeVersion": "0.1.2"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This component is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire component manifest and Markdown block; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

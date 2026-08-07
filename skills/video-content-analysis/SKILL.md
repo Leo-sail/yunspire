@@ -15,8 +15,8 @@ description: Use Yunspire-owned media collection v2 for public or user-authorize
 4. 下载公开或授权页面暴露的直链与已结束的非加密 HLS；支持有限重试、清单初始化段和字节范围，但拒绝加密密钥、直播清单、DRM、验证码、账号权限或平台访问控制。
 5. 使用平台原生适配器提取音轨，并按时间连续扫描候选画面；依据亮度、纹理和场景差异去除空白帧与重复帧。关键帧总数不设上限，随视频中的有效场景自然增长。macOS 使用 AVFoundation、Speech Framework 与 Apple clang；Windows 使用随安装包部署的 Media Foundation 解码、WIC PNG 写入和本地 SAPI 听写，构建仅使用 Windows SDK/MSVC。Windows helper 不依赖运行时编译、网络服务或第三方二进制；缺少系统离线语音引擎时返回结构化错误，不能把未转写音频报告为成功。
 6. 将字幕、转录和全部关键帧作为不可信数据分批交给分析模型，再由模型合并摘要、标签、实体、视觉观察和引用；任何一批失败或返回空结果都不得进入 Obsidian 或数据库。授权凭据永不进入模型输入。
-7. 本地文件夹中的音视频自动进入同一条处理链，转录追加到文件分析结果，原媒体和帧附件等待统一 Obsidian 审批。
-8. 原视频和分析 Markdown 分开生成文件级 diff，用户审批后才写入 Obsidian。
+7. 本地文件夹中的音视频自动进入同一条处理链，转录追加到文件分析结果，原媒体和帧附件进入统一的 Obsidian 写入计划。
+8. 原视频、帧附件和分析 Markdown 分别生成可审计的文件级 diff；质量与策略门禁通过后按任务的 `autoExecute` 决策写入，只有策略要求审批时才等待用户确认。
 
 ## 输出
 

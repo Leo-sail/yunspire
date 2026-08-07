@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "component",
+  "catalogVersion": "0.4.0",
+  "id": "related-reading",
+  "version": "1.0.0",
+  "displayName": "延伸阅读",
+  "description": "推荐与当前内容有明确关系的本地笔记或已发布文章。",
+  "status": "active",
+  "category": "navigation",
+  "legacyIds": [],
+  "blockKind": "collection",
+  "slots": [
+    {
+      "id": "items",
+      "kind": "list",
+      "required": true,
+      "maxLength": 10000
+    }
+  ],
+  "semantics": {
+    "role": "list",
+    "ariaLabel": "延伸阅读",
+    "markdownFallback": "list"
+  },
+  "constraints": {
+    "minItems": 1,
+    "maxItems": 12,
+    "allowNestedComponents": false,
+    "spanLeaf": true,
+    "allowScripts": false,
+    "allowExternalStyles": false
+  },
+  "templateMarkdown": "### 延伸阅读\n\n- [ ] **背景阅读：** [填写基于知识库的内容]\n- [ ] **相反观点：** [填写基于知识库的内容]\n- [ ] **进阶材料：** [填写基于知识库的内容]\n\n**来源：** [[替换为实际笔记标题]]",
+  "renderers": {
+    "markdown": "creation.component.related-reading.markdown.v1",
+    "html": "creation.component.related-reading.html.v1",
+    "wechatRichText": "creation.component.related-reading.wechat.v1"
+  },
+  "compatibility": {
+    "targets": [
+      "markdown",
+      "html",
+      "wechatRichText"
+    ],
+    "minRuntimeVersion": "0.1.2"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This component is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire component manifest and Markdown block; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

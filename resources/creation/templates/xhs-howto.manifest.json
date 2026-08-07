@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "template",
+  "catalogVersion": "0.4.0",
+  "id": "xhs-howto",
+  "version": "1.0.0",
+  "displayName": "小红书教程笔记",
+  "description": "以强钩子、分步图解和收藏理由帮助读者快速上手。",
+  "status": "active",
+  "contentType": "xiaohongshu",
+  "artifactType": "socialPost",
+  "tags": [
+    "小红书",
+    "教程",
+    "收藏",
+    "原创模板",
+    "本地知识库"
+  ],
+  "inputFormats": [
+    "plainText",
+    "markdown",
+    "image"
+  ],
+  "outputFormats": [
+    "markdown",
+    "html",
+    "png",
+    "jpeg"
+  ],
+  "entrypoint": "xhs-howto/template.md",
+  "files": [
+    {
+      "path": "xhs-howto/template.md",
+      "kind": "markdown",
+      "editable": true,
+      "contentHash": "sha256:6a28a0d31a594a4091c318f0e17c7fb35e634da54768a4b2ddf0c3fc5574e193"
+    }
+  ],
+  "editableSurfaces": [
+    "content"
+  ],
+  "agentCapabilities": [
+    "creation.generate",
+    "creation.edit"
+  ],
+  "sandbox": {
+    "network": false,
+    "shell": false,
+    "vaultWrite": false,
+    "allowTopNavigation": false,
+    "allowPopups": false,
+    "allowExternalScripts": false
+  },
+  "compatibility": {
+    "minRuntimeVersion": "0.1.2",
+    "previewMode": "sandboxedIframe"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This template is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire template manifest and Markdown entrypoint; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

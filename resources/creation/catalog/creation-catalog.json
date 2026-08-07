@@ -1,0 +1,1026 @@
+{
+  "schemaVersion": "1.0",
+  "catalogVersion": "0.4.0",
+  "status": "active",
+  "resourceLayout": {
+    "themeManifests": "resources/creation/themes/*.manifest.json",
+    "componentManifests": "resources/creation/components/*.manifest.json",
+    "templateManifests": "resources/creation/templates/*.manifest.json",
+    "templateEntrypoints": "resources/creation/templates/*/template.md",
+    "writingResources": "resources/creation/catalog/writing-resources.json"
+  },
+  "coverage": {
+    "themes": {
+      "planned": 85,
+      "implemented": 85,
+      "wechatCertifiedPlanned": 48,
+      "wechatCertified": 0,
+      "legacyCompatible": 4
+    },
+    "components": {
+      "planned": 53,
+      "implemented": 53
+    },
+    "templates": {
+      "planned": 75,
+      "implemented": 75
+    },
+    "writingPatterns": {
+      "planned": 53,
+      "implemented": 53
+    },
+    "voices": {
+      "planned": 5,
+      "implemented": 5
+    },
+    "purposePresets": {
+      "planned": 9,
+      "implemented": 9
+    }
+  },
+  "resources": {
+    "themes": [
+      {
+        "id": "ink",
+        "manifest": "resources/creation/themes/ink.manifest.json"
+      },
+      {
+        "id": "jade",
+        "manifest": "resources/creation/themes/jade.manifest.json"
+      },
+      {
+        "id": "vermilion",
+        "manifest": "resources/creation/themes/vermilion.manifest.json"
+      },
+      {
+        "id": "graphite",
+        "manifest": "resources/creation/themes/graphite.manifest.json"
+      },
+      {
+        "id": "harbor-brief",
+        "manifest": "resources/creation/themes/harbor-brief.manifest.json"
+      },
+      {
+        "id": "harbor-narrative",
+        "manifest": "resources/creation/themes/harbor-narrative.manifest.json"
+      },
+      {
+        "id": "harbor-tutorial",
+        "manifest": "resources/creation/themes/harbor-tutorial.manifest.json"
+      },
+      {
+        "id": "harbor-commentary",
+        "manifest": "resources/creation/themes/harbor-commentary.manifest.json"
+      },
+      {
+        "id": "harbor-notebook",
+        "manifest": "resources/creation/themes/harbor-notebook.manifest.json"
+      },
+      {
+        "id": "harbor-campaign",
+        "manifest": "resources/creation/themes/harbor-campaign.manifest.json"
+      },
+      {
+        "id": "harbor-gallery",
+        "manifest": "resources/creation/themes/harbor-gallery.manifest.json"
+      },
+      {
+        "id": "harbor-research",
+        "manifest": "resources/creation/themes/harbor-research.manifest.json"
+      },
+      {
+        "id": "harbor-letter",
+        "manifest": "resources/creation/themes/harbor-letter.manifest.json"
+      },
+      {
+        "id": "forest-brief",
+        "manifest": "resources/creation/themes/forest-brief.manifest.json"
+      },
+      {
+        "id": "forest-narrative",
+        "manifest": "resources/creation/themes/forest-narrative.manifest.json"
+      },
+      {
+        "id": "forest-tutorial",
+        "manifest": "resources/creation/themes/forest-tutorial.manifest.json"
+      },
+      {
+        "id": "forest-commentary",
+        "manifest": "resources/creation/themes/forest-commentary.manifest.json"
+      },
+      {
+        "id": "forest-notebook",
+        "manifest": "resources/creation/themes/forest-notebook.manifest.json"
+      },
+      {
+        "id": "forest-campaign",
+        "manifest": "resources/creation/themes/forest-campaign.manifest.json"
+      },
+      {
+        "id": "forest-gallery",
+        "manifest": "resources/creation/themes/forest-gallery.manifest.json"
+      },
+      {
+        "id": "forest-research",
+        "manifest": "resources/creation/themes/forest-research.manifest.json"
+      },
+      {
+        "id": "forest-letter",
+        "manifest": "resources/creation/themes/forest-letter.manifest.json"
+      },
+      {
+        "id": "coral-brief",
+        "manifest": "resources/creation/themes/coral-brief.manifest.json"
+      },
+      {
+        "id": "coral-narrative",
+        "manifest": "resources/creation/themes/coral-narrative.manifest.json"
+      },
+      {
+        "id": "coral-tutorial",
+        "manifest": "resources/creation/themes/coral-tutorial.manifest.json"
+      },
+      {
+        "id": "coral-commentary",
+        "manifest": "resources/creation/themes/coral-commentary.manifest.json"
+      },
+      {
+        "id": "coral-notebook",
+        "manifest": "resources/creation/themes/coral-notebook.manifest.json"
+      },
+      {
+        "id": "coral-campaign",
+        "manifest": "resources/creation/themes/coral-campaign.manifest.json"
+      },
+      {
+        "id": "coral-gallery",
+        "manifest": "resources/creation/themes/coral-gallery.manifest.json"
+      },
+      {
+        "id": "coral-research",
+        "manifest": "resources/creation/themes/coral-research.manifest.json"
+      },
+      {
+        "id": "coral-letter",
+        "manifest": "resources/creation/themes/coral-letter.manifest.json"
+      },
+      {
+        "id": "orchid-brief",
+        "manifest": "resources/creation/themes/orchid-brief.manifest.json"
+      },
+      {
+        "id": "orchid-narrative",
+        "manifest": "resources/creation/themes/orchid-narrative.manifest.json"
+      },
+      {
+        "id": "orchid-tutorial",
+        "manifest": "resources/creation/themes/orchid-tutorial.manifest.json"
+      },
+      {
+        "id": "orchid-commentary",
+        "manifest": "resources/creation/themes/orchid-commentary.manifest.json"
+      },
+      {
+        "id": "orchid-notebook",
+        "manifest": "resources/creation/themes/orchid-notebook.manifest.json"
+      },
+      {
+        "id": "orchid-campaign",
+        "manifest": "resources/creation/themes/orchid-campaign.manifest.json"
+      },
+      {
+        "id": "orchid-gallery",
+        "manifest": "resources/creation/themes/orchid-gallery.manifest.json"
+      },
+      {
+        "id": "orchid-research",
+        "manifest": "resources/creation/themes/orchid-research.manifest.json"
+      },
+      {
+        "id": "orchid-letter",
+        "manifest": "resources/creation/themes/orchid-letter.manifest.json"
+      },
+      {
+        "id": "amber-brief",
+        "manifest": "resources/creation/themes/amber-brief.manifest.json"
+      },
+      {
+        "id": "amber-narrative",
+        "manifest": "resources/creation/themes/amber-narrative.manifest.json"
+      },
+      {
+        "id": "amber-tutorial",
+        "manifest": "resources/creation/themes/amber-tutorial.manifest.json"
+      },
+      {
+        "id": "amber-commentary",
+        "manifest": "resources/creation/themes/amber-commentary.manifest.json"
+      },
+      {
+        "id": "amber-notebook",
+        "manifest": "resources/creation/themes/amber-notebook.manifest.json"
+      },
+      {
+        "id": "amber-campaign",
+        "manifest": "resources/creation/themes/amber-campaign.manifest.json"
+      },
+      {
+        "id": "amber-gallery",
+        "manifest": "resources/creation/themes/amber-gallery.manifest.json"
+      },
+      {
+        "id": "amber-research",
+        "manifest": "resources/creation/themes/amber-research.manifest.json"
+      },
+      {
+        "id": "amber-letter",
+        "manifest": "resources/creation/themes/amber-letter.manifest.json"
+      },
+      {
+        "id": "tide-brief",
+        "manifest": "resources/creation/themes/tide-brief.manifest.json"
+      },
+      {
+        "id": "tide-narrative",
+        "manifest": "resources/creation/themes/tide-narrative.manifest.json"
+      },
+      {
+        "id": "tide-tutorial",
+        "manifest": "resources/creation/themes/tide-tutorial.manifest.json"
+      },
+      {
+        "id": "tide-commentary",
+        "manifest": "resources/creation/themes/tide-commentary.manifest.json"
+      },
+      {
+        "id": "tide-notebook",
+        "manifest": "resources/creation/themes/tide-notebook.manifest.json"
+      },
+      {
+        "id": "tide-campaign",
+        "manifest": "resources/creation/themes/tide-campaign.manifest.json"
+      },
+      {
+        "id": "tide-gallery",
+        "manifest": "resources/creation/themes/tide-gallery.manifest.json"
+      },
+      {
+        "id": "tide-research",
+        "manifest": "resources/creation/themes/tide-research.manifest.json"
+      },
+      {
+        "id": "tide-letter",
+        "manifest": "resources/creation/themes/tide-letter.manifest.json"
+      },
+      {
+        "id": "rose-brief",
+        "manifest": "resources/creation/themes/rose-brief.manifest.json"
+      },
+      {
+        "id": "rose-narrative",
+        "manifest": "resources/creation/themes/rose-narrative.manifest.json"
+      },
+      {
+        "id": "rose-tutorial",
+        "manifest": "resources/creation/themes/rose-tutorial.manifest.json"
+      },
+      {
+        "id": "rose-commentary",
+        "manifest": "resources/creation/themes/rose-commentary.manifest.json"
+      },
+      {
+        "id": "rose-notebook",
+        "manifest": "resources/creation/themes/rose-notebook.manifest.json"
+      },
+      {
+        "id": "rose-campaign",
+        "manifest": "resources/creation/themes/rose-campaign.manifest.json"
+      },
+      {
+        "id": "rose-gallery",
+        "manifest": "resources/creation/themes/rose-gallery.manifest.json"
+      },
+      {
+        "id": "rose-research",
+        "manifest": "resources/creation/themes/rose-research.manifest.json"
+      },
+      {
+        "id": "rose-letter",
+        "manifest": "resources/creation/themes/rose-letter.manifest.json"
+      },
+      {
+        "id": "frost-brief",
+        "manifest": "resources/creation/themes/frost-brief.manifest.json"
+      },
+      {
+        "id": "frost-narrative",
+        "manifest": "resources/creation/themes/frost-narrative.manifest.json"
+      },
+      {
+        "id": "frost-tutorial",
+        "manifest": "resources/creation/themes/frost-tutorial.manifest.json"
+      },
+      {
+        "id": "frost-commentary",
+        "manifest": "resources/creation/themes/frost-commentary.manifest.json"
+      },
+      {
+        "id": "frost-notebook",
+        "manifest": "resources/creation/themes/frost-notebook.manifest.json"
+      },
+      {
+        "id": "frost-campaign",
+        "manifest": "resources/creation/themes/frost-campaign.manifest.json"
+      },
+      {
+        "id": "frost-gallery",
+        "manifest": "resources/creation/themes/frost-gallery.manifest.json"
+      },
+      {
+        "id": "frost-research",
+        "manifest": "resources/creation/themes/frost-research.manifest.json"
+      },
+      {
+        "id": "frost-letter",
+        "manifest": "resources/creation/themes/frost-letter.manifest.json"
+      },
+      {
+        "id": "moss-brief",
+        "manifest": "resources/creation/themes/moss-brief.manifest.json"
+      },
+      {
+        "id": "moss-narrative",
+        "manifest": "resources/creation/themes/moss-narrative.manifest.json"
+      },
+      {
+        "id": "moss-tutorial",
+        "manifest": "resources/creation/themes/moss-tutorial.manifest.json"
+      },
+      {
+        "id": "moss-commentary",
+        "manifest": "resources/creation/themes/moss-commentary.manifest.json"
+      },
+      {
+        "id": "moss-notebook",
+        "manifest": "resources/creation/themes/moss-notebook.manifest.json"
+      },
+      {
+        "id": "moss-campaign",
+        "manifest": "resources/creation/themes/moss-campaign.manifest.json"
+      },
+      {
+        "id": "moss-gallery",
+        "manifest": "resources/creation/themes/moss-gallery.manifest.json"
+      },
+      {
+        "id": "moss-research",
+        "manifest": "resources/creation/themes/moss-research.manifest.json"
+      },
+      {
+        "id": "moss-letter",
+        "manifest": "resources/creation/themes/moss-letter.manifest.json"
+      }
+    ],
+    "components": [
+      {
+        "id": "lead",
+        "manifest": "resources/creation/components/lead.manifest.json"
+      },
+      {
+        "id": "quote",
+        "manifest": "resources/creation/components/quote.manifest.json"
+      },
+      {
+        "id": "notice",
+        "manifest": "resources/creation/components/notice.manifest.json"
+      },
+      {
+        "id": "steps",
+        "manifest": "resources/creation/components/steps.manifest.json"
+      },
+      {
+        "id": "metrics",
+        "manifest": "resources/creation/components/metrics.manifest.json"
+      },
+      {
+        "id": "compare",
+        "manifest": "resources/creation/components/compare.manifest.json"
+      },
+      {
+        "id": "dialogue",
+        "manifest": "resources/creation/components/dialogue.manifest.json"
+      },
+      {
+        "id": "timeline",
+        "manifest": "resources/creation/components/timeline.manifest.json"
+      },
+      {
+        "id": "divider",
+        "manifest": "resources/creation/components/divider.manifest.json"
+      },
+      {
+        "id": "cta",
+        "manifest": "resources/creation/components/cta.manifest.json"
+      },
+      {
+        "id": "outline",
+        "manifest": "resources/creation/components/outline.manifest.json"
+      },
+      {
+        "id": "abstract",
+        "manifest": "resources/creation/components/abstract.manifest.json"
+      },
+      {
+        "id": "key-points",
+        "manifest": "resources/creation/components/key-points.manifest.json"
+      },
+      {
+        "id": "contents",
+        "manifest": "resources/creation/components/contents.manifest.json"
+      },
+      {
+        "id": "introduction",
+        "manifest": "resources/creation/components/introduction.manifest.json"
+      },
+      {
+        "id": "conclusion",
+        "manifest": "resources/creation/components/conclusion.manifest.json"
+      },
+      {
+        "id": "section-summary",
+        "manifest": "resources/creation/components/section-summary.manifest.json"
+      },
+      {
+        "id": "executive-summary",
+        "manifest": "resources/creation/components/executive-summary.manifest.json"
+      },
+      {
+        "id": "premise",
+        "manifest": "resources/creation/components/premise.manifest.json"
+      },
+      {
+        "id": "definition",
+        "manifest": "resources/creation/components/definition.manifest.json"
+      },
+      {
+        "id": "context",
+        "manifest": "resources/creation/components/context.manifest.json"
+      },
+      {
+        "id": "evidence",
+        "manifest": "resources/creation/components/evidence.manifest.json"
+      },
+      {
+        "id": "source-note",
+        "manifest": "resources/creation/components/source-note.manifest.json"
+      },
+      {
+        "id": "fact-check",
+        "manifest": "resources/creation/components/fact-check.manifest.json"
+      },
+      {
+        "id": "warning",
+        "manifest": "resources/creation/components/warning.manifest.json"
+      },
+      {
+        "id": "tip",
+        "manifest": "resources/creation/components/tip.manifest.json"
+      },
+      {
+        "id": "example",
+        "manifest": "resources/creation/components/example.manifest.json"
+      },
+      {
+        "id": "case-study",
+        "manifest": "resources/creation/components/case-study.manifest.json"
+      },
+      {
+        "id": "faq",
+        "manifest": "resources/creation/components/faq.manifest.json"
+      },
+      {
+        "id": "checklist",
+        "manifest": "resources/creation/components/checklist.manifest.json"
+      },
+      {
+        "id": "decision-matrix",
+        "manifest": "resources/creation/components/decision-matrix.manifest.json"
+      },
+      {
+        "id": "pros-cons",
+        "manifest": "resources/creation/components/pros-cons.manifest.json"
+      },
+      {
+        "id": "before-after",
+        "manifest": "resources/creation/components/before-after.manifest.json"
+      },
+      {
+        "id": "process",
+        "manifest": "resources/creation/components/process.manifest.json"
+      },
+      {
+        "id": "milestone",
+        "manifest": "resources/creation/components/milestone.manifest.json"
+      },
+      {
+        "id": "schedule",
+        "manifest": "resources/creation/components/schedule.manifest.json"
+      },
+      {
+        "id": "roadmap",
+        "manifest": "resources/creation/components/roadmap.manifest.json"
+      },
+      {
+        "id": "chronology",
+        "manifest": "resources/creation/components/chronology.manifest.json"
+      },
+      {
+        "id": "interview",
+        "manifest": "resources/creation/components/interview.manifest.json"
+      },
+      {
+        "id": "debate",
+        "manifest": "resources/creation/components/debate.manifest.json"
+      },
+      {
+        "id": "testimonial",
+        "manifest": "resources/creation/components/testimonial.manifest.json"
+      },
+      {
+        "id": "figure",
+        "manifest": "resources/creation/components/figure.manifest.json"
+      },
+      {
+        "id": "image-gallery",
+        "manifest": "resources/creation/components/image-gallery.manifest.json"
+      },
+      {
+        "id": "cover-card",
+        "manifest": "resources/creation/components/cover-card.manifest.json"
+      },
+      {
+        "id": "infographic",
+        "manifest": "resources/creation/components/infographic.manifest.json"
+      },
+      {
+        "id": "video-card",
+        "manifest": "resources/creation/components/video-card.manifest.json"
+      },
+      {
+        "id": "data-table",
+        "manifest": "resources/creation/components/data-table.manifest.json"
+      },
+      {
+        "id": "formula",
+        "manifest": "resources/creation/components/formula.manifest.json"
+      },
+      {
+        "id": "code-snippet",
+        "manifest": "resources/creation/components/code-snippet.manifest.json"
+      },
+      {
+        "id": "footnotes",
+        "manifest": "resources/creation/components/footnotes.manifest.json"
+      },
+      {
+        "id": "author-signature",
+        "manifest": "resources/creation/components/author-signature.manifest.json"
+      },
+      {
+        "id": "related-reading",
+        "manifest": "resources/creation/components/related-reading.manifest.json"
+      },
+      {
+        "id": "next-steps",
+        "manifest": "resources/creation/components/next-steps.manifest.json"
+      }
+    ],
+    "templates": [
+      {
+        "id": "deep-dive-analysis",
+        "manifest": "resources/creation/templates/deep-dive-analysis.manifest.json",
+        "entrypoint": "resources/creation/templates/deep-dive-analysis/template.md"
+      },
+      {
+        "id": "industry-observation",
+        "manifest": "resources/creation/templates/industry-observation.manifest.json",
+        "entrypoint": "resources/creation/templates/industry-observation/template.md"
+      },
+      {
+        "id": "knowledge-explainer",
+        "manifest": "resources/creation/templates/knowledge-explainer.manifest.json",
+        "entrypoint": "resources/creation/templates/knowledge-explainer/template.md"
+      },
+      {
+        "id": "case-review",
+        "manifest": "resources/creation/templates/case-review.manifest.json",
+        "entrypoint": "resources/creation/templates/case-review/template.md"
+      },
+      {
+        "id": "decision-guide",
+        "manifest": "resources/creation/templates/decision-guide.manifest.json",
+        "entrypoint": "resources/creation/templates/decision-guide/template.md"
+      },
+      {
+        "id": "product-comparison",
+        "manifest": "resources/creation/templates/product-comparison.manifest.json",
+        "entrypoint": "resources/creation/templates/product-comparison/template.md"
+      },
+      {
+        "id": "trend-forecast",
+        "manifest": "resources/creation/templates/trend-forecast.manifest.json",
+        "entrypoint": "resources/creation/templates/trend-forecast/template.md"
+      },
+      {
+        "id": "interview-feature",
+        "manifest": "resources/creation/templates/interview-feature.manifest.json",
+        "entrypoint": "resources/creation/templates/interview-feature/template.md"
+      },
+      {
+        "id": "field-notes",
+        "manifest": "resources/creation/templates/field-notes.manifest.json",
+        "entrypoint": "resources/creation/templates/field-notes/template.md"
+      },
+      {
+        "id": "book-insight",
+        "manifest": "resources/creation/templates/book-insight.manifest.json",
+        "entrypoint": "resources/creation/templates/book-insight/template.md"
+      },
+      {
+        "id": "course-notes",
+        "manifest": "resources/creation/templates/course-notes.manifest.json",
+        "entrypoint": "resources/creation/templates/course-notes/template.md"
+      },
+      {
+        "id": "data-story",
+        "manifest": "resources/creation/templates/data-story.manifest.json",
+        "entrypoint": "resources/creation/templates/data-story/template.md"
+      },
+      {
+        "id": "policy-brief",
+        "manifest": "resources/creation/templates/policy-brief.manifest.json",
+        "entrypoint": "resources/creation/templates/policy-brief/template.md"
+      },
+      {
+        "id": "problem-solution",
+        "manifest": "resources/creation/templates/problem-solution.manifest.json",
+        "entrypoint": "resources/creation/templates/problem-solution/template.md"
+      },
+      {
+        "id": "weekly-digest",
+        "manifest": "resources/creation/templates/weekly-digest.manifest.json",
+        "entrypoint": "resources/creation/templates/weekly-digest/template.md"
+      },
+      {
+        "id": "wechat-depth",
+        "manifest": "resources/creation/templates/wechat-depth.manifest.json",
+        "entrypoint": "resources/creation/templates/wechat-depth/template.md"
+      },
+      {
+        "id": "wechat-hot-commentary",
+        "manifest": "resources/creation/templates/wechat-hot-commentary.manifest.json",
+        "entrypoint": "resources/creation/templates/wechat-hot-commentary/template.md"
+      },
+      {
+        "id": "wechat-tutorial",
+        "manifest": "resources/creation/templates/wechat-tutorial.manifest.json",
+        "entrypoint": "resources/creation/templates/wechat-tutorial/template.md"
+      },
+      {
+        "id": "wechat-case-study",
+        "manifest": "resources/creation/templates/wechat-case-study.manifest.json",
+        "entrypoint": "resources/creation/templates/wechat-case-study/template.md"
+      },
+      {
+        "id": "wechat-interview",
+        "manifest": "resources/creation/templates/wechat-interview.manifest.json",
+        "entrypoint": "resources/creation/templates/wechat-interview/template.md"
+      },
+      {
+        "id": "wechat-listicle",
+        "manifest": "resources/creation/templates/wechat-listicle.manifest.json",
+        "entrypoint": "resources/creation/templates/wechat-listicle/template.md"
+      },
+      {
+        "id": "wechat-brand-story",
+        "manifest": "resources/creation/templates/wechat-brand-story.manifest.json",
+        "entrypoint": "resources/creation/templates/wechat-brand-story/template.md"
+      },
+      {
+        "id": "wechat-event-recap",
+        "manifest": "resources/creation/templates/wechat-event-recap.manifest.json",
+        "entrypoint": "resources/creation/templates/wechat-event-recap/template.md"
+      },
+      {
+        "id": "wechat-product-release",
+        "manifest": "resources/creation/templates/wechat-product-release.manifest.json",
+        "entrypoint": "resources/creation/templates/wechat-product-release/template.md"
+      },
+      {
+        "id": "wechat-research-summary",
+        "manifest": "resources/creation/templates/wechat-research-summary.manifest.json",
+        "entrypoint": "resources/creation/templates/wechat-research-summary/template.md"
+      },
+      {
+        "id": "wechat-book-club",
+        "manifest": "resources/creation/templates/wechat-book-club.manifest.json",
+        "entrypoint": "resources/creation/templates/wechat-book-club/template.md"
+      },
+      {
+        "id": "wechat-newsletter",
+        "manifest": "resources/creation/templates/wechat-newsletter.manifest.json",
+        "entrypoint": "resources/creation/templates/wechat-newsletter/template.md"
+      },
+      {
+        "id": "wechat-faq",
+        "manifest": "resources/creation/templates/wechat-faq.manifest.json",
+        "entrypoint": "resources/creation/templates/wechat-faq/template.md"
+      },
+      {
+        "id": "wechat-opinion",
+        "manifest": "resources/creation/templates/wechat-opinion.manifest.json",
+        "entrypoint": "resources/creation/templates/wechat-opinion/template.md"
+      },
+      {
+        "id": "wechat-community",
+        "manifest": "resources/creation/templates/wechat-community.manifest.json",
+        "entrypoint": "resources/creation/templates/wechat-community/template.md"
+      },
+      {
+        "id": "xhs-howto",
+        "manifest": "resources/creation/templates/xhs-howto.manifest.json",
+        "entrypoint": "resources/creation/templates/xhs-howto/template.md"
+      },
+      {
+        "id": "xhs-list",
+        "manifest": "resources/creation/templates/xhs-list.manifest.json",
+        "entrypoint": "resources/creation/templates/xhs-list/template.md"
+      },
+      {
+        "id": "xhs-review",
+        "manifest": "resources/creation/templates/xhs-review.manifest.json",
+        "entrypoint": "resources/creation/templates/xhs-review/template.md"
+      },
+      {
+        "id": "xhs-comparison",
+        "manifest": "resources/creation/templates/xhs-comparison.manifest.json",
+        "entrypoint": "resources/creation/templates/xhs-comparison/template.md"
+      },
+      {
+        "id": "xhs-before-after",
+        "manifest": "resources/creation/templates/xhs-before-after.manifest.json",
+        "entrypoint": "resources/creation/templates/xhs-before-after/template.md"
+      },
+      {
+        "id": "xhs-itinerary",
+        "manifest": "resources/creation/templates/xhs-itinerary.manifest.json",
+        "entrypoint": "resources/creation/templates/xhs-itinerary/template.md"
+      },
+      {
+        "id": "xhs-recipe",
+        "manifest": "resources/creation/templates/xhs-recipe.manifest.json",
+        "entrypoint": "resources/creation/templates/xhs-recipe/template.md"
+      },
+      {
+        "id": "xhs-fitness",
+        "manifest": "resources/creation/templates/xhs-fitness.manifest.json",
+        "entrypoint": "resources/creation/templates/xhs-fitness/template.md"
+      },
+      {
+        "id": "xhs-study",
+        "manifest": "resources/creation/templates/xhs-study.manifest.json",
+        "entrypoint": "resources/creation/templates/xhs-study/template.md"
+      },
+      {
+        "id": "xhs-workplace",
+        "manifest": "resources/creation/templates/xhs-workplace.manifest.json",
+        "entrypoint": "resources/creation/templates/xhs-workplace/template.md"
+      },
+      {
+        "id": "xhs-home",
+        "manifest": "resources/creation/templates/xhs-home.manifest.json",
+        "entrypoint": "resources/creation/templates/xhs-home/template.md"
+      },
+      {
+        "id": "xhs-beauty",
+        "manifest": "resources/creation/templates/xhs-beauty.manifest.json",
+        "entrypoint": "resources/creation/templates/xhs-beauty/template.md"
+      },
+      {
+        "id": "xhs-parenting",
+        "manifest": "resources/creation/templates/xhs-parenting.manifest.json",
+        "entrypoint": "resources/creation/templates/xhs-parenting/template.md"
+      },
+      {
+        "id": "xhs-digital",
+        "manifest": "resources/creation/templates/xhs-digital.manifest.json",
+        "entrypoint": "resources/creation/templates/xhs-digital/template.md"
+      },
+      {
+        "id": "xhs-shopping-guide",
+        "manifest": "resources/creation/templates/xhs-shopping-guide.manifest.json",
+        "entrypoint": "resources/creation/templates/xhs-shopping-guide/template.md"
+      },
+      {
+        "id": "service-agreement",
+        "manifest": "resources/creation/templates/service-agreement.manifest.json",
+        "entrypoint": "resources/creation/templates/service-agreement/template.md"
+      },
+      {
+        "id": "procurement-agreement",
+        "manifest": "resources/creation/templates/procurement-agreement.manifest.json",
+        "entrypoint": "resources/creation/templates/procurement-agreement/template.md"
+      },
+      {
+        "id": "consulting-agreement",
+        "manifest": "resources/creation/templates/consulting-agreement.manifest.json",
+        "entrypoint": "resources/creation/templates/consulting-agreement/template.md"
+      },
+      {
+        "id": "nda-mutual",
+        "manifest": "resources/creation/templates/nda-mutual.manifest.json",
+        "entrypoint": "resources/creation/templates/nda-mutual/template.md"
+      },
+      {
+        "id": "employment-offer",
+        "manifest": "resources/creation/templates/employment-offer.manifest.json",
+        "entrypoint": "resources/creation/templates/employment-offer/template.md"
+      },
+      {
+        "id": "software-development",
+        "manifest": "resources/creation/templates/software-development.manifest.json",
+        "entrypoint": "resources/creation/templates/software-development/template.md"
+      },
+      {
+        "id": "content-licensing",
+        "manifest": "resources/creation/templates/content-licensing.manifest.json",
+        "entrypoint": "resources/creation/templates/content-licensing/template.md"
+      },
+      {
+        "id": "brand-collaboration",
+        "manifest": "resources/creation/templates/brand-collaboration.manifest.json",
+        "entrypoint": "resources/creation/templates/brand-collaboration/template.md"
+      },
+      {
+        "id": "lease-agreement",
+        "manifest": "resources/creation/templates/lease-agreement.manifest.json",
+        "entrypoint": "resources/creation/templates/lease-agreement/template.md"
+      },
+      {
+        "id": "loan-agreement",
+        "manifest": "resources/creation/templates/loan-agreement.manifest.json",
+        "entrypoint": "resources/creation/templates/loan-agreement/template.md"
+      },
+      {
+        "id": "partnership-mou",
+        "manifest": "resources/creation/templates/partnership-mou.manifest.json",
+        "entrypoint": "resources/creation/templates/partnership-mou/template.md"
+      },
+      {
+        "id": "data-processing",
+        "manifest": "resources/creation/templates/data-processing.manifest.json",
+        "entrypoint": "resources/creation/templates/data-processing/template.md"
+      },
+      {
+        "id": "maintenance-agreement",
+        "manifest": "resources/creation/templates/maintenance-agreement.manifest.json",
+        "entrypoint": "resources/creation/templates/maintenance-agreement/template.md"
+      },
+      {
+        "id": "event-services",
+        "manifest": "resources/creation/templates/event-services.manifest.json",
+        "entrypoint": "resources/creation/templates/event-services/template.md"
+      },
+      {
+        "id": "project-acceptance",
+        "manifest": "resources/creation/templates/project-acceptance.manifest.json",
+        "entrypoint": "resources/creation/templates/project-acceptance/template.md"
+      },
+      {
+        "id": "empirical-study",
+        "manifest": "resources/creation/templates/empirical-study.manifest.json",
+        "entrypoint": "resources/creation/templates/empirical-study/template.md"
+      },
+      {
+        "id": "literature-review",
+        "manifest": "resources/creation/templates/literature-review.manifest.json",
+        "entrypoint": "resources/creation/templates/literature-review/template.md"
+      },
+      {
+        "id": "theoretical-paper",
+        "manifest": "resources/creation/templates/theoretical-paper.manifest.json",
+        "entrypoint": "resources/creation/templates/theoretical-paper/template.md"
+      },
+      {
+        "id": "case-study-paper",
+        "manifest": "resources/creation/templates/case-study-paper.manifest.json",
+        "entrypoint": "resources/creation/templates/case-study-paper/template.md"
+      },
+      {
+        "id": "survey-report",
+        "manifest": "resources/creation/templates/survey-report.manifest.json",
+        "entrypoint": "resources/creation/templates/survey-report/template.md"
+      },
+      {
+        "id": "experimental-report",
+        "manifest": "resources/creation/templates/experimental-report.manifest.json",
+        "entrypoint": "resources/creation/templates/experimental-report/template.md"
+      },
+      {
+        "id": "methodology-paper",
+        "manifest": "resources/creation/templates/methodology-paper.manifest.json",
+        "entrypoint": "resources/creation/templates/methodology-paper/template.md"
+      },
+      {
+        "id": "policy-paper",
+        "manifest": "resources/creation/templates/policy-paper.manifest.json",
+        "entrypoint": "resources/creation/templates/policy-paper/template.md"
+      },
+      {
+        "id": "technical-whitepaper",
+        "manifest": "resources/creation/templates/technical-whitepaper.manifest.json",
+        "entrypoint": "resources/creation/templates/technical-whitepaper/template.md"
+      },
+      {
+        "id": "graduation-thesis",
+        "manifest": "resources/creation/templates/graduation-thesis.manifest.json",
+        "entrypoint": "resources/creation/templates/graduation-thesis/template.md"
+      },
+      {
+        "id": "conference-paper",
+        "manifest": "resources/creation/templates/conference-paper.manifest.json",
+        "entrypoint": "resources/creation/templates/conference-paper/template.md"
+      },
+      {
+        "id": "journal-article",
+        "manifest": "resources/creation/templates/journal-article.manifest.json",
+        "entrypoint": "resources/creation/templates/journal-article/template.md"
+      },
+      {
+        "id": "research-proposal",
+        "manifest": "resources/creation/templates/research-proposal.manifest.json",
+        "entrypoint": "resources/creation/templates/research-proposal/template.md"
+      },
+      {
+        "id": "systematic-review",
+        "manifest": "resources/creation/templates/systematic-review.manifest.json",
+        "entrypoint": "resources/creation/templates/systematic-review/template.md"
+      },
+      {
+        "id": "data-analysis-report",
+        "manifest": "resources/creation/templates/data-analysis-report.manifest.json",
+        "entrypoint": "resources/creation/templates/data-analysis-report/template.md"
+      }
+    ],
+    "writingResources": {
+      "catalog": "resources/creation/catalog/writing-resources.json",
+      "writingPatterns": 53,
+      "voices": 5,
+      "purposePresets": 9
+    }
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "upstreamPromptsCopied": false,
+    "upstreamAssetsCopied": false
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "The catalog, manifests, component Markdown, and template entrypoints are original Yunspire project assets governed by the repository LICENSE. No third-party templates, prompts, wording, code, or visual assets are bundled."
+  },
+  "researchBoundaries": [
+    {
+      "repository": "https://github.com/MrGeDiao/shuorenhua",
+      "use": "capabilityResearchOnly",
+      "bundled": false
+    },
+    {
+      "repository": "https://github.com/Aboudjem/humanizer-skill",
+      "use": "capabilityResearchOnly",
+      "bundled": false
+    },
+    {
+      "repository": "https://github.com/isjiamu/gzh-design-skill",
+      "use": "capabilityResearchOnly",
+      "bundled": false
+    },
+    {
+      "repository": "https://github.com/geekjourneyx/md2wechat-skill",
+      "use": "capabilityResearchOnly",
+      "bundled": false
+    },
+    {
+      "repository": "https://github.com/xiaohuailabs/xiaohu-wechat-format",
+      "use": "capabilityResearchOnly",
+      "bundled": false
+    },
+    {
+      "repository": "https://github.com/nexu-io/html-anything",
+      "use": "capabilityResearchOnly",
+      "bundled": false
+    }
+  ]
+}

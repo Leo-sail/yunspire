@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "template",
+  "catalogVersion": "0.4.0",
+  "id": "xhs-beauty",
+  "version": "1.0.0",
+  "displayName": "小红书护理记录",
+  "description": "以周期、肤质或使用条件记录护理体验和注意事项。",
+  "status": "active",
+  "contentType": "xiaohongshu",
+  "artifactType": "socialPost",
+  "tags": [
+    "小红书",
+    "护理",
+    "记录",
+    "原创模板",
+    "本地知识库"
+  ],
+  "inputFormats": [
+    "plainText",
+    "markdown",
+    "image"
+  ],
+  "outputFormats": [
+    "markdown",
+    "html",
+    "png",
+    "jpeg"
+  ],
+  "entrypoint": "xhs-beauty/template.md",
+  "files": [
+    {
+      "path": "xhs-beauty/template.md",
+      "kind": "markdown",
+      "editable": true,
+      "contentHash": "sha256:5b0744b5fc661349c2afe6969c5c94cc7ec014d03b609c512ee9a260ac2a4cf6"
+    }
+  ],
+  "editableSurfaces": [
+    "content"
+  ],
+  "agentCapabilities": [
+    "creation.generate",
+    "creation.edit"
+  ],
+  "sandbox": {
+    "network": false,
+    "shell": false,
+    "vaultWrite": false,
+    "allowTopNavigation": false,
+    "allowPopups": false,
+    "allowExternalScripts": false
+  },
+  "compatibility": {
+    "minRuntimeVersion": "0.1.2",
+    "previewMode": "sandboxedIframe"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This template is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire template manifest and Markdown entrypoint; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

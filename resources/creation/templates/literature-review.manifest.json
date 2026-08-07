@@ -1,0 +1,71 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "template",
+  "catalogVersion": "0.4.0",
+  "id": "literature-review",
+  "version": "1.0.0",
+  "displayName": "文献综述",
+  "description": "按主题、方法和争议梳理已有研究，而不是简单罗列摘要。",
+  "status": "active",
+  "contentType": "paper",
+  "artifactType": "report",
+  "tags": [
+    "论文",
+    "综述",
+    "文献",
+    "原创模板",
+    "本地知识库"
+  ],
+  "inputFormats": [
+    "plainText",
+    "markdown",
+    "docx",
+    "xlsx",
+    "pdf"
+  ],
+  "outputFormats": [
+    "markdown",
+    "html",
+    "pdf"
+  ],
+  "entrypoint": "literature-review/template.md",
+  "files": [
+    {
+      "path": "literature-review/template.md",
+      "kind": "markdown",
+      "editable": true,
+      "contentHash": "sha256:5aac34507a854097d88c8009ec35e7bbe0fd4c7917fd7e41ec315e6cfc19161b"
+    }
+  ],
+  "editableSurfaces": [
+    "content"
+  ],
+  "agentCapabilities": [
+    "creation.generate",
+    "creation.edit"
+  ],
+  "sandbox": {
+    "network": false,
+    "shell": false,
+    "vaultWrite": false,
+    "allowTopNavigation": false,
+    "allowPopups": false,
+    "allowExternalScripts": false
+  },
+  "compatibility": {
+    "minRuntimeVersion": "0.1.2",
+    "previewMode": "sandboxedIframe"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This template is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire template manifest and Markdown entrypoint; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

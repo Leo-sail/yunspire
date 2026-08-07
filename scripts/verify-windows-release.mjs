@@ -229,7 +229,7 @@ function createBitmapInfo(width, height, frameBytes, compression = '') {
 
 function createWaveFormat(sampleRate, formatTag = 1) {
   const value = Buffer.alloc(16);
-  value.writeUInt16LE(formatTag, 0); // PCM in the successful fixture.
+  value.writeUInt16LE(formatTag, 0); // PCM format for the generated probe header.
   value.writeUInt16LE(1, 2);
   value.writeUInt32LE(sampleRate, 4);
   value.writeUInt32LE(sampleRate * 2, 8);

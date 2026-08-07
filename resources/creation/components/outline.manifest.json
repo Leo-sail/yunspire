@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "component",
+  "catalogVersion": "0.4.0",
+  "id": "outline",
+  "version": "1.0.0",
+  "displayName": "文章大纲",
+  "description": "用层级化标题先锁定文章的论证路径和读者预期。",
+  "status": "active",
+  "category": "structure",
+  "legacyIds": [],
+  "blockKind": "collection",
+  "slots": [
+    {
+      "id": "items",
+      "kind": "list",
+      "required": true,
+      "maxLength": 10000
+    }
+  ],
+  "semantics": {
+    "role": "list",
+    "ariaLabel": "文章大纲",
+    "markdownFallback": "list"
+  },
+  "constraints": {
+    "minItems": 1,
+    "maxItems": 40,
+    "allowNestedComponents": false,
+    "spanLeaf": true,
+    "allowScripts": false,
+    "allowExternalStyles": false
+  },
+  "templateMarkdown": "### 文章大纲\n\n- [ ] **问题背景：** [填写基于知识库的内容]\n- [ ] **核心判断：** [填写基于知识库的内容]\n- [ ] **行动建议：** [填写基于知识库的内容]\n\n**来源：** [[替换为实际笔记标题]]",
+  "renderers": {
+    "markdown": "creation.component.outline.markdown.v1",
+    "html": "creation.component.outline.html.v1",
+    "wechatRichText": "creation.component.outline.wechat.v1"
+  },
+  "compatibility": {
+    "targets": [
+      "markdown",
+      "html",
+      "wechatRichText"
+    ],
+    "minRuntimeVersion": "0.1.2"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This component is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire component manifest and Markdown block; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

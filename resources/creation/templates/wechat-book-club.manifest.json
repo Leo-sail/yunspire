@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "template",
+  "catalogVersion": "0.4.0",
+  "id": "wechat-book-club",
+  "version": "1.0.0",
+  "displayName": "读书会文章",
+  "description": "以读书会问题为线索，连接书中观点和团队实际讨论。",
+  "status": "active",
+  "contentType": "wechat",
+  "artifactType": "wechatArticle",
+  "tags": [
+    "公众号",
+    "读书会",
+    "讨论",
+    "原创模板",
+    "本地知识库"
+  ],
+  "inputFormats": [
+    "plainText",
+    "markdown",
+    "docx",
+    "pdf"
+  ],
+  "outputFormats": [
+    "markdown",
+    "html"
+  ],
+  "entrypoint": "wechat-book-club/template.md",
+  "files": [
+    {
+      "path": "wechat-book-club/template.md",
+      "kind": "markdown",
+      "editable": true,
+      "contentHash": "sha256:447315e50df6ce14fcde34207e9ce505ed9c0e7555ac0d1e07e4013be48cd507"
+    }
+  ],
+  "editableSurfaces": [
+    "content"
+  ],
+  "agentCapabilities": [
+    "creation.generate",
+    "creation.edit"
+  ],
+  "sandbox": {
+    "network": false,
+    "shell": false,
+    "vaultWrite": false,
+    "allowTopNavigation": false,
+    "allowPopups": false,
+    "allowExternalScripts": false
+  },
+  "compatibility": {
+    "minRuntimeVersion": "0.1.2",
+    "previewMode": "sandboxedIframe"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This template is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire template manifest and Markdown entrypoint; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

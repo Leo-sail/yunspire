@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "template",
+  "catalogVersion": "0.4.0",
+  "id": "content-licensing",
+  "version": "1.0.0",
+  "displayName": "内容授权合同",
+  "description": "明确内容使用范围、期限、地域、署名和二次创作边界。",
+  "status": "active",
+  "contentType": "contract",
+  "artifactType": "report",
+  "tags": [
+    "合同",
+    "授权",
+    "内容",
+    "原创模板",
+    "本地知识库"
+  ],
+  "inputFormats": [
+    "plainText",
+    "markdown",
+    "docx",
+    "pdf"
+  ],
+  "outputFormats": [
+    "markdown",
+    "html",
+    "pdf"
+  ],
+  "entrypoint": "content-licensing/template.md",
+  "files": [
+    {
+      "path": "content-licensing/template.md",
+      "kind": "markdown",
+      "editable": true,
+      "contentHash": "sha256:d71371a388b2a49e78f5647129b660a29db7368f3aec501525bf420ec3252ed2"
+    }
+  ],
+  "editableSurfaces": [
+    "content"
+  ],
+  "agentCapabilities": [
+    "creation.generate",
+    "creation.edit"
+  ],
+  "sandbox": {
+    "network": false,
+    "shell": false,
+    "vaultWrite": false,
+    "allowTopNavigation": false,
+    "allowPopups": false,
+    "allowExternalScripts": false
+  },
+  "compatibility": {
+    "minRuntimeVersion": "0.1.2",
+    "previewMode": "sandboxedIframe"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This template is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire template manifest and Markdown entrypoint; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

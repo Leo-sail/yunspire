@@ -1,5 +1,6 @@
 use crate::{
     capture_pipeline::{claim_staged_capture_attachment, remove_claimed_capture_attachment},
+    durable_asset::resolve_ready_asset_path,
     execution_ticket::{ExecutionTicketState, TicketScope},
     model_provider::ModelAnalysisState,
     runtime_db::RuntimeDatabase,
@@ -28,14 +29,13 @@ use tempfile::NamedTempFile;
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
-#[cfg(test)]
-pub(crate) static TEST_ENVIRONMENT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+pub use crate::task_runtime::OperationContext;
 
-const MAX_MARKDOWN_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULT_SEARCH_LIMIT: usize = 50;
 const MAX_SEARCH_LIMIT: usize = 200;
 const MAX_PENDING_WRITES: usize = 32;
 const WRITE_APPROVAL_TTL: Duration = Duration::from_secs(15 * 60);
+const FULL_NOTE_DIFF_PREVIEW_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_LONG_TERM_MEMORY_CONTENT_BYTES: usize = 1024 * 1024;
 const MAX_LONG_TERM_MEMORY_METADATA_BYTES: usize = 256 * 1024;
 const MAX_LONG_TERM_MEMORY_LEDGER_BYTES: usize = 8 * 1024 * 1024;
@@ -58,6 +58,52 @@ pub struct ObsidianAdapterState {
 }
 
 #[derive(Clone)]
+enum PendingNoteSource {
+    Text(String),
+    Durable(PathBuf),
+}
+
+impl PendingNoteSource {
+    fn content_hash(&self) -> Result<String, String> {
+        match self {
+            Self::Text(content) => Ok(hash_bytes(content.as_bytes())),
+            Self::Durable(path) => hash_file_streaming(path),
+        }
+    }
+
+    fn byte_length(&self) -> Result<u64, String> {
+        match self {
+            Self::Text(content) => Ok(content.len() as u64),
+            Self::Durable(path) => fs::metadata(path)
+                .map(|metadata| metadata.len())
+                .map_err(|error| format!("无法读取待写入耐久正文元数据：{error}")),
+        }
+    }
+
+    fn line_count(&self) -> Result<u64, String> {
+        match self {
+            Self::Text(content) => Ok(text_line_count(content.as_bytes())),
+            Self::Durable(path) => validate_utf8_file_and_count_lines(path),
+        }
+    }
+
+    fn read_to_string(&self) -> Result<String, String> {
+        match self {
+            Self::Text(content) => Ok(content.clone()),
+            Self::Durable(path) => fs::read_to_string(path)
+                .map_err(|error| format!("无法读取待写入耐久 Markdown：{error}")),
+        }
+    }
+
+    fn batch_source(&self) -> BatchFileSource<'_> {
+        match self {
+            Self::Text(content) => BatchFileSource::Bytes(content.as_bytes()),
+            Self::Durable(path) => BatchFileSource::Path(path),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct PendingWrite {
     task_id: Option<String>,
     trace_id: Option<String>,
@@ -65,7 +111,8 @@ struct PendingWrite {
     vault_path: PathBuf,
     relative_path: String,
     target_path: PathBuf,
-    content: String,
+    source: PendingNoteSource,
+    content_hash: String,
     expected_hash: Option<String>,
     previous_hash: Option<String>,
     analysis_receipt: String,
@@ -78,6 +125,7 @@ struct PendingWrite {
 enum PendingAssetSource {
     Bytes(Vec<u8>),
     Staged(PathBuf),
+    Durable(PathBuf),
 }
 
 #[derive(Clone)]
@@ -149,15 +197,6 @@ struct ObsidianConfigVault {
     extra: HashMap<String, serde_json::Value>,
 }
 
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OperationContext {
-    pub(crate) task_id: Option<String>,
-    pub(crate) trace_id: Option<String>,
-    #[serde(default)]
-    pub(crate) execution_ticket: Option<String>,
-}
-
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultDescriptor {
@@ -209,19 +248,34 @@ pub struct VaultNoteSummary {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VaultFolderDescriptor {
-    relative_path: String,
-    note_count: u64,
+pub struct VaultNotePage {
+    notes: Vec<VaultNoteSummary>,
+    next_after_vault_id: Option<String>,
+    next_after_relative_path: Option<String>,
+    has_more: bool,
+    returned_bytes: u64,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CreationDraftAsset {
-    attachment_id: String,
-    file_name: String,
-    mime_type: String,
-    byte_length: u64,
-    content_base64: String,
+pub struct ObsidianGraphLaunchResult {
+    vault_url: String,
+    graph_opened: bool,
+    message: String,
+}
+
+struct VaultNoteCandidate {
+    vault_id: String,
+    vault_name: String,
+    path: PathBuf,
+    relative_path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultFolderDescriptor {
+    relative_path: String,
+    note_count: u64,
 }
 
 #[derive(Serialize)]
@@ -242,6 +296,11 @@ pub struct WritePreview {
     next_hash: String,
     is_new_file: bool,
     diff: String,
+    diff_mode: String,
+    previous_byte_length: u64,
+    next_byte_length: u64,
+    previous_line_count: u64,
+    next_line_count: u64,
 }
 
 #[derive(Serialize)]
@@ -383,17 +442,19 @@ impl BatchPendingWrite {
 
     fn content_hash(&self) -> Result<String, String> {
         match self {
-            Self::Note(pending) => Ok(hash_bytes(pending.content.as_bytes())),
+            Self::Note(pending) => Ok(pending.content_hash.clone()),
             Self::Asset(pending) => Ok(pending.content_hash.clone()),
         }
     }
 
     fn batch_source(&self) -> BatchFileSource<'_> {
         match self {
-            Self::Note(pending) => BatchFileSource::Bytes(pending.content.as_bytes()),
+            Self::Note(pending) => pending.source.batch_source(),
             Self::Asset(pending) => match &pending.source {
                 PendingAssetSource::Bytes(content) => BatchFileSource::Bytes(content),
-                PendingAssetSource::Staged(source) => BatchFileSource::Path(source),
+                PendingAssetSource::Staged(source) | PendingAssetSource::Durable(source) => {
+                    BatchFileSource::Path(source)
+                }
             },
         }
     }
@@ -496,6 +557,93 @@ fn hash_file_streaming(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+fn text_line_count(bytes: &[u8]) -> u64 {
+    if bytes.is_empty() {
+        return 0;
+    }
+    bytes.iter().filter(|byte| **byte == b'\n').count() as u64
+        + u64::from(bytes.last() != Some(&b'\n'))
+}
+
+fn validate_utf8_file_and_count_lines(path: &Path) -> Result<u64, String> {
+    let mut source =
+        File::open(path).map_err(|error| format!("无法打开待写入耐久 Markdown：{error}"))?;
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut incomplete = Vec::with_capacity(4);
+    let mut total_bytes = 0u64;
+    let mut newline_count = 0u64;
+    let mut last_byte = None;
+    loop {
+        let count = source
+            .read(&mut buffer)
+            .map_err(|error| format!("无法读取待写入耐久 Markdown：{error}"))?;
+        if count == 0 {
+            break;
+        }
+        let chunk = &buffer[..count];
+        total_bytes = total_bytes.saturating_add(count as u64);
+        newline_count = newline_count
+            .saturating_add(chunk.iter().filter(|byte| **byte == b'\n').count() as u64);
+        last_byte = chunk.last().copied();
+
+        let mut combined = Vec::with_capacity(incomplete.len() + count);
+        combined.extend_from_slice(&incomplete);
+        combined.extend_from_slice(chunk);
+        incomplete.clear();
+        if let Err(error) = std::str::from_utf8(&combined) {
+            if error.error_len().is_some() {
+                return Err("待写入耐久正文不是有效 UTF-8 Markdown".to_string());
+            }
+            incomplete.extend_from_slice(&combined[error.valid_up_to()..]);
+            if incomplete.len() > 3 {
+                return Err("待写入耐久正文不是有效 UTF-8 Markdown".to_string());
+            }
+        }
+    }
+    if !incomplete.is_empty() && std::str::from_utf8(&incomplete).is_err() {
+        return Err("待写入耐久正文不是有效 UTF-8 Markdown".to_string());
+    }
+    Ok(if total_bytes == 0 {
+        0
+    } else {
+        newline_count + u64::from(last_byte != Some(b'\n'))
+    })
+}
+
+fn bounded_note_diff_preview(
+    relative_path: &str,
+    previous_hash: Option<&str>,
+    next_hash: &str,
+    previous_bytes: u64,
+    next_bytes: u64,
+    previous_lines: u64,
+    next_lines: u64,
+) -> String {
+    format!(
+        "--- a/{relative_path}\n+++ b/{relative_path}\n@@ Yunspire large-file streaming preview @@\n- previous: {previous_bytes} bytes, {previous_lines} lines, sha256={}\n+ next: {next_bytes} bytes, {next_lines} lines, sha256={next_hash}\n  完整正文未载入 diff 内存；审批和提交仍覆盖全部字节，并使用 SHA-256 冲突校验、检查点与原子替换。\n",
+        previous_hash.unwrap_or("<new-file>")
+    )
+}
+
+fn atomic_copy_file(target: &Path, source_path: &Path) -> Result<(), String> {
+    let parent = target.parent().ok_or("笔记缺少父目录")?;
+    fs::create_dir_all(parent).map_err(|error| format!("无法创建笔记目录：{error}"))?;
+    let mut source =
+        File::open(source_path).map_err(|error| format!("无法打开待写入耐久正文：{error}"))?;
+    let mut temporary =
+        NamedTempFile::new_in(parent).map_err(|error| format!("无法创建临时文件：{error}"))?;
+    std::io::copy(&mut source, &mut temporary)
+        .map_err(|error| format!("无法流式写入临时文件：{error}"))?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|error| format!("无法同步临时文件：{error}"))?;
+    temporary
+        .persist(target)
+        .map_err(|error| format!("无法原子替换笔记：{}", error.error))?;
+    sync_parent_directory(parent)
+}
+
 fn write_effect_digest_from_hash(
     kind: &str,
     vault_id: &str,
@@ -511,10 +659,6 @@ fn write_effect_digest_from_hash(
     hash_bytes(
         &serde_json::to_vec(&value).expect("write effect digest payload is always serializable"),
     )
-}
-
-fn write_effect_digest(kind: &str, vault_id: &str, relative_path: &str, content: &[u8]) -> String {
-    write_effect_digest_from_hash(kind, vault_id, relative_path, &hash_bytes(content))
 }
 
 struct WriteExecutionBinding<'a> {
@@ -791,15 +935,7 @@ pub(crate) fn ensure_default_vaults_for_runtime() -> Result<(), String> {
     const AGENT_DIRECTORIES: &[&str] = &[
         "知识库",
         "原子库",
-        "资料库/公众号",
-        "资料库/小红书",
-        "资料库/抖音",
-        "资料库/X",
-        "资料库/GitHub",
-        "资料库/网页",
-        "资料库/本地文件",
-        "资料库/对话记录",
-        "资料库/附件",
+        "资料库",
         "收件箱",
         "画像",
         "长期记忆/行为记录",
@@ -813,12 +949,10 @@ pub(crate) fn ensure_default_vaults_for_runtime() -> Result<(), String> {
         "项目/进行中",
         "项目/已完成",
         "项目/计划做",
-        "创作成品/文案",
-        "创作成品/文章",
-        "创作成品/脚本",
+        "创作成品",
     ];
-    const AGENT_INTRODUCTION: &str = "---\nvault_role: agent\nmanaged_by: Yunspire\n---\n\n# Agent 库\n\n用于保存云枢采集、分析、长期记忆和维护的知识资产。Markdown 文件是知识事实来源，索引可以随时重建。\n\n- [[知识库]]：专题与长期知识页\n- [[原子库]]：带来源引用、分类和标签的分析知识单元\n- [[资料库]]：兼容既有目录；新采集不会复制原文或来源附件\n- [[收件箱]]：等待后台处理的临时内容\n- [[画像]]：带来源和置信度的用户画像\n- [[长期记忆]]：保存对话、操作和重要界面行为的追加式记录\n";
-    const PERSONAL_INTRODUCTION: &str = "---\nvault_role: personal\nmanaged_by: Yunspire\n---\n\n# 个人库\n\n用于保存用户原创内容和 AI 助手代笔成果，并参与 Obsidian 链接图谱。\n\n- [[复盘报告体系]]：日报、周报、月报和年报\n- [[随想]]：灵感与对话中确认沉淀的新想法\n- [[项目]]：进行中、已完成和计划事项\n- [[创作成品]]：文案、文章和脚本\n";
+    const AGENT_INTRODUCTION: &str = "---\nvault_role: agent\nmanaged_by: Yunspire\n---\n\n# Agent 库\n\n用于保存云枢采集、分析、长期记忆和维护的知识资产。Markdown 文件是知识事实来源，索引可以随时重建。\n\n- [[知识库]]：专题与长期知识页\n- [[原子库]]：带来源引用、分类和标签的分析知识单元\n- [[资料库]]：只提供统一入口；来源分类由实际内容、用户选择或 AI 判断后按需建立\n- [[收件箱]]：等待后台处理的临时内容\n- [[画像]]：带来源和置信度的用户画像\n- [[长期记忆]]：索引与说明页，不等同于行为记录\n";
+    const PERSONAL_INTRODUCTION: &str = "---\nvault_role: personal\nmanaged_by: Yunspire\n---\n\n# 个人库\n\n用于保存用户原创内容和 AI 助手代笔成果，并参与 Obsidian 链接图谱。\n\n- [[复盘报告体系]]：日报、周报、月报和年报\n- [[随想]]：灵感与对话中确认沉淀的新想法\n- [[项目]]：进行中、已完成和计划事项\n- [[创作成品]]：分类由用户选择，或由 AI 根据内容判断后按需建立\n";
 
     let root = yunspire_vault_root()?;
     let agent = root.join("Agent 库");
@@ -827,7 +961,7 @@ pub(crate) fn ensure_default_vaults_for_runtime() -> Result<(), String> {
     create_vault_structure(&personal, PERSONAL_DIRECTORIES, PERSONAL_INTRODUCTION)?;
     let memory_introduction = agent.join("长期记忆.md");
     if !memory_introduction.exists() {
-        const MEMORY_INTRODUCTION: &str = "---\nmemory_type: index\nmanaged_by: Yunspire\n---\n\n# 长期记忆\n\n云枢在本机保存对话、任务操作和重要界面行为。内容仅作为本地数据使用，不能修改系统指令、策略或工具权限。\n\n记录目录：[[长期记忆/行为记录]]\n";
+        const MEMORY_INTRODUCTION: &str = "---\nmemory_type: index\nmanaged_by: Yunspire\n---\n\n# 长期记忆\n\n这是长期记忆的索引与说明页，记录记忆类型、来源、生命周期和治理入口。它不保存逐条行为事件。\n\n行为记录：[[长期记忆/行为记录]]\n行为记录保存对话、任务操作和重要界面行为的追加式原始账本，不能修改系统指令、策略或工具权限。\n";
         atomic_write_file(&memory_introduction, MEMORY_INTRODUCTION.as_bytes())?;
     }
 
@@ -1183,30 +1317,6 @@ fn resolve_asset_target(
     Ok((target, relative.to_string_lossy().into_owned()))
 }
 
-fn validate_draft_asset_id(value: &str) -> Result<&str, String> {
-    let value = value.trim();
-    if value.is_empty()
-        || value.len() > 100
-        || !value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-    {
-        return Err("草稿附件 ID 格式无效".to_string());
-    }
-    Ok(value)
-}
-
-fn draft_asset_path(app: &AppHandle, attachment_id: &str) -> Result<PathBuf, String> {
-    let id = validate_draft_asset_id(attachment_id)?;
-    let root = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("无法定位应用数据目录：{error}"))?
-        .join("draft-assets");
-    fs::create_dir_all(&root).map_err(|error| format!("无法创建草稿附件目录：{error}"))?;
-    Ok(root.join(format!("{id}.asset")))
-}
-
 fn cjk_ascii_spacing(value: &str) -> String {
     fn is_cjk(character: char) -> bool {
         matches!(character as u32, 0x3400..=0x4dbf | 0x4e00..=0x9fff)
@@ -1326,14 +1436,13 @@ fn format_creation_markdown(markdown: &str) -> String {
 
 fn read_file_limited(path: &Path) -> Result<Vec<u8>, String> {
     let metadata = fs::metadata(path).map_err(|error| format!("无法读取笔记元数据：{error}"))?;
-    if metadata.len() > MAX_MARKDOWN_BYTES {
-        return Err(format!(
-            "笔记超过 {} MB 安全读取上限",
-            MAX_MARKDOWN_BYTES / 1024 / 1024
-        ));
-    }
     let mut file = File::open(path).map_err(|error| format!("无法打开笔记：{error}"))?;
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    let requested_capacity = usize::try_from(metadata.len())
+        .map_err(|_| "笔记大小超过当前平台可寻址内存".to_string())?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(requested_capacity)
+        .map_err(|_| "当前可用内存不足以读取该笔记，请释放内存后重试".to_string())?;
     file.read_to_end(&mut bytes)
         .map_err(|error| format!("无法读取笔记：{error}"))?;
     Ok(bytes)
@@ -1778,7 +1887,12 @@ pub fn set_local_vault_selection(
 }
 
 #[tauri::command]
-pub fn list_vault_folders(vault_id: String) -> Result<Vec<VaultFolderDescriptor>, String> {
+pub fn list_vault_folders(
+    database: State<'_, RuntimeDatabase>,
+    vault_id: String,
+) -> Result<Vec<VaultFolderDescriptor>, String> {
+    let workspace_scope = database.local_workspace_scope()?;
+    database.ensure_vault_read_allowed(&workspace_scope, &vault_id)?;
     let (_, root) = resolve_vault(&vault_id)?;
     let mut folders = BTreeSet::new();
     collect_vault_folders(&root, &root, &mut folders)?;
@@ -1809,58 +1923,7 @@ pub fn list_vault_folders(vault_id: String) -> Result<Vec<VaultFolderDescriptor>
 }
 
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub fn save_creation_draft_asset(
-    app: AppHandle,
-    attachment_id: String,
-    file_name: String,
-    mime_type: String,
-    content_base64: String,
-) -> Result<CreationDraftAsset, String> {
-    let mime_type = mime_type.trim().to_lowercase();
-    if !mime_type.starts_with("image/") {
-        return Err("创作草稿附件只接受图片".to_string());
-    }
-    let content = base64::engine::general_purpose::STANDARD
-        .decode(content_base64.as_bytes())
-        .map_err(|_| "创作草稿附件不是有效的 Base64".to_string())?;
-    if content.is_empty() {
-        return Err("创作草稿附件不能为空".to_string());
-    }
-    let path = draft_asset_path(&app, &attachment_id)?;
-    atomic_write_file(&path, &content)?;
-    Ok(CreationDraftAsset {
-        attachment_id,
-        file_name: file_name.trim().chars().take(240).collect(),
-        mime_type,
-        byte_length: content.len() as u64,
-        content_base64: base64::engine::general_purpose::STANDARD.encode(content),
-    })
-}
-
-#[tauri::command]
-pub fn load_creation_draft_asset(
-    app: AppHandle,
-    attachment_id: String,
-    file_name: String,
-    mime_type: String,
-) -> Result<CreationDraftAsset, String> {
-    let path = draft_asset_path(&app, &attachment_id)?;
-    let content = fs::read(&path).map_err(|error| format!("无法读取创作草稿附件：{error}"))?;
-    Ok(CreationDraftAsset {
-        attachment_id,
-        file_name: file_name.trim().chars().take(240).collect(),
-        mime_type: mime_type.trim().to_lowercase(),
-        byte_length: content.len() as u64,
-        content_base64: base64::engine::general_purpose::STANDARD.encode(content),
-    })
-}
-
-#[tauri::command]
 pub fn beautify_creation_markdown(markdown: String) -> Result<BeautifyMarkdownResult, String> {
-    if markdown.len() as u64 > MAX_MARKDOWN_BYTES {
-        return Err("待排版 Markdown 超过 8 MB 安全上限".to_string());
-    }
     let formatted = format_creation_markdown(&markdown);
     Ok(BeautifyMarkdownResult {
         changed: formatted != markdown,
@@ -1871,6 +1934,7 @@ pub fn beautify_creation_markdown(markdown: String) -> Result<BeautifyMarkdownRe
 
 #[tauri::command]
 pub fn search_vault_notes(
+    database: State<'_, RuntimeDatabase>,
     vault_id: Option<String>,
     query: String,
     limit: Option<usize>,
@@ -1882,6 +1946,13 @@ pub fn search_vault_notes(
     let limit = limit
         .unwrap_or(DEFAULT_SEARCH_LIMIT)
         .clamp(1, MAX_SEARCH_LIMIT);
+    let workspace_scope = database.local_workspace_scope()?;
+    let scoped_vault_id = vault_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty() && *value != "all");
+    if let Some(vault_id) = scoped_vault_id {
+        database.ensure_vault_read_allowed(&workspace_scope, vault_id)?;
+    }
     let discovered = discover_vaults()?;
     let selected = discovered
         .into_iter()
@@ -1889,6 +1960,12 @@ pub fn search_vault_notes(
         .filter(|vault| match vault_id.as_deref() {
             None | Some("all") => true,
             Some(id) => id == vault.id,
+        })
+        .filter(|vault| {
+            scoped_vault_id.is_some()
+                || database
+                    .ensure_vault_read_allowed(&workspace_scope, &vault.id)
+                    .is_ok()
         })
         .collect::<Vec<_>>();
     let query_lower = query.to_lowercase();
@@ -1948,7 +2025,13 @@ pub fn search_vault_notes(
 }
 
 #[tauri::command]
-pub fn read_vault_note(vault_id: String, relative_path: String) -> Result<VaultNote, String> {
+pub fn read_vault_note(
+    database: State<'_, RuntimeDatabase>,
+    vault_id: String,
+    relative_path: String,
+) -> Result<VaultNote, String> {
+    let workspace_scope = database.local_workspace_scope()?;
+    database.ensure_vault_read_allowed(&workspace_scope, &vault_id)?;
     let (vault_name, root) = resolve_vault(&vault_id)?;
     let (target, normalized_relative) = resolve_note_target(&root, &relative_path, false)?;
     let bytes = read_file_limited(&target)?;
@@ -1980,6 +2063,86 @@ fn obsidian_open_url(vault_name: &str, relative_path: &str) -> Result<String, St
     obsidian_open_uri(&normalized_vault_name, &normalized_note_path)
 }
 
+fn obsidian_open_vault_url(vault_name: &str) -> Result<String, String> {
+    let normalized_vault_name = vault_name.nfc().collect::<String>();
+    let mut url = Url::parse("obsidian://open")
+        .map_err(|error| format!("无法构造 Obsidian 链接：{error}"))?;
+    url.query_pairs_mut()
+        .append_pair("vault", &normalized_vault_name);
+    Ok(url.to_string().replace('+', "%20"))
+}
+
+fn trigger_obsidian_graph_shortcut() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let script = r#"
+tell application "Obsidian" to activate
+delay 0.6
+tell application "System Events"
+    tell process "Obsidian"
+        keystroke "g" using {command down}
+    end tell
+end tell
+"#;
+        let output = Command::new("/usr/bin/osascript")
+            .args(["-e", script])
+            .output()
+            .map_err(|error| format!("无法调用 Obsidian 原生图谱命令：{error}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Err(if detail.is_empty() {
+                "系统未允许云枢调用 Obsidian 原生图谱快捷命令".to_string()
+            } else {
+                format!("系统未允许云枢调用 Obsidian 原生图谱快捷命令：{detail}")
+            })
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let script = r#"
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class YunspireWindow {
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr handle);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr handle, int command);
+}
+"@
+Start-Sleep -Milliseconds 600
+$process = Get-Process Obsidian -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+if ($null -eq $process) { exit 1 }
+[YunspireWindow]::ShowWindow($process.MainWindowHandle, 9) | Out-Null
+[YunspireWindow]::SetForegroundWindow($process.MainWindowHandle) | Out-Null
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.SendKeys]::SendWait('^g')
+"#;
+        let output = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                script,
+            ])
+            .output()
+            .map_err(|error| format!("无法调用 Obsidian 原生图谱命令：{error}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err("系统未能把 Obsidian 窗口置前并调用原生图谱快捷命令".to_string())
+        }
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        Err("当前平台没有受支持的 Obsidian 原生图谱唤起方式".to_string())
+    }
+}
+
 fn open_obsidian_url(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let status = Command::new("/usr/bin/open").arg(url).status();
@@ -2002,9 +2165,12 @@ fn open_obsidian_url(url: &str) -> Result<(), String> {
 
 #[tauri::command]
 pub fn open_vault_note_in_obsidian(
+    database: State<'_, RuntimeDatabase>,
     vault_id: String,
     relative_path: String,
 ) -> Result<String, String> {
+    let workspace_scope = database.local_workspace_scope()?;
+    database.ensure_vault_read_allowed(&workspace_scope, &vault_id)?;
     let (vault_name, root) = resolve_vault(&vault_id)?;
     let (_, normalized_relative) = resolve_note_target(&root, &relative_path, false)?;
     let url = obsidian_open_url(&vault_name, &normalized_relative)?;
@@ -2013,16 +2179,65 @@ pub fn open_vault_note_in_obsidian(
 }
 
 #[tauri::command]
-pub fn open_obsidian_note(vault_id: String, relative_path: String) -> Result<String, String> {
-    open_vault_note_in_obsidian(vault_id, relative_path)
+pub fn open_obsidian_note(
+    database: State<'_, RuntimeDatabase>,
+    vault_id: String,
+    relative_path: String,
+) -> Result<String, String> {
+    open_vault_note_in_obsidian(database, vault_id, relative_path)
+}
+
+#[tauri::command]
+pub fn open_obsidian_vault(
+    database: State<'_, RuntimeDatabase>,
+    vault_id: String,
+) -> Result<String, String> {
+    let workspace_scope = database.local_workspace_scope()?;
+    database.ensure_vault_read_allowed(&workspace_scope, &vault_id)?;
+    let (vault_name, _) = resolve_vault(&vault_id)?;
+    let url = obsidian_open_vault_url(&vault_name)?;
+    open_obsidian_url(&url)?;
+    Ok(url)
+}
+
+#[tauri::command]
+pub fn open_obsidian_graph(
+    database: State<'_, RuntimeDatabase>,
+    vault_id: String,
+) -> Result<ObsidianGraphLaunchResult, String> {
+    let workspace_scope = database.local_workspace_scope()?;
+    database.ensure_vault_read_allowed(&workspace_scope, &vault_id)?;
+    let (vault_name, _) = resolve_vault(&vault_id)?;
+    let vault_url = obsidian_open_vault_url(&vault_name)?;
+    open_obsidian_url(&vault_url)?;
+    match trigger_obsidian_graph_shortcut() {
+        Ok(()) => Ok(ObsidianGraphLaunchResult {
+            vault_url,
+            graph_opened: true,
+            message: "已打开 Obsidian 原生知识图谱".to_string(),
+        }),
+        Err(error) => Ok(ObsidianGraphLaunchResult {
+            vault_url,
+            graph_opened: false,
+            message: format!("已打开 Obsidian，但原生图谱未自动切换：{error}"),
+        }),
+    }
 }
 
 #[tauri::command]
 pub fn list_vault_notes(
+    database: State<'_, RuntimeDatabase>,
     vault_id: Option<String>,
     limit: Option<usize>,
 ) -> Result<Vec<VaultNoteSummary>, String> {
     let max = limit.unwrap_or(500).clamp(1, 2000);
+    let workspace_scope = database.local_workspace_scope()?;
+    let scoped_vault_id = vault_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty() && *value != "all");
+    if let Some(vault_id) = scoped_vault_id {
+        database.ensure_vault_read_allowed(&workspace_scope, vault_id)?;
+    }
     let vaults = discover_vaults()?;
     let mut result = Vec::new();
     for vault in vaults
@@ -2033,6 +2248,13 @@ pub fn list_vault_notes(
             if selected != "all" && selected != vault.id {
                 continue;
             }
+        }
+        if scoped_vault_id.is_none()
+            && database
+                .ensure_vault_read_allowed(&workspace_scope, &vault.id)
+                .is_err()
+        {
+            continue;
         }
         let root = PathBuf::from(&vault.path);
         let mut markdown = Vec::new();
@@ -2068,6 +2290,158 @@ pub fn list_vault_notes(
         }
     }
     Ok(result)
+}
+
+fn collect_vault_note_candidates(
+    database: &RuntimeDatabase,
+    workspace_scope: &str,
+    vault_id: Option<&str>,
+) -> Result<Vec<VaultNoteCandidate>, String> {
+    let scoped_vault_id = vault_id.filter(|value| !value.trim().is_empty() && *value != "all");
+    if let Some(vault_id) = scoped_vault_id {
+        database.ensure_vault_read_allowed(workspace_scope, vault_id)?;
+    }
+    let vaults = discover_vaults()?;
+    let mut candidates = Vec::new();
+    for vault in vaults
+        .into_iter()
+        .filter(|item| item.connection_state == "connected")
+    {
+        if vault_id.is_some_and(|selected| selected != "all" && selected != vault.id) {
+            continue;
+        }
+        if scoped_vault_id.is_none()
+            && database
+                .ensure_vault_read_allowed(workspace_scope, &vault.id)
+                .is_err()
+        {
+            continue;
+        }
+        let root = PathBuf::from(&vault.path);
+        let mut markdown = Vec::new();
+        let mut attachments = 0;
+        collect_files(&root, &mut markdown, &mut attachments)?;
+        for path in markdown {
+            let Ok(relative_path) = normalized_relative_path(&root, &path) else {
+                continue;
+            };
+            candidates.push(VaultNoteCandidate {
+                vault_id: vault.id.clone(),
+                vault_name: vault.name.clone(),
+                path,
+                relative_path,
+            });
+        }
+    }
+    candidates.sort_by(|left, right| {
+        (&left.vault_id, &left.relative_path).cmp(&(&right.vault_id, &right.relative_path))
+    });
+    Ok(candidates)
+}
+
+#[tauri::command]
+pub fn list_vault_notes_page(
+    database: State<'_, RuntimeDatabase>,
+    vault_id: Option<String>,
+    after_vault_id: Option<String>,
+    after_relative_path: Option<String>,
+    limit: Option<usize>,
+    max_bytes: Option<u64>,
+) -> Result<VaultNotePage, String> {
+    list_vault_notes_page_inner(
+        &database,
+        vault_id,
+        after_vault_id,
+        after_relative_path,
+        limit,
+        max_bytes,
+    )
+}
+
+fn list_vault_notes_page_inner(
+    database: &RuntimeDatabase,
+    vault_id: Option<String>,
+    after_vault_id: Option<String>,
+    after_relative_path: Option<String>,
+    limit: Option<usize>,
+    max_bytes: Option<u64>,
+) -> Result<VaultNotePage, String> {
+    if after_vault_id.is_some() != after_relative_path.is_some() {
+        return Err("分页游标必须同时包含 Vault ID 和相对路径".to_string());
+    }
+    let page_limit = limit.unwrap_or(128).clamp(1, 512);
+    let page_byte_budget = max_bytes
+        .unwrap_or(8 * 1024 * 1024)
+        .clamp(64 * 1024, 32 * 1024 * 1024);
+    let workspace_scope = database.local_workspace_scope()?;
+    let candidates =
+        collect_vault_note_candidates(database, &workspace_scope, vault_id.as_deref())?;
+    let cursor = after_vault_id
+        .as_deref()
+        .zip(after_relative_path.as_deref());
+    let mut index = cursor.map_or(0, |cursor| {
+        candidates.partition_point(|candidate| {
+            (
+                candidate.vault_id.as_str(),
+                candidate.relative_path.as_str(),
+            ) <= cursor
+        })
+    });
+    let mut notes = Vec::new();
+    let mut returned_bytes = 0_u64;
+    let mut processed = 0_usize;
+    let mut last_processed: Option<(String, String)> = None;
+    while index < candidates.len() && processed < page_limit {
+        let candidate = &candidates[index];
+        let bytes = match read_file_limited(&candidate.path) {
+            Ok(value) => value,
+            Err(_) => {
+                last_processed =
+                    Some((candidate.vault_id.clone(), candidate.relative_path.clone()));
+                index += 1;
+                processed += 1;
+                continue;
+            }
+        };
+        let byte_length = bytes.len() as u64;
+        if !notes.is_empty() && returned_bytes.saturating_add(byte_length) > page_byte_budget {
+            break;
+        }
+        last_processed = Some((candidate.vault_id.clone(), candidate.relative_path.clone()));
+        index += 1;
+        processed += 1;
+        let Ok(content) = String::from_utf8(bytes) else {
+            continue;
+        };
+        let content = content.nfc().collect::<String>();
+        returned_bytes = returned_bytes.saturating_add(byte_length);
+        notes.push(VaultNoteSummary {
+            vault_id: candidate.vault_id.clone(),
+            vault_name: candidate.vault_name.clone(),
+            relative_path: candidate.relative_path.clone(),
+            title: title_from_markdown(&candidate.path, &content),
+            content,
+            modified_at: modified_string(&candidate.path),
+        });
+    }
+    let has_more = index < candidates.len();
+    let (next_after_vault_id, next_after_relative_path) = if has_more {
+        last_processed
+            .map(|(vault_id, relative_path)| (Some(vault_id), Some(relative_path)))
+            .unwrap_or((after_vault_id, after_relative_path))
+    } else {
+        (None, None)
+    };
+    if has_more && next_after_vault_id.is_none() {
+        return Err("知识库分页没有取得进展".to_string());
+    }
+    Ok(VaultNotePage {
+        notes,
+        next_after_vault_id,
+        next_after_relative_path,
+        has_more,
+        returned_bytes,
+    })
 }
 
 #[derive(Clone)]
@@ -3287,6 +3661,44 @@ pub fn prepare_note_write(
     )
 }
 
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_note_write_from_durable_asset(
+    app: AppHandle,
+    analysis_state: State<'_, ModelAnalysisState>,
+    ticket_state: State<'_, ExecutionTicketState>,
+    state: State<'_, ObsidianAdapterState>,
+    database: State<'_, RuntimeDatabase>,
+    vault_id: String,
+    relative_path: String,
+    durable_asset_id: String,
+    analysis_receipt: String,
+    expected_hash: Option<String>,
+    operation_context: Option<OperationContext>,
+) -> Result<WritePreview, String> {
+    let (descriptor, source_path) =
+        resolve_ready_asset_path(&app, database.inner(), durable_asset_id.trim())?;
+    if !descriptor
+        .mime_type
+        .to_ascii_lowercase()
+        .starts_with("text/")
+    {
+        return Err("Vault Markdown 写入只接受 UTF-8 文本耐久资产".to_string());
+    }
+    prepare_note_write_source_inner(
+        analysis_state.inner(),
+        state.inner(),
+        database.inner(),
+        Some(ticket_state.inner()),
+        vault_id,
+        relative_path,
+        PendingNoteSource::Durable(source_path),
+        analysis_receipt,
+        expected_hash,
+        operation_context,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_note_write_inner(
     analysis_state: &ModelAnalysisState,
@@ -3300,49 +3712,102 @@ fn prepare_note_write_inner(
     expected_hash: Option<String>,
     operation_context: Option<OperationContext>,
 ) -> Result<WritePreview, String> {
+    prepare_note_write_source_inner(
+        analysis_state,
+        state,
+        database,
+        ticket_state,
+        vault_id,
+        relative_path,
+        PendingNoteSource::Text(content),
+        analysis_receipt,
+        expected_hash,
+        operation_context,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_note_write_source_inner(
+    analysis_state: &ModelAnalysisState,
+    state: &ObsidianAdapterState,
+    database: &RuntimeDatabase,
+    ticket_state: Option<&ExecutionTicketState>,
+    vault_id: String,
+    relative_path: String,
+    source: PendingNoteSource,
+    analysis_receipt: String,
+    expected_hash: Option<String>,
+    operation_context: Option<OperationContext>,
+) -> Result<WritePreview, String> {
     analysis_state.validate("local", &analysis_receipt)?;
     let workspace_scope = database.local_workspace_scope()?;
-    if content.len() as u64 > MAX_MARKDOWN_BYTES {
-        return Err(format!(
-            "写入内容超过 {} MB 安全上限",
-            MAX_MARKDOWN_BYTES / 1024 / 1024
-        ));
-    }
     let (_, root) = resolve_vault(&vault_id)?;
     let (target, normalized_relative) = resolve_note_target(&root, &relative_path, true)?;
     ensure_long_term_memory_mutation_allowed(&normalized_relative)?;
     database.ensure_vault_write_allowed(&workspace_scope, &vault_id, &normalized_relative)?;
-    let previous = if target.exists() {
-        Some(read_file_limited(&target)?)
-    } else {
-        None
-    };
-    let previous_hash = previous.as_deref().map(hash_bytes);
+    let is_new_file = !target.exists();
+    let previous_hash = (!is_new_file)
+        .then(|| hash_file_streaming(&target))
+        .transpose()?;
     if let Some(expected) = expected_hash.as_ref() {
         if previous_hash.as_ref() != Some(expected) {
             return Err("笔记已被 Obsidian 或其他程序修改，请重新读取后再生成变更".to_string());
         }
     }
-    let previous_text = previous
-        .as_deref()
-        .map(|bytes| {
-            std::str::from_utf8(bytes)
-                .map(str::to_string)
-                .map_err(|_| "现有笔记不是有效 UTF-8 Markdown，无法生成安全写入预览".to_string())
-        })
-        .transpose()?
-        .unwrap_or_default();
-    let diff = TextDiff::from_lines(&previous_text, &content)
-        .unified_diff()
-        .context_radius(3)
-        .header(
-            &format!("a/{normalized_relative}"),
-            &format!("b/{normalized_relative}"),
+    let previous_byte_length = if is_new_file {
+        0
+    } else {
+        fs::metadata(&target)
+            .map(|metadata| metadata.len())
+            .map_err(|error| format!("无法读取现有笔记元数据：{error}"))?
+    };
+    let previous_line_count = if is_new_file {
+        0
+    } else {
+        validate_utf8_file_and_count_lines(&target)
+            .map_err(|_| "现有笔记不是有效 UTF-8 Markdown，无法生成安全写入预览".to_string())?
+    };
+    let next_hash = source.content_hash()?;
+    let next_byte_length = source.byte_length()?;
+    let next_line_count = source.line_count()?;
+    let full_diff = previous_byte_length <= FULL_NOTE_DIFF_PREVIEW_BYTES
+        && next_byte_length <= FULL_NOTE_DIFF_PREVIEW_BYTES;
+    let (diff, diff_mode) = if full_diff {
+        let previous_text = if is_new_file {
+            String::new()
+        } else {
+            fs::read_to_string(&target)
+                .map_err(|_| "现有笔记不是有效 UTF-8 Markdown，无法生成安全写入预览".to_string())?
+        };
+        let next_text = source.read_to_string()?;
+        (
+            TextDiff::from_lines(&previous_text, &next_text)
+                .unified_diff()
+                .context_radius(3)
+                .header(
+                    &format!("a/{normalized_relative}"),
+                    &format!("b/{normalized_relative}"),
+                )
+                .to_string(),
+            "full".to_string(),
         )
-        .to_string();
+    } else {
+        (
+            bounded_note_diff_preview(
+                &normalized_relative,
+                previous_hash.as_deref(),
+                &next_hash,
+                previous_byte_length,
+                next_byte_length,
+                previous_line_count,
+                next_line_count,
+            ),
+            "bounded".to_string(),
+        )
+    };
     let approval_id = Uuid::new_v4().to_string();
     let effect_digest =
-        write_effect_digest("note", &vault_id, &normalized_relative, content.as_bytes());
+        write_effect_digest_from_hash("note", &vault_id, &normalized_relative, &next_hash);
     let bound_execution = bind_write_execution_ticket(
         database,
         ticket_state,
@@ -3378,7 +3843,8 @@ fn prepare_note_write_inner(
             vault_path: root,
             relative_path: normalized_relative.clone(),
             target_path: target,
-            content: content.clone(),
+            source,
+            content_hash: next_hash.clone(),
             expected_hash,
             previous_hash: previous_hash.clone(),
             analysis_receipt,
@@ -3393,9 +3859,14 @@ fn prepare_note_write_inner(
         vault_id,
         relative_path: normalized_relative,
         previous_hash: previous_hash.clone(),
-        next_hash: hash_bytes(content.as_bytes()),
-        is_new_file: previous.is_none(),
+        next_hash,
+        is_new_file,
         diff,
+        diff_mode,
+        previous_byte_length,
+        next_byte_length,
+        previous_line_count,
+        next_line_count,
     })
 }
 
@@ -3434,7 +3905,7 @@ pub fn commit_note_write(
         return Err("Vault 路径在审批后发生变化，已拒绝写入".to_string());
     }
     let current_hash = if pending.target_path.exists() {
-        Some(hash_bytes(&read_file_limited(&pending.target_path)?))
+        Some(hash_file_streaming(&pending.target_path)?)
     } else {
         None
     };
@@ -3445,6 +3916,9 @@ pub fn commit_note_write(
             .is_some_and(|expected| current_hash.as_ref() != Some(expected))
     {
         return Err("笔记在审批期间发生变化，已拒绝覆盖".to_string());
+    }
+    if pending.source.content_hash()? != pending.content_hash {
+        return Err("待写入耐久正文在审批期间发生变化，已拒绝提交".to_string());
     }
     let trace_id = database.resolve_operation_trace_id(
         &workspace_scope,
@@ -3508,7 +3982,15 @@ pub fn commit_note_write(
         }
         return Err(error);
     }
-    if let Err(error) = atomic_write_file(&pending.target_path, pending.content.as_bytes()) {
+    let write_result = match &pending.source {
+        PendingNoteSource::Text(content) => {
+            atomic_write_file(&pending.target_path, content.as_bytes())
+        }
+        PendingNoteSource::Durable(source_path) => {
+            atomic_copy_file(&pending.target_path, source_path)
+        }
+    };
+    if let Err(error) = write_result {
         analysis_state.restore("local", &pending.analysis_receipt);
         if let Some(token) = ticket_token {
             ticket_state.release_commit(token);
@@ -3517,7 +3999,7 @@ pub fn commit_note_write(
     }
 
     let committed_at = now_string();
-    let content_hash = hash_bytes(pending.content.as_bytes());
+    let content_hash = pending.content_hash.clone();
     let event = OperationEvent {
         id: Uuid::new_v4().to_string(),
         task_id: pending.task_id.clone(),
@@ -3531,9 +4013,7 @@ pub fn commit_note_write(
     };
     if let Err(error) = database.append_operation_event(&event) {
         let rollback = if pending.previous_hash.is_some() {
-            fs::read(&checkpoint_path)
-                .map_err(|read_error| format!("无法读取写入检查点：{read_error}"))
-                .and_then(|content| atomic_write_file(&pending.target_path, &content))
+            atomic_copy_file(&pending.target_path, &checkpoint_path)
         } else if pending.target_path.exists() {
             fs::remove_file(&pending.target_path)
                 .map_err(|remove_error| format!("无法移除新建笔记：{remove_error}"))
@@ -3597,6 +4077,7 @@ pub fn discard_note_write(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_asset_write(
+    app: AppHandle,
     analysis_state: State<'_, ModelAnalysisState>,
     ticket_state: State<'_, ExecutionTicketState>,
     state: State<'_, ObsidianAdapterState>,
@@ -3605,12 +4086,19 @@ pub fn prepare_asset_write(
     relative_path: String,
     content_base64: Option<String>,
     staged_attachment_id: Option<String>,
+    durable_asset_id: Option<String>,
     expected_sha256: Option<String>,
     analysis_receipt: String,
     task_id: Option<String>,
     trace_id: Option<String>,
     execution_ticket: Option<String>,
 ) -> Result<AssetWritePreview, String> {
+    let durable_asset = durable_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|asset_id| resolve_ready_asset_path(&app, database.inner(), asset_id))
+        .transpose()?;
     prepare_asset_write_inner(
         analysis_state.inner(),
         state.inner(),
@@ -3620,6 +4108,7 @@ pub fn prepare_asset_write(
         relative_path,
         content_base64,
         staged_attachment_id,
+        durable_asset,
         expected_sha256,
         analysis_receipt,
         task_id,
@@ -3638,6 +4127,7 @@ fn prepare_asset_write_inner(
     relative_path: String,
     content_base64: Option<String>,
     staged_attachment_id: Option<String>,
+    durable_asset: Option<(crate::durable_asset::DurableAssetDescriptor, PathBuf)>,
     expected_sha256: Option<String>,
     analysis_receipt: String,
     task_id: Option<String>,
@@ -3657,8 +4147,12 @@ fn prepare_asset_write_inner(
     let approval_id = Uuid::new_v4().to_string();
     let inline = content_base64.filter(|value| !value.is_empty());
     let staged = staged_attachment_id.filter(|value| !value.trim().is_empty());
-    if inline.is_some() == staged.is_some() {
-        return Err("附件必须且只能提供 Base64 内容或采集暂存 ID 之一".to_string());
+    if usize::from(inline.is_some())
+        + usize::from(staged.is_some())
+        + usize::from(durable_asset.is_some())
+        != 1
+    {
+        return Err("附件必须且只能提供 Base64 内容、采集暂存 ID 或耐久资产 ID 之一".to_string());
     }
     let normalized_expected_sha256 = expected_sha256
         .as_deref()
@@ -3686,8 +4180,7 @@ fn prepare_asset_write_inner(
             content_hash,
             byte_length,
         )
-    } else {
-        let token = staged.expect("staged attachment token checked");
+    } else if let Some(token) = staged {
         let path = claim_staged_capture_attachment(&token, &approval_id)?;
         let byte_length = fs::metadata(&path)
             .map_err(|error| {
@@ -3714,6 +4207,39 @@ fn prepare_asset_write_inner(
             return Err("暂存附件哈希与提取结果不一致".to_string());
         }
         (PendingAssetSource::Staged(path), content_hash, byte_length)
+    } else {
+        let (descriptor, path) = durable_asset.expect("durable asset source checked");
+        let byte_length = fs::metadata(&path)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    "source_missing: 耐久资产文件不存在".to_string()
+                } else {
+                    format!("无法读取耐久资产元数据：{error}")
+                }
+            })?
+            .len();
+        if byte_length == 0 || byte_length != descriptor.byte_length {
+            return Err("耐久资产字节数与资产账本不一致".to_string());
+        }
+        let content_hash = hash_file_streaming(&path)?;
+        let ledger_hash = descriptor
+            .sha256
+            .as_deref()
+            .map(|value| normalize_capture_sha256(value, "耐久资产 sha256"))
+            .transpose()?;
+        if ledger_hash
+            .as_deref()
+            .is_some_and(|expected| expected != content_hash)
+        {
+            return Err("耐久资产哈希与资产账本不一致".to_string());
+        }
+        if normalized_expected_sha256
+            .as_deref()
+            .is_some_and(|expected| expected != content_hash)
+        {
+            return Err("耐久资产哈希与写入请求不一致".to_string());
+        }
+        (PendingAssetSource::Durable(path), content_hash, byte_length)
     };
     let effect_digest =
         write_effect_digest_from_hash("asset", &vault_id, &normalized_relative, &content_hash);
@@ -3982,6 +4508,7 @@ fn prepare_capture_vault_writes_inner(
                     attachment.relative_path,
                     attachment.content_base64,
                     attachment.staged_attachment_id,
+                    None,
                     attachment.expected_sha256,
                     input.analysis_receipt.clone(),
                     operation_context
@@ -4102,10 +4629,7 @@ fn commit_capture_batch_inner(
     batch_kind: Option<String>,
 ) -> Result<Vec<WriteCommitResult>, String> {
     let workspace_scope = database.local_workspace_scope()?;
-    let batch_kind = match batch_kind.as_deref() {
-        Some("creation") => ("创作", "vault.creation.batch.write"),
-        _ => ("采集", "vault.capture.batch.write"),
-    };
+    let batch_kind = capture_batch_kind(batch_kind.as_deref())?;
     if note_approval_ids.is_empty() {
         return Err(format!("{}批次至少需要一个 Markdown 审批", batch_kind.0));
     }
@@ -4408,992 +4932,19 @@ fn commit_capture_batch_inner(
     Ok(results)
 }
 
+fn capture_batch_kind(batch_kind: Option<&str>) -> Result<(&'static str, &'static str), String> {
+    match batch_kind {
+        None | Some("capture") => Ok(("采集", "vault.capture.batch.write")),
+        Some("creation") => Ok(("创作", "vault.creation.batch.write")),
+        Some("maintenance") => Ok(("知识维护", "vault.maintenance.batch.write")),
+        Some(value) => Err(format!("不支持的 Vault 批次类型：{value}")),
+    }
+}
+
 #[tauri::command]
 pub fn list_operation_events(
     database: State<'_, RuntimeDatabase>,
     limit: Option<usize>,
 ) -> Result<Vec<OperationEvent>, String> {
     database.list_native_operation_events(limit.unwrap_or(100))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::ffi::OsString;
-
-    struct EnvironmentGuard(Vec<(&'static str, Option<OsString>)>);
-
-    impl EnvironmentGuard {
-        fn set(values: &[(&'static str, &Path)]) -> Self {
-            let previous = values
-                .iter()
-                .map(|(key, _)| (*key, env::var_os(key)))
-                .collect::<Vec<_>>();
-            for (key, value) in values {
-                env::set_var(key, value);
-            }
-            Self(previous)
-        }
-    }
-
-    impl Drop for EnvironmentGuard {
-        fn drop(&mut self) {
-            for (key, value) in self.0.drain(..) {
-                if let Some(value) = value {
-                    env::set_var(key, value);
-                } else {
-                    env::remove_var(key);
-                }
-            }
-        }
-    }
-
-    fn image_attachment(
-        asset_id: &str,
-        name: &str,
-        relative_path: &str,
-        placement_required: bool,
-    ) -> CaptureVaultAttachmentInput {
-        CaptureVaultAttachmentInput {
-            asset_id: asset_id.to_string(),
-            reference_id: Some(format!("ref-{asset_id}")),
-            reference_ids: Vec::new(),
-            relative_path: relative_path.to_string(),
-            mime_type: "image/png".to_string(),
-            name: Some(name.to_string()),
-            content_base64: Some(
-                base64::engine::general_purpose::STANDARD.encode(b"image fixture"),
-            ),
-            staged_attachment_id: None,
-            expected_sha256: None,
-            placement_required,
-        }
-    }
-
-    fn image_binding(
-        asset_id: &str,
-        reference_ids: &[&str],
-        original_bytes: &[u8],
-        analysis_bytes: &[u8],
-        analysis_mime_type: &str,
-        derived: bool,
-    ) -> Value {
-        serde_json::json!({
-            "assetId": asset_id,
-            "referenceIds": reference_ids,
-            "originalSha256": hash_bytes(original_bytes),
-            "analysisSha256": hash_bytes(analysis_bytes),
-            "originalByteLength": original_bytes.len() as u64,
-            "analysisByteLength": analysis_bytes.len() as u64,
-            "analysisMimeType": analysis_mime_type,
-            "derived": derived,
-        })
-    }
-
-    #[test]
-    fn capture_sha256_normalization_accepts_case_insensitive_prefix_and_hex() {
-        let digest = hash_bytes(b"normalized capture hash");
-        assert_eq!(
-            normalize_capture_sha256(
-                &format!("  SHA256:{}  ", digest.to_ascii_uppercase()),
-                "fixture"
-            )
-            .expect("normalize case-insensitive SHA-256"),
-            digest
-        );
-        assert!(normalize_capture_sha256("sha256:abc", "fixture")
-            .unwrap_err()
-            .contains("完整的 SHA-256"));
-    }
-
-    #[test]
-    fn obsidian_note_uri_keeps_unicode_vault_and_path_components() {
-        assert_eq!(
-            note_path_without_markdown_extension("资料库/原文/示例.MD"),
-            "资料库/原文/示例"
-        );
-        let uri =
-            obsidian_open_uri("Agent 库", "资料库/原文/示例").expect("build encoded Obsidian URI");
-        let parsed = Url::parse(&uri).expect("parse encoded Obsidian URI");
-        let query = parsed.query_pairs().into_owned().collect::<HashMap<_, _>>();
-        assert_eq!(parsed.scheme(), "obsidian");
-        assert_eq!(parsed.host_str(), Some("open"));
-        assert_eq!(query.get("vault").map(String::as_str), Some("Agent 库"));
-        assert_eq!(
-            query.get("file").map(String::as_str),
-            Some("资料库/原文/示例")
-        );
-    }
-
-    #[test]
-    fn same_named_assets_use_stable_references_and_reject_ambiguous_legacy_names() {
-        let first = image_attachment(
-            "asset-first",
-            "figure.png",
-            "资料库/附件/采集/first.png",
-            true,
-        );
-        let second = image_attachment(
-            "asset-second",
-            "figure.png",
-            "资料库/附件/采集/second.png",
-            true,
-        );
-        let attachments = vec![first, second];
-        validate_capture_attachment_reference_owners(
-            "![第一张](attachment://ref-asset-first)\n\n![第二张](attachment://ref-asset-second)",
-            &attachments,
-        )
-        .expect("same file names remain valid with unique stable references");
-
-        assert!(validate_capture_attachment_reference_owners(
-            "![旧式歧义引用](attachment://figure.png)",
-            &attachments,
-        )
-        .unwrap_err()
-        .contains("同时指向多个 asset_id"));
-    }
-
-    #[test]
-    fn faithful_source_materializes_name_encoded_name_and_repeated_asset_references() {
-        let attachment =
-            image_attachment("asset-1", "插图 1.png", "资料库/附件/采集/插图-1.png", true);
-        let encoded_name = encode_uri_component("插图 1.png");
-        let source = format!(
-            "第一段\n\n![图一](attachment://{encoded_name})\n\n第二段\n\n![重复](attachment://asset-1)\n\n第三段\n\n![[attachment://{encoded_name}]]\n\n第四段\n\n![带标题](<attachment://{encoded_name}> \"原图标题\")"
-        );
-        let (materialized, referenced) =
-            materialize_capture_raw_markdown(&source, &[attachment], "file")
-                .expect("materialize original image positions");
-        assert_eq!(
-            materialized
-                .matches("![[资料库/附件/采集/插图-1.png]]")
-                .count(),
-            4
-        );
-        assert!(referenced.contains("asset-1"));
-        assert!(!materialized.contains("attachment://"));
-        assert!(materialized.find("第一段").unwrap() < materialized.find("第二段").unwrap());
-        assert!(materialized.find("第二段").unwrap() < materialized.find("第三段").unwrap());
-        assert!(materialized.find("第三段").unwrap() < materialized.find("第四段").unwrap());
-    }
-
-    #[test]
-    fn faithful_source_materializes_every_reference_id_for_one_asset() {
-        let mut attachment = image_attachment(
-            "asset-shared",
-            "shared.png",
-            "资料库/附件/采集/shared.png",
-            true,
-        );
-        attachment.reference_id = Some("ref-first".to_string());
-        attachment.reference_ids = vec!["ref-first".to_string(), "ref-second".to_string()];
-        let source = "前文\n\n![第一处](attachment://ref-first)\n\n中间\n\n![第二处](attachment://ref-second)\n\n后文";
-        let (materialized, referenced) =
-            materialize_capture_raw_markdown(source, &[attachment], "file")
-                .expect("materialize all positions for one shared asset");
-        assert_eq!(
-            materialized
-                .matches("![[资料库/附件/采集/shared.png]]")
-                .count(),
-            2
-        );
-        assert!(referenced.contains("asset-shared"));
-        assert!(materialized.find("前文").unwrap() < materialized.find("中间").unwrap());
-        assert!(materialized.find("中间").unwrap() < materialized.find("后文").unwrap());
-
-        let mut incomplete = image_attachment(
-            "asset-shared",
-            "shared.png",
-            "资料库/附件/采集/shared.png",
-            true,
-        );
-        incomplete.reference_id = Some("ref-first".to_string());
-        incomplete.reference_ids = vec!["ref-first".to_string(), "ref-second".to_string()];
-        assert!(materialize_capture_raw_markdown(
-            "前文\n\n![仅第一处](attachment://ref-first)\n\n后文",
-            &[incomplete],
-            "file"
-        )
-        .unwrap_err()
-        .contains("部分图片位置"));
-
-        let mut prefix_collision = image_attachment(
-            "asset-prefix",
-            "prefix.png",
-            "资料库/附件/采集/prefix.png",
-            true,
-        );
-        prefix_collision.reference_id = Some("ref-1".to_string());
-        prefix_collision.reference_ids = vec!["ref-1".to_string(), "ref-10".to_string()];
-        assert!(materialize_capture_raw_markdown(
-            "![仅长引用](attachment://ref-10)",
-            &[prefix_collision],
-            "file"
-        )
-        .unwrap_err()
-        .contains("ref-1"));
-    }
-
-    #[test]
-    fn agent_source_places_one_visual_observation_at_every_exact_reference() {
-        let mut attachment = image_attachment(
-            "asset-shared",
-            "shared.png",
-            "资料库/附件/采集/shared.png",
-            true,
-        );
-        attachment.reference_id = Some("ref-first".to_string());
-        attachment.reference_ids = vec!["ref-first".to_string(), "ref-second".to_string()];
-        let analysis = serde_json::json!({
-            "analysis_markdown": "前文\n\n![第一处](attachment://ref-first)\n\n中间\n\n![第二处](attachment://ref-second)\n\n后文",
-            "tags": ["图片分析"],
-            "image_bindings": [image_binding(
-                "asset-shared",
-                &["ref-first", "ref-second"],
-                b"image fixture",
-                b"image fixture",
-                "image/png",
-                false,
-            )],
-            "image_observations": [{
-                "asset_id": "asset-shared",
-                "reference_id": "ref-first",
-                "observation": "同一张流程图，成本 $100",
-                "confidence": 0.9
-            }]
-        });
-        let markdown = build_agent_capture_markdown(
-            "多位置图片",
-            None,
-            "file",
-            "个人库",
-            Some("资料库/原文/多位置图片.md"),
-            &analysis,
-            &[attachment],
-            &[],
-        )
-        .expect("place one analyzed asset at every occurrence");
-        assert_eq!(markdown.matches("同一张流程图，成本 $100").count(), 2);
-        assert!(markdown.contains("reference `ref-first`"));
-        assert!(markdown.contains("reference `ref-second`"));
-        assert_eq!(
-            markdown.matches("\"asset_id\": \"asset-shared\"").count(),
-            2
-        );
-        assert_eq!(
-            markdown
-                .matches(&format!(
-                    "\"original_sha256\": \"{}\"",
-                    hash_bytes(b"image fixture")
-                ))
-                .count(),
-            2
-        );
-        assert_eq!(markdown.matches("\"derived\": false").count(), 2);
-        assert_eq!(markdown.matches("\"reference_ids\": [").count(), 2);
-        assert!(markdown.find("前文").unwrap() < markdown.find("中间").unwrap());
-        assert!(markdown.find("中间").unwrap() < markdown.find("后文").unwrap());
-    }
-
-    #[test]
-    fn agent_source_labels_legacy_shared_placeholders_with_all_reference_ids() {
-        let mut attachment = image_attachment(
-            "asset-shared",
-            "shared.png",
-            "资料库/附件/采集/shared.png",
-            true,
-        );
-        attachment.reference_id = Some("ref-first".to_string());
-        attachment.reference_ids = vec!["ref-first".to_string(), "ref-second".to_string()];
-        let analysis = serde_json::json!({
-            "analysis_markdown": "第一处\n\n![图](attachment://shared.png)\n\n第二处\n\n![图](attachment://shared.png)",
-            "image_bindings": [image_binding(
-                "asset-shared",
-                &["ref-first", "ref-second"],
-                b"image fixture",
-                b"image fixture",
-                "image/png",
-                false,
-            )],
-            "image_observations": [{
-                "asset_id": "asset-shared",
-                "observation": "旧格式图片",
-                "confidence": 0.8
-            }]
-        });
-        let markdown = build_agent_capture_markdown(
-            "旧占位图片",
-            None,
-            "file",
-            "个人库",
-            Some("资料库/原文/旧占位图片.md"),
-            &analysis,
-            &[attachment],
-            &[],
-        )
-        .expect("preserve legacy shared placeholder positions");
-        assert_eq!(markdown.matches("旧格式图片").count(), 2);
-        assert_eq!(
-            markdown
-                .matches("references `ref-first`, `ref-second`")
-                .count(),
-            2
-        );
-    }
-
-    #[test]
-    fn agent_source_persists_large_derived_image_binding_without_changing_original_bytes() {
-        let original_bytes = vec![0xabu8; 4 * 1024 * 1024 + 1];
-        let analysis_bytes = b"derived jpeg analysis input";
-        let mut attachment = image_attachment(
-            "asset-large",
-            "large.png",
-            "资料库/附件/采集/large.png",
-            true,
-        );
-        attachment.reference_id = Some("ref-large".to_string());
-        attachment.reference_ids = vec!["ref-large".to_string()];
-        attachment.content_base64 =
-            Some(base64::engine::general_purpose::STANDARD.encode(original_bytes.as_slice()));
-        attachment.expected_sha256 = Some(hash_bytes(&original_bytes));
-        let original_base64 = attachment.content_base64.clone();
-        let analysis = serde_json::json!({
-            "analysis_markdown": "模型已通过派生输入理解大图。\n\n![大图](attachment://ref-large)",
-            "image_bindings": [image_binding(
-                "asset-large",
-                &["ref-large"],
-                &original_bytes,
-                analysis_bytes,
-                "image/jpeg",
-                true,
-            )],
-            "image_observations": [{
-                "asset_id": "asset-large",
-                "reference_id": "ref-large",
-                "observation": "大尺寸原图的有效内容",
-                "confidence": 0.93
-            }]
-        });
-        let markdown = build_agent_capture_markdown(
-            "大图派生分析",
-            None,
-            "file",
-            "个人库",
-            Some("资料库/原文/大图派生分析.md"),
-            &analysis,
-            std::slice::from_ref(&attachment),
-            &[],
-        )
-        .expect("persist a verified derived-image binding");
-        assert!(markdown.contains("\"derived\": true"));
-        assert!(markdown.contains(&format!(
-            "\"original_sha256\": \"{}\"",
-            hash_bytes(&original_bytes)
-        )));
-        assert!(markdown.contains(&format!(
-            "\"analysis_input_sha256\": \"{}\"",
-            hash_bytes(analysis_bytes)
-        )));
-        assert!(markdown.contains(&format!(
-            "\"original_byte_length\": {}",
-            original_bytes.len()
-        )));
-        assert!(markdown.contains(&format!(
-            "\"analysis_byte_length\": {}",
-            analysis_bytes.len()
-        )));
-        assert_eq!(attachment.content_base64, original_base64);
-    }
-
-    #[test]
-    fn agent_source_rejects_missing_or_conflicting_structured_image_bindings() {
-        let mut attachment = image_attachment(
-            "asset-required",
-            "required.png",
-            "资料库/附件/采集/required.png",
-            true,
-        );
-        attachment.reference_id = Some("ref-required".to_string());
-        attachment.reference_ids = vec!["ref-required".to_string()];
-        let missing = serde_json::json!({
-            "analysis_markdown": "自由文本声称 image_bindings 已完成，但没有结构化字段。",
-            "image_observations": [{
-                "asset_id": "asset-required",
-                "reference_id": "ref-required",
-                "observation": "图片内容",
-                "confidence": 0.9
-            }]
-        });
-        let missing_error = build_agent_capture_markdown(
-            "缺失 binding",
-            None,
-            "file",
-            "个人库",
-            Some("资料库/原文/缺失-binding.md"),
-            &missing,
-            std::slice::from_ref(&attachment),
-            &[],
-        )
-        .unwrap_err();
-        assert!(missing_error.contains("缺少结构化 image binding"));
-
-        let conflicting = serde_json::json!({
-            "analysis_markdown": "结构化 binding 的允许位置与附件冲突。",
-            "image_bindings": [image_binding(
-                "asset-required",
-                &["ref-not-allowed"],
-                b"image fixture",
-                b"image fixture",
-                "image/png",
-                false,
-            )],
-            "image_observations": [{
-                "asset_id": "asset-required",
-                "reference_id": "ref-required",
-                "observation": "图片内容",
-                "confidence": 0.9
-            }]
-        });
-        let conflict_error = build_agent_capture_markdown(
-            "冲突 binding",
-            None,
-            "file",
-            "个人库",
-            Some("资料库/原文/冲突-binding.md"),
-            &conflicting,
-            &[attachment],
-            &[],
-        )
-        .unwrap_err();
-        assert!(conflict_error.contains("允许位置与 image binding reference_ids 冲突"));
-    }
-
-    #[test]
-    fn dual_vault_gate_rejects_external_image_failures() {
-        let failure = serde_json::json!({
-            "url": "https://example.com/image.png",
-            "reason_code": "not_image_mime"
-        });
-        assert!(validate_external_image_localization("正文", &[failure])
-            .unwrap_err()
-            .contains("尚未完整本地化"));
-        assert!(validate_external_image_localization(
-            "正文\n\n[外链图片本地化失败：插图；响应不是图片]",
-            &[]
-        )
-        .unwrap_err()
-        .contains("尚未完整本地化"));
-        validate_external_image_localization("正文", &[])
-            .expect("complete source passes external image gate");
-    }
-
-    #[test]
-    fn faithful_source_rejects_unresolved_or_required_unplaced_images() {
-        let attachment = image_attachment(
-            "asset-required",
-            "required.png",
-            "资料库/附件/采集/required.png",
-            true,
-        );
-        assert!(
-            materialize_capture_raw_markdown("没有图片占位", &[attachment], "file")
-                .unwrap_err()
-                .contains("没有找到")
-        );
-        assert!(materialize_capture_raw_markdown(
-            "![未知](attachment://unknown-image)",
-            &[],
-            "url"
-        )
-        .unwrap_err()
-        .contains("未解析"));
-    }
-
-    #[test]
-    fn dual_vault_capture_prepares_and_atomically_commits_faithful_and_understood_notes() {
-        let _environment = TEST_ENVIRONMENT_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let temporary = tempfile::tempdir().expect("create isolated dual-vault directory");
-        let home = temporary.path().join("home");
-        let vault_root = home.join("Yunspire/vault");
-        let agent_path = vault_root.join("Agent 库");
-        let personal_path = vault_root.join("个人库");
-        let app_data = temporary.path().join("app-data");
-        let config_path = temporary.path().join("obsidian.json");
-        for path in [&agent_path, &personal_path] {
-            fs::create_dir_all(path.join(".obsidian")).expect("create isolated Obsidian vault");
-        }
-        fs::create_dir_all(agent_path.join("知识库")).expect("create agent knowledge directory");
-        fs::write(
-            agent_path.join("知识库/既有知识.md"),
-            "# 既有知识\n\n知识管理与本地优先。\n",
-        )
-        .expect("write related note fixture");
-        let agent = agent_path.canonicalize().expect("canonicalize agent vault");
-        let personal = personal_path
-            .canonicalize()
-            .expect("canonicalize personal vault");
-        fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({
-                "vaults": {
-                    "vault-agent": {"path": agent.to_string_lossy(), "open": false},
-                    "vault-personal": {"path": personal.to_string_lossy(), "open": false}
-                }
-            }))
-            .expect("serialize dual-vault config"),
-        )
-        .expect("write dual-vault config");
-        let _variables = EnvironmentGuard::set(&[
-            ("YUNSPIRE_OBSIDIAN_CONFIG_PATH", &config_path),
-            ("YUNSPIRE_HOME_DIR", &home),
-        ]);
-        let database = RuntimeDatabase::open_test(&app_data.join("runtime.sqlite"))
-            .expect("open isolated runtime database");
-        let analysis_state = ModelAnalysisState::default();
-        let receipt = analysis_state
-            .issue("local")
-            .expect("issue model analysis receipt");
-        let state = ObsidianAdapterState::default();
-        let encoded_name = encode_uri_component("figure 1.png");
-        let analysis = serde_json::json!({
-            "summary": "本地知识管理资料",
-            "analysis_markdown": "这份资料说明了本地优先的知识管理方法。",
-            "tags": ["知识管理", "本地优先"],
-            "entities": ["Obsidian"],
-            "key_points": ["忠实原文与理解稿分离"],
-            "image_bindings": [image_binding(
-                "asset-figure-1",
-                &["ref-asset-figure-1"],
-                b"image fixture",
-                b"image fixture",
-                "image/png",
-                false,
-            )],
-            "image_observations": [{
-                "asset_id": "asset-figure-1",
-                "reference_id": "ref-asset-figure-1",
-                "observation": "一张双库信息流示意图",
-                "text": "个人库 -> Agent 库",
-                "context": "正文第一段之后",
-                "evidence": "图中箭头和库名",
-                "confidence": 0.94
-            }],
-            "relations": [{
-                "source_id": "paragraph-1",
-                "target_id": "asset-figure-1",
-                "relation": "图示说明",
-                "evidence": "正文明确引用该图",
-                "confidence": 0.91
-            }]
-        });
-        let preview = prepare_capture_vault_writes_inner(
-            &analysis_state,
-            &state,
-            &database,
-            None,
-            CaptureVaultWriteInput {
-                raw_vault_id: "vault-personal".to_string(),
-                agent_vault_id: "vault-agent".to_string(),
-                raw_relative_path: "资料库/原文/双库资料.md".to_string(),
-                agent_relative_path: None,
-                title: "双库资料".to_string(),
-                source_url: Some("https://example.com/source".to_string()),
-                source_type: "file".to_string(),
-                raw_markdown: format!(
-                    "第一段原文。\n\n![原图](attachment://{encoded_name})\n\n第二段原文。"
-                ),
-                analysis: analysis.clone(),
-                attachments: vec![image_attachment(
-                    "asset-figure-1",
-                    "figure 1.png",
-                    "资料库/附件/采集/双库资料-1.png",
-                    true,
-                )],
-                external_image_failures: Vec::new(),
-                analysis_receipt: receipt.clone(),
-                operation_context: Some(OperationContext {
-                    task_id: Some("capture-task".to_string()),
-                    trace_id: Some("capture-trace".to_string()),
-                    execution_ticket: None,
-                }),
-            },
-        )
-        .expect("prepare dual-vault capture");
-        assert!(preview.raw_note_included);
-        assert_eq!(preview.note_previews.len(), 2);
-        assert_eq!(preview.asset_previews.len(), 1);
-        assert_eq!(preview.agent_relative_path, "资料库/原文/双库资料.md");
-        assert!(preview
-            .agent_markdown
-            .contains("yunspire.agent-understood-source.v1"));
-        assert!(preview
-            .agent_markdown
-            .contains("content_role: analyzed_original"));
-        assert!(preview.agent_markdown.contains("asset-figure-1"));
-        assert!(preview.agent_markdown.contains("一张双库信息流示意图"));
-        assert!(preview.agent_markdown.contains("[[知识管理]]"));
-        assert!(preview
-            .related_notes
-            .iter()
-            .any(|path| path == "知识库/既有知识"));
-
-        let results = commit_capture_batch_inner(
-            &app_data,
-            &analysis_state,
-            &state,
-            &database,
-            None,
-            preview
-                .note_previews
-                .iter()
-                .map(|item| item.approval_id.clone())
-                .collect(),
-            preview
-                .asset_previews
-                .iter()
-                .map(|item| item.approval_id.clone())
-                .collect(),
-            Some("capture".to_string()),
-        )
-        .expect("commit dual-vault capture atomically");
-        assert_eq!(results.len(), 3);
-        let raw_note = fs::read_to_string(personal.join("资料库/原文/双库资料.md"))
-            .expect("read faithful source note");
-        assert!(raw_note.contains("yunspire.faithful-source.v1"));
-        assert!(raw_note.contains("![[资料库/附件/采集/双库资料-1.png]]"));
-        assert!(raw_note.find("第一段原文").unwrap() < raw_note.find("第二段原文").unwrap());
-        assert!(!raw_note.contains("analysis_input_sha256"));
-        assert!(!raw_note.contains("这份资料说明了本地优先的知识管理方法。"));
-        let agent_note = fs::read_to_string(agent.join("资料库/原文/双库资料.md"))
-            .expect("read agent understood note");
-        assert!(agent_note.contains("knowledge_association: obsidian-tags-and-wikilinks"));
-        assert!(agent_note.contains("obsidian://open?"));
-        assert!(agent_note.contains("analysis_input_sha256"));
-        assert!(!agent_note.contains("第一段原文。"));
-        assert!(!agent_note.contains("第二段原文。"));
-        assert!(!agent_note.contains("## 模型理解后的原文"));
-        assert!(!agent_note.contains("## 综合分析"));
-        assert_eq!(agent_note.matches("## 分析内容").count(), 1);
-        assert_eq!(
-            agent_note
-                .matches("这份资料说明了本地优先的知识管理方法。")
-                .count(),
-            1
-        );
-        assert!(personal.join("资料库/附件/采集/双库资料-1.png").is_file());
-        assert_eq!(
-            fs::read(personal.join("资料库/附件/采集/双库资料-1.png"))
-                .expect("read unchanged faithful image bytes"),
-            b"image fixture"
-        );
-        assert!(!agent.join("资料库/附件/采集/双库资料-1.png").exists());
-        assert!(analysis_state.validate("local", &receipt).is_err());
-
-        let same_vault_receipt = analysis_state
-            .issue("local")
-            .expect("issue same-vault analysis receipt");
-        let same_vault_preview = prepare_capture_vault_writes_inner(
-            &analysis_state,
-            &state,
-            &database,
-            None,
-            CaptureVaultWriteInput {
-                raw_vault_id: "vault-agent".to_string(),
-                agent_vault_id: "vault-agent".to_string(),
-                raw_relative_path: "资料库/原文/Agent单稿.md".to_string(),
-                agent_relative_path: None,
-                title: "Agent单稿".to_string(),
-                source_url: Some("https://example.com/agent-only".to_string()),
-                source_type: "file".to_string(),
-                raw_markdown: format!(
-                    "只用于构建理解稿的源内容。\n\n![原图](attachment://{encoded_name})"
-                ),
-                analysis: analysis.clone(),
-                attachments: vec![image_attachment(
-                    "asset-figure-1",
-                    "figure 1.png",
-                    "资料库/附件/采集/Agent单稿-1.png",
-                    true,
-                )],
-                external_image_failures: Vec::new(),
-                analysis_receipt: same_vault_receipt,
-                operation_context: None,
-            },
-        )
-        .expect("prepare one Agent note for a same-vault capture");
-        assert!(!same_vault_preview.raw_note_included);
-        assert_eq!(same_vault_preview.note_previews.len(), 1);
-        assert_eq!(same_vault_preview.asset_previews.len(), 0);
-        assert!(!same_vault_preview.agent_markdown.contains("raw_vault:"));
-        assert!(!same_vault_preview.agent_markdown.contains("raw_note:"));
-        assert!(!same_vault_preview.agent_markdown.contains("- 忠实原文："));
-        assert!(!same_vault_preview
-            .agent_markdown
-            .contains("只用于构建理解稿的源内容。"));
-        assert_eq!(
-            same_vault_preview
-                .agent_markdown
-                .matches("这份资料说明了本地优先的知识管理方法。")
-                .count(),
-            1
-        );
-        assert!(same_vault_preview
-            .agent_markdown
-            .contains("一张双库信息流示意图"));
-
-        let same_vault_results = commit_capture_batch_inner(
-            &app_data,
-            &analysis_state,
-            &state,
-            &database,
-            None,
-            same_vault_preview
-                .note_previews
-                .iter()
-                .map(|item| item.approval_id.clone())
-                .collect(),
-            Vec::new(),
-            Some("capture".to_string()),
-        )
-        .expect("commit one same-vault Agent note");
-        assert_eq!(same_vault_results.len(), 1);
-        let same_vault_agent_note = fs::read_to_string(agent.join("资料库/原文/Agent单稿.md"))
-            .expect("read same-vault Agent analysis note");
-        assert!(same_vault_agent_note.contains("yunspire.agent-understood-source.v1"));
-        assert!(!agent.join("资料库/来源原文/Agent单稿.md").exists());
-        assert!(!agent.join("资料库/附件/采集/Agent单稿-1.png").exists());
-
-        let missing_binding_receipt = analysis_state
-            .issue("local")
-            .expect("issue missing-binding analysis receipt");
-        let mut missing_binding_analysis = analysis.clone();
-        missing_binding_analysis
-            .as_object_mut()
-            .expect("analysis object")
-            .remove("image_bindings");
-        let missing_binding = match prepare_capture_vault_writes_inner(
-            &analysis_state,
-            &state,
-            &database,
-            None,
-            CaptureVaultWriteInput {
-                raw_vault_id: "vault-personal".to_string(),
-                agent_vault_id: "vault-agent".to_string(),
-                raw_relative_path: "资料库/原文/缺失 binding.md".to_string(),
-                agent_relative_path: None,
-                title: "缺失 binding".to_string(),
-                source_url: Some("https://example.com/missing-binding".to_string()),
-                source_type: "file".to_string(),
-                raw_markdown: format!("![原图](attachment://{encoded_name})"),
-                analysis: missing_binding_analysis,
-                attachments: vec![image_attachment(
-                    "asset-figure-1",
-                    "figure 1.png",
-                    "资料库/附件/采集/缺失-binding-1.png",
-                    true,
-                )],
-                external_image_failures: Vec::new(),
-                analysis_receipt: missing_binding_receipt,
-                operation_context: None,
-            },
-        ) {
-            Ok(_) => panic!("dual-vault preparation must reject a missing image binding"),
-            Err(error) => error,
-        };
-        assert!(missing_binding.contains("缺少结构化 image binding"));
-        assert!(state.pending_writes.lock().unwrap().is_empty());
-        assert!(state.pending_assets.lock().unwrap().is_empty());
-
-        let conflict_receipt = analysis_state
-            .issue("local")
-            .expect("issue replacement analysis receipt");
-        let conflict = match prepare_capture_vault_writes_inner(
-            &analysis_state,
-            &state,
-            &database,
-            None,
-            CaptureVaultWriteInput {
-                raw_vault_id: "vault-personal".to_string(),
-                agent_vault_id: "vault-agent".to_string(),
-                raw_relative_path: "资料库/原文/双库资料.md".to_string(),
-                agent_relative_path: None,
-                title: "双库资料".to_string(),
-                source_url: Some("https://example.com/changed-source".to_string()),
-                source_type: "file".to_string(),
-                raw_markdown: format!("同标题但内容不同。\n\n![原图](attachment://{encoded_name})"),
-                analysis,
-                attachments: vec![image_attachment(
-                    "asset-figure-1",
-                    "figure 1.png",
-                    "资料库/附件/采集/双库资料-1.png",
-                    true,
-                )],
-                external_image_failures: Vec::new(),
-                analysis_receipt: conflict_receipt,
-                operation_context: None,
-            },
-        ) {
-            Ok(_) => panic!("capture preparation must never overwrite an existing source"),
-            Err(error) => error,
-        };
-        assert!(conflict.contains("已阻止覆盖忠实原文"));
-        assert!(state.pending_writes.lock().unwrap().is_empty());
-        assert!(state.pending_assets.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn capture_batch_commits_markdown_asset_checkpoint_and_operation_event() {
-        let _environment = TEST_ENVIRONMENT_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let temporary = tempfile::tempdir().expect("create isolated directory");
-        let vault_path = temporary.path().join("vault");
-        let app_data = temporary.path().join("app-data");
-        let config_path = temporary.path().join("obsidian.json");
-        fs::create_dir_all(vault_path.join(".obsidian")).expect("create isolated vault");
-        let vault = vault_path
-            .canonicalize()
-            .expect("canonicalize isolated vault");
-        fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({
-                "vaults": {
-                    "vault-capture": {
-                        "path": vault.to_string_lossy(),
-                        "open": false
-                    }
-                }
-            }))
-            .expect("serialize isolated Obsidian config"),
-        )
-        .expect("write isolated Obsidian config");
-        let _variables = EnvironmentGuard::set(&[("YUNSPIRE_OBSIDIAN_CONFIG_PATH", &config_path)]);
-        let database = RuntimeDatabase::open_test(&app_data.join("runtime.sqlite"))
-            .expect("open isolated runtime database");
-        let analysis_state = ModelAnalysisState::default();
-        let receipt = analysis_state
-            .issue("local")
-            .expect("issue model analysis receipt");
-        let state = ObsidianAdapterState::default();
-        let note_approval = "note-approval".to_string();
-        let asset_approval = "asset-approval".to_string();
-        let note_path = vault.join("资料库/网页/原文.md");
-        let asset_path = vault.join("资料库/附件/source.json");
-        state
-            .pending_writes
-            .lock()
-            .expect("lock pending notes")
-            .insert(
-                note_approval.clone(),
-                PendingWrite {
-                    task_id: Some("capture-task".to_string()),
-                    trace_id: Some("capture-trace".to_string()),
-                    vault_id: "vault-capture".to_string(),
-                    vault_path: vault.clone(),
-                    relative_path: "资料库/网页/原文.md".to_string(),
-                    target_path: note_path.clone(),
-                    content: "---\ntags: [\"采集\"]\n---\n\n# 原文\n\n模型分析已完成。\n"
-                        .to_string(),
-                    expected_hash: None,
-                    previous_hash: None,
-                    analysis_receipt: receipt.clone(),
-                    execution_ticket: None,
-                    effect_digest: "test-note-effect".to_string(),
-                    created_at: SystemTime::now(),
-                },
-            );
-        state
-            .pending_assets
-            .lock()
-            .expect("lock pending assets")
-            .insert(
-                asset_approval.clone(),
-                PendingAssetWrite {
-                    task_id: Some("capture-task".to_string()),
-                    trace_id: Some("capture-trace".to_string()),
-                    vault_id: "vault-capture".to_string(),
-                    vault_path: vault.clone(),
-                    relative_path: "资料库/附件/source.json".to_string(),
-                    target_path: asset_path.clone(),
-                    source: PendingAssetSource::Bytes(
-                        br#"{"schema":"yunspire.capture.verification.v1"}"#.to_vec(),
-                    ),
-                    content_hash: hash_bytes(br#"{"schema":"yunspire.capture.verification.v1"}"#),
-                    previous_hash: None,
-                    analysis_receipt: receipt.clone(),
-                    execution_ticket: None,
-                    effect_digest: "test-asset-effect".to_string(),
-                    created_at: SystemTime::now(),
-                },
-            );
-
-        let results = commit_capture_batch_inner(
-            &app_data,
-            &analysis_state,
-            &state,
-            &database,
-            None,
-            vec![note_approval],
-            vec![asset_approval],
-            Some("capture".to_string()),
-        )
-        .expect("commit isolated capture batch");
-
-        assert_eq!(results.len(), 2);
-        assert!(fs::read_to_string(&note_path)
-            .expect("read committed note")
-            .contains("模型分析已完成"));
-        assert_eq!(
-            fs::read_to_string(&asset_path).expect("read committed asset"),
-            r#"{"schema":"yunspire.capture.verification.v1"}"#
-        );
-        assert!(results
-            .iter()
-            .all(|result| Path::new(&result.checkpoint_path).is_file()));
-        assert!(analysis_state.validate("local", &receipt).is_err());
-        assert!(state.pending_writes.lock().unwrap().is_empty());
-        assert!(state.pending_assets.lock().unwrap().is_empty());
-        let events = database
-            .list_native_operation_events(10)
-            .expect("read operation events");
-        assert_eq!(
-            events.last().map(|event| event.event_type.as_str()),
-            Some("vault.capture.batch.write")
-        );
-        let batch_event = events.last().expect("capture batch operation event");
-        assert_eq!(batch_event.vault_id.as_deref(), Some("vault-capture"));
-        assert_eq!(
-            batch_event.relative_path.as_deref(),
-            Some("资料库/网页/原文.md")
-        );
-        let vault_trace_count = database
-            .connection
-            .lock()
-            .expect("lock runtime database")
-            .query_row(
-                "SELECT COUNT(*) FROM runtime_trace_events
-                 WHERE trace_id='capture-trace' AND entity_kind='vault_operation'
-                   AND event_type='vault.capture.batch.write' AND state='success'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("count capture Vault Trace events");
-        assert_eq!(vault_trace_count, 1);
-    }
-
-    #[test]
-    fn obsidian_url_percent_encodes_unicode_and_normalizes_separators() {
-        let url = obsidian_open_url("个人知识库", "项目\\Cafe\u{301} 🧭.md")
-            .expect("build encoded Obsidian URL");
-        assert_eq!(
-            url,
-            "obsidian://open?vault=%E4%B8%AA%E4%BA%BA%E7%9F%A5%E8%AF%86%E5%BA%93&file=%E9%A1%B9%E7%9B%AE%2FCaf%C3%A9%20%F0%9F%A7%AD"
-        );
-        assert!(!url.contains('\u{fffd}'));
-    }
 }

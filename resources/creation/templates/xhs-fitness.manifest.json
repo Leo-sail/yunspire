@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "template",
+  "catalogVersion": "0.4.0",
+  "id": "xhs-fitness",
+  "version": "1.0.0",
+  "displayName": "小红书运动记录",
+  "description": "把目标、训练动作、感受和恢复安排写成可坚持的记录。",
+  "status": "active",
+  "contentType": "xiaohongshu",
+  "artifactType": "socialPost",
+  "tags": [
+    "小红书",
+    "运动",
+    "记录",
+    "原创模板",
+    "本地知识库"
+  ],
+  "inputFormats": [
+    "plainText",
+    "markdown",
+    "image"
+  ],
+  "outputFormats": [
+    "markdown",
+    "html",
+    "png",
+    "jpeg"
+  ],
+  "entrypoint": "xhs-fitness/template.md",
+  "files": [
+    {
+      "path": "xhs-fitness/template.md",
+      "kind": "markdown",
+      "editable": true,
+      "contentHash": "sha256:9849de28a575b32180298008a50b5a7a3185f72a06c0df927a16bdbcb6904272"
+    }
+  ],
+  "editableSurfaces": [
+    "content"
+  ],
+  "agentCapabilities": [
+    "creation.generate",
+    "creation.edit"
+  ],
+  "sandbox": {
+    "network": false,
+    "shell": false,
+    "vaultWrite": false,
+    "allowTopNavigation": false,
+    "allowPopups": false,
+    "allowExternalScripts": false
+  },
+  "compatibility": {
+    "minRuntimeVersion": "0.1.2",
+    "previewMode": "sandboxedIframe"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This template is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire template manifest and Markdown entrypoint; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

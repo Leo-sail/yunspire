@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yunspire.local/schemas/component-manifest.schema.json",
+  "title": "CreationComponentManifest",
+  "description": "Semantic content component metadata. Rendering is resolved by allowlisted first-party renderer IDs rather than executable manifest code.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "manifestType",
+    "catalogVersion",
+    "id",
+    "version",
+    "displayName",
+    "description",
+    "status",
+    "category",
+    "legacyIds",
+    "blockKind",
+    "templateMarkdown",
+    "slots",
+    "semantics",
+    "constraints",
+    "renderers",
+    "compatibility",
+    "source",
+    "license"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "manifestType": { "const": "component" },
+    "catalogVersion": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,79}$" },
+    "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "displayName": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "status": { "type": "string", "enum": ["active", "experimental", "deprecated"] },
+    "category": { "type": "string", "enum": ["structure", "emphasis", "information", "comparison", "sequence", "conversation", "navigation", "media", "conversion"] },
+    "legacyIds": { "type": "array", "maxItems": 20, "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,79}$" }, "uniqueItems": true },
+    "blockKind": { "type": "string", "enum": ["container", "leaf", "divider", "media", "collection"] },
+    "templateMarkdown": { "type": "string", "minLength": 3 },
+    "slots": {
+      "type": "array",
+      "maxItems": 30,
+      "items": { "$ref": "#/$defs/slot" }
+    },
+    "semantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "ariaLabel", "markdownFallback"],
+      "properties": {
+        "role": { "type": "string", "enum": ["note", "blockquote", "list", "group", "separator", "dialog", "timeline", "callToAction", "figure"] },
+        "ariaLabel": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "markdownFallback": { "type": "string", "enum": ["callout", "blockquote", "list", "paragraphs", "thematicBreak", "table", "figure"] }
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minItems", "maxItems", "allowNestedComponents", "spanLeaf", "allowScripts", "allowExternalStyles"],
+      "properties": {
+        "minItems": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "maxItems": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "allowNestedComponents": { "type": "boolean" },
+        "spanLeaf": { "type": "boolean" },
+        "allowScripts": { "const": false },
+        "allowExternalStyles": { "const": false }
+      }
+    },
+    "renderers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["markdown", "html", "wechatRichText"],
+      "properties": {
+        "markdown": { "type": "string", "pattern": "^creation\\.component\\.[a-z0-9-]+\\.markdown\\.v\\d+$" },
+        "html": { "type": "string", "pattern": "^creation\\.component\\.[a-z0-9-]+\\.html\\.v\\d+$" },
+        "wechatRichText": { "type": "string", "pattern": "^creation\\.component\\.[a-z0-9-]+\\.wechat\\.v\\d+$" }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targets", "minRuntimeVersion"],
+      "properties": {
+        "targets": { "type": "array", "minItems": 1, "items": { "type": "string", "enum": ["markdown", "html", "wechatRichText"] }, "uniqueItems": true },
+        "minRuntimeVersion": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" }
+      }
+    },
+    "source": { "$ref": "#/$defs/source" },
+    "license": { "$ref": "#/$defs/license" }
+  },
+  "$defs": {
+    "slot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "required", "maxLength"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-zA-Z0-9]{0,59}$" },
+        "kind": { "type": "string", "enum": ["text", "richText", "number", "list", "image", "link", "component"] },
+        "required": { "type": "boolean" },
+        "maxLength": { "type": ["integer", "null"], "minimum": 1, "maximum": 100000 }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy", "authoredBy", "repository", "upstreamCodeCopied", "researchBoundary"],
+      "properties": {
+        "policy": { "const": "yunspire_first_party" },
+        "authoredBy": { "const": "Yunspire" },
+        "repository": { "const": "https://github.com/Leo-sail/yunspire" },
+        "upstreamCodeCopied": { "const": false },
+        "researchBoundary": { "type": "string", "minLength": 1, "maxLength": 1000 }
+      }
+    },
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "notice", "thirdPartyAssets"],
+      "properties": {
+        "scope": { "const": "yunspire_first_party_project_asset" },
+        "notice": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "thirdPartyAssets": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 500 }, "uniqueItems": true }
+      }
+    }
+  }
+}

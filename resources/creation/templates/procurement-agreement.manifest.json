@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "template",
+  "catalogVersion": "0.4.0",
+  "id": "procurement-agreement",
+  "version": "1.0.0",
+  "displayName": "采购合同",
+  "description": "规范采购标的、质量、交付、付款和售后责任。",
+  "status": "active",
+  "contentType": "contract",
+  "artifactType": "report",
+  "tags": [
+    "合同",
+    "采购",
+    "质量",
+    "原创模板",
+    "本地知识库"
+  ],
+  "inputFormats": [
+    "plainText",
+    "markdown",
+    "docx",
+    "pdf"
+  ],
+  "outputFormats": [
+    "markdown",
+    "html",
+    "pdf"
+  ],
+  "entrypoint": "procurement-agreement/template.md",
+  "files": [
+    {
+      "path": "procurement-agreement/template.md",
+      "kind": "markdown",
+      "editable": true,
+      "contentHash": "sha256:9a375aeef2154e335b4c237cb8722c0b9f1db11b12b7f134122086dfaf887d69"
+    }
+  ],
+  "editableSurfaces": [
+    "content"
+  ],
+  "agentCapabilities": [
+    "creation.generate",
+    "creation.edit"
+  ],
+  "sandbox": {
+    "network": false,
+    "shell": false,
+    "vaultWrite": false,
+    "allowTopNavigation": false,
+    "allowPopups": false,
+    "allowExternalScripts": false
+  },
+  "compatibility": {
+    "minRuntimeVersion": "0.1.2",
+    "previewMode": "sandboxedIframe"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This template is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire template manifest and Markdown entrypoint; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "template",
+  "catalogVersion": "0.4.0",
+  "id": "decision-guide",
+  "version": "1.0.0",
+  "displayName": "决策指南",
+  "description": "把模糊选择转成明确条件、评估维度和推荐动作。",
+  "status": "active",
+  "contentType": "article",
+  "artifactType": "report",
+  "tags": [
+    "决策",
+    "指南",
+    "取舍",
+    "原创模板",
+    "本地知识库"
+  ],
+  "inputFormats": [
+    "plainText",
+    "markdown",
+    "docx",
+    "pdf"
+  ],
+  "outputFormats": [
+    "markdown",
+    "html"
+  ],
+  "entrypoint": "decision-guide/template.md",
+  "files": [
+    {
+      "path": "decision-guide/template.md",
+      "kind": "markdown",
+      "editable": true,
+      "contentHash": "sha256:3734ea073c9b64b845ecc79eab2f86d2641e85f62f2bdca8439a6af3bf3cff10"
+    }
+  ],
+  "editableSurfaces": [
+    "content"
+  ],
+  "agentCapabilities": [
+    "creation.generate",
+    "creation.edit"
+  ],
+  "sandbox": {
+    "network": false,
+    "shell": false,
+    "vaultWrite": false,
+    "allowTopNavigation": false,
+    "allowPopups": false,
+    "allowExternalScripts": false
+  },
+  "compatibility": {
+    "minRuntimeVersion": "0.1.2",
+    "previewMode": "sandboxedIframe"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This template is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire template manifest and Markdown entrypoint; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

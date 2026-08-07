@@ -5,7 +5,7 @@
   "identifier": "com.yunspire.desktop",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://127.0.0.1:1420/desktop-ui/index.html",
+    "devUrl": "http://127.0.0.1:1420",
     "beforeDevCommand": "npm run dev -- --host 127.0.0.1 --port 1420",
     "beforeBuildCommand": "npm run build"
   },
@@ -32,6 +32,7 @@
     "targets": "all",
     "licenseFile": "../LICENSE",
     "resources": {
+      "../resources/creation/": "creation/",
       "../skills/": "skills/",
       "../LICENSE": "legal/LICENSE",
       "../NOTICE": "legal/NOTICE",

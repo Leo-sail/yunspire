@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yunspire.local/schemas/template-manifest.schema.json",
+  "title": "CreationTemplateManifest",
+  "description": "Manifest for an original, sandboxed Creation Studio template with a local Markdown entrypoint. Files are declarative resources and cannot grant Shell, network, or Vault permissions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "manifestType",
+    "catalogVersion",
+    "id",
+    "version",
+    "displayName",
+    "description",
+    "status",
+    "artifactType",
+    "contentType",
+    "tags",
+    "inputFormats",
+    "outputFormats",
+    "entrypoint",
+    "files",
+    "editableSurfaces",
+    "agentCapabilities",
+    "sandbox",
+    "compatibility",
+    "source",
+    "license"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "manifestType": { "const": "template" },
+    "catalogVersion": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,79}$" },
+    "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "displayName": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "status": { "type": "string", "enum": ["active", "experimental", "deprecated"] },
+    "artifactType": { "type": "string", "enum": ["webpage", "wechatArticle", "socialPost", "poster", "report", "presentation", "dashboard", "email", "interactiveTool"] },
+    "contentType": { "type": "string", "enum": ["article", "wechat", "xiaohongshu", "contract", "paper"] },
+    "tags": { "type": "array", "maxItems": 30, "items": { "type": "string", "minLength": 1, "maxLength": 60 }, "uniqueItems": true },
+    "inputFormats": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "enum": ["plainText", "markdown", "html", "json", "csv", "tsv", "docx", "xlsx", "pptx", "pdf", "image"] },
+      "uniqueItems": true
+    },
+    "outputFormats": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "enum": ["html", "css", "javascript", "markdown", "json", "pdf", "png", "jpeg", "zip"] },
+      "uniqueItems": true
+    },
+    "entrypoint": { "$ref": "#/$defs/markdownPath" },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "kind", "editable", "contentHash"],
+        "properties": {
+          "path": { "$ref": "#/$defs/relativePath" },
+          "kind": { "type": "string", "enum": ["html", "css", "javascript", "json", "image", "font", "data", "markdown", "text"] },
+          "editable": { "type": "boolean" },
+          "contentHash": { "type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$" }
+        }
+      }
+    },
+    "editableSurfaces": { "type": "array", "minItems": 1, "items": { "type": "string", "enum": ["html", "css", "javascript", "markdown", "content", "data"] }, "uniqueItems": true },
+    "agentCapabilities": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "enum": ["creation.generate", "creation.edit"] },
+      "uniqueItems": true
+    },
+    "sandbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["network", "shell", "vaultWrite", "allowTopNavigation", "allowPopups", "allowExternalScripts"],
+      "properties": {
+        "network": { "const": false },
+        "shell": { "const": false },
+        "vaultWrite": { "const": false },
+        "allowTopNavigation": { "const": false },
+        "allowPopups": { "const": false },
+        "allowExternalScripts": { "const": false }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minRuntimeVersion", "previewMode"],
+      "properties": {
+        "minRuntimeVersion": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+        "previewMode": { "const": "sandboxedIframe" }
+      }
+    },
+    "source": { "$ref": "#/$defs/source" },
+    "license": { "$ref": "#/$defs/license" }
+  },
+  "$defs": {
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+    },
+    "markdownPath": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 2048,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+\\.md$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy", "authoredBy", "repository", "upstreamCodeCopied", "researchBoundary"],
+      "properties": {
+        "policy": { "const": "yunspire_first_party" },
+        "authoredBy": { "const": "Yunspire" },
+        "repository": { "const": "https://github.com/Leo-sail/yunspire" },
+        "upstreamCodeCopied": { "const": false },
+        "researchBoundary": { "type": "string", "minLength": 1, "maxLength": 1000 }
+      }
+    },
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "notice", "thirdPartyAssets"],
+      "properties": {
+        "scope": { "const": "yunspire_first_party_project_asset" },
+        "notice": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "thirdPartyAssets": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 500 }, "uniqueItems": true }
+      }
+    }
+  }
+}

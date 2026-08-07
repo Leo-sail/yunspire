@@ -1,0 +1,71 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "template",
+  "catalogVersion": "0.4.0",
+  "id": "theoretical-paper",
+  "version": "1.0.0",
+  "displayName": "理论论文",
+  "description": "定义概念、提出命题并说明理论边界和可能的检验路径。",
+  "status": "active",
+  "contentType": "paper",
+  "artifactType": "report",
+  "tags": [
+    "论文",
+    "理论",
+    "命题",
+    "原创模板",
+    "本地知识库"
+  ],
+  "inputFormats": [
+    "plainText",
+    "markdown",
+    "docx",
+    "xlsx",
+    "pdf"
+  ],
+  "outputFormats": [
+    "markdown",
+    "html",
+    "pdf"
+  ],
+  "entrypoint": "theoretical-paper/template.md",
+  "files": [
+    {
+      "path": "theoretical-paper/template.md",
+      "kind": "markdown",
+      "editable": true,
+      "contentHash": "sha256:98e3884c1fda0fba55ef2c66a7ce86abd14e2dde15373228a314b0b1dbc3bed2"
+    }
+  ],
+  "editableSurfaces": [
+    "content"
+  ],
+  "agentCapabilities": [
+    "creation.generate",
+    "creation.edit"
+  ],
+  "sandbox": {
+    "network": false,
+    "shell": false,
+    "vaultWrite": false,
+    "allowTopNavigation": false,
+    "allowPopups": false,
+    "allowExternalScripts": false
+  },
+  "compatibility": {
+    "minRuntimeVersion": "0.1.2",
+    "previewMode": "sandboxedIframe"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This template is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire template manifest and Markdown entrypoint; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

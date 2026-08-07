@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "component",
+  "catalogVersion": "0.4.0",
+  "id": "interview",
+  "version": "1.0.0",
+  "displayName": "访谈卡",
+  "description": "把受访者原话、背景和编辑者观察分开呈现。",
+  "status": "active",
+  "category": "conversation",
+  "legacyIds": [],
+  "blockKind": "collection",
+  "slots": [
+    {
+      "id": "items",
+      "kind": "list",
+      "required": true,
+      "maxLength": 10000
+    }
+  ],
+  "semantics": {
+    "role": "dialog",
+    "ariaLabel": "访谈卡",
+    "markdownFallback": "paragraphs"
+  },
+  "constraints": {
+    "minItems": 2,
+    "maxItems": 30,
+    "allowNestedComponents": false,
+    "spanLeaf": true,
+    "allowScripts": false,
+    "allowExternalStyles": false
+  },
+  "templateMarkdown": "### 访谈卡\n\n**访谈问题：** [填写基于本地知识库的内容]\n\n**受访者原话：** [填写基于本地知识库的内容]\n\n**编辑观察：** [填写基于本地知识库的内容]\n\n**来源：** [[替换为实际笔记标题]]",
+  "renderers": {
+    "markdown": "creation.component.interview.markdown.v1",
+    "html": "creation.component.interview.html.v1",
+    "wechatRichText": "creation.component.interview.wechat.v1"
+  },
+  "compatibility": {
+    "targets": [
+      "markdown",
+      "html",
+      "wechatRichText"
+    ],
+    "minRuntimeVersion": "0.1.2"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This component is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire component manifest and Markdown block; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

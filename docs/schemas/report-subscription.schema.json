@@ -14,6 +14,10 @@
     "timezone": { "type": "string", "minLength": 1 },
     "delivery_time": { "type": "string", "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$" },
     "week_start": { "type": "string", "enum": ["monday", "sunday"] },
+    "weekday": { "type": "integer", "minimum": 1, "maximum": 7 },
+    "day_of_month": { "type": "integer", "minimum": 1, "maximum": 31 },
+    "annual_month": { "type": "integer", "minimum": 1, "maximum": 12 },
+    "annual_day": { "type": "integer", "minimum": 1, "maximum": 31 },
     "sections": {
       "type": "array",
       "minItems": 1,
@@ -42,6 +46,23 @@
         "start": { "type": "string", "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$" },
         "end": { "type": "string", "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$" }
       }
-    }
+    },
+    "vaultId": { "type": "string" },
+    "vaultName": { "type": "string" },
+    "creator": { "type": "string", "enum": ["assistant", "user"] },
+    "policy": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "nextRun": { "type": ["string", "null"], "format": "date-time" },
+    "lastRunAt": { "type": ["string", "null"], "format": "date-time" },
+    "lastSkippedAt": { "type": ["string", "null"], "format": "date-time" },
+    "lastState": {
+      "type": ["string", "null"],
+      "enum": ["running", "awaiting_approval", "succeeded", "failed", "cancelled", "skipped", null]
+    },
+    "lastError": { "type": "string", "maxLength": 4000 },
+    "lastScheduledFor": { "type": ["string", "null"], "format": "date-time" },
+    "lastOccurrenceId": { "type": ["string", "null"], "maxLength": 400 },
+    "retryAttempt": { "type": "integer", "minimum": 0 },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" }
   }
 }

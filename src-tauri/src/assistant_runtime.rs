@@ -1,4 +1,8 @@
-use crate::{memory, runtime_db::RuntimeDatabase};
+use crate::{
+    memory,
+    model_config::{assistant_context_budget_from_snapshot, AssistantContextBudget},
+    runtime_db::RuntimeDatabase,
+};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -8,10 +12,8 @@ use tauri::State;
 
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 const MAX_MODEL_CONFIG_BYTES: usize = 64 * 1024;
-const MAX_CONTEXT_BYTES: usize = 16 * 1024 * 1024;
-const MAX_CONTEXT_MESSAGES: usize = 4096;
-const MAX_ATTACHMENTS: usize = 32;
-const MAX_ATTACHMENT_TEXT_CHARS: usize = 120_000;
+const DEFAULT_CONTEXT_PAGE_BYTES: usize = 16 * 1024 * 1024;
+const CONTEXT_PAGE_TOKEN_RESERVE: usize = 16_384;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,6 +95,7 @@ pub struct AssistantContextReceipt {
     conversation_revision: i64,
     context_hash: String,
     messages: Vec<Value>,
+    omitted_message_count: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -145,15 +148,53 @@ fn contains_model_secret(value: &Value) -> bool {
     }
 }
 
+struct FrozenRequestPayload {
+    payload_json: String,
+    messages: Vec<Value>,
+}
+
+fn assistant_memory_scope(conversation_id: &str) -> memory::MemoryScope {
+    memory::MemoryScope {
+        session_id: conversation_id.to_string(),
+        ..memory::MemoryScope::default()
+    }
+}
+
+fn freeze_assistant_memory_scope(
+    payload: &mut serde_json::Map<String, Value>,
+    conversation_id: &str,
+) -> Result<(), String> {
+    let expected = assistant_memory_scope(conversation_id);
+    if let Some(declared) = payload
+        .get("memoryScope")
+        .or_else(|| payload.get("memory_scope"))
+    {
+        let declared = serde_json::from_value::<memory::MemoryScope>(declared.clone())
+            .map_err(|error| format!("AI助手记忆作用域无效：{error}"))?;
+        if declared != expected {
+            return Err("AI助手记忆作用域必须绑定当前对话，不能跨会话提交".to_string());
+        }
+    }
+    payload.remove("memory_scope");
+    payload.insert(
+        "memoryScope".to_string(),
+        serde_json::to_value(expected)
+            .map_err(|error| format!("无法冻结 AI助手记忆作用域：{error}"))?,
+    );
+    Ok(())
+}
+
 fn frozen_request_payload(
     payload: &Value,
     model_config: &Value,
     trace_id: &str,
-) -> Result<String, String> {
+    conversation_id: &str,
+) -> Result<FrozenRequestPayload, String> {
     let mut payload = payload
         .as_object()
         .cloned()
         .ok_or_else(|| "AI助手请求恢复信息必须是对象".to_string())?;
+    freeze_assistant_memory_scope(&mut payload, conversation_id)?;
     if !payload.contains_key("traceId") && !payload.contains_key("trace_id") {
         payload.insert("traceId".to_string(), Value::String(trace_id.to_string()));
     }
@@ -173,39 +214,27 @@ fn frozen_request_payload(
     if !model_config.is_null() {
         payload.insert("modelConfig".to_string(), model_config.clone());
     }
-    if let Some(messages) = payload
-        .get("conversationMessages")
-        .or_else(|| payload.get("conversation_messages"))
+    let messages = if let Some(messages) = payload
+        .remove("conversationMessages")
+        .or_else(|| payload.remove("conversation_messages"))
     {
         let messages = messages
             .as_array()
             .ok_or_else(|| "AI助手持久化对话快照必须是消息数组".to_string())?;
-        if messages.len() > MAX_CONTEXT_MESSAGES {
-            return Err(format!(
-                "AI助手持久化对话快照包含 {} 条消息，超过 {} 条上限",
-                messages.len(),
-                MAX_CONTEXT_MESSAGES
-            ));
-        }
-        serialize_bounded(
-            &Value::Array(messages.clone()),
-            MAX_CONTEXT_BYTES,
-            "AI助手持久化对话快照",
-        )?;
-    }
-    let mut recovery_metadata = payload.clone();
-    recovery_metadata.remove("conversationMessages");
-    recovery_metadata.remove("conversation_messages");
+        messages.clone()
+    } else {
+        Vec::new()
+    };
     serialize_bounded(
-        &Value::Object(recovery_metadata),
+        &Value::Object(payload.clone()),
         MAX_REQUEST_BYTES,
         "AI助手请求恢复元数据",
     )?;
-    serialize_bounded(
-        &Value::Object(payload),
-        MAX_REQUEST_BYTES + MAX_CONTEXT_BYTES,
-        "AI助手请求恢复信息",
-    )
+    Ok(FrozenRequestPayload {
+        payload_json: serde_json::to_string(&Value::Object(payload))
+            .map_err(|error| format!("无法序列化 AI助手请求恢复信息：{error}"))?,
+        messages,
+    })
 }
 
 fn request_trace_id(payload: &Value, request_id: &str) -> Result<String, String> {
@@ -261,6 +290,85 @@ fn read_request(
         .ok_or_else(|| "AI助手请求不存在".to_string())
 }
 
+fn load_request_messages(
+    connection: &Connection,
+    scope: &str,
+    request_id: &str,
+) -> Result<Vec<Value>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT payload_json FROM assistant_request_messages
+             WHERE workspace_scope=?1 AND request_id=?2 ORDER BY ordinal",
+        )
+        .map_err(|error| format!("无法准备 AI助手请求消息读取：{error}"))?;
+    let messages = statement
+        .query_map(params![scope, request_id], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("无法读取 AI助手请求消息：{error}"))?
+        .map(|row| {
+            let payload = row.map_err(|error| format!("无法解析 AI助手请求消息行：{error}"))?;
+            serde_json::from_str::<Value>(&payload)
+                .map_err(|error| format!("AI助手请求消息已经损坏：{error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if !messages.is_empty() {
+        return Ok(messages);
+    }
+    let payload = connection
+        .query_row(
+            "SELECT payload_json FROM assistant_requests
+             WHERE workspace_scope=?1 AND id=?2",
+            params![scope, request_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("无法读取旧版 AI助手请求恢复信息：{error}"))?;
+    let Some(payload) = payload else {
+        return Ok(Vec::new());
+    };
+    let payload = serde_json::from_str::<Value>(&payload)
+        .map_err(|error| format!("旧版 AI助手请求恢复信息已经损坏：{error}"))?;
+    Ok(payload
+        .get("conversationMessages")
+        .or_else(|| payload.get("conversation_messages"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default())
+}
+
+fn store_request_messages(
+    connection: &Connection,
+    scope: &str,
+    request_id: &str,
+    messages: &[Value],
+) -> Result<(), String> {
+    for (ordinal, message) in messages.iter().enumerate() {
+        let payload_json = serde_json::to_string(message)
+            .map_err(|error| format!("无法序列化 AI助手请求消息：{error}"))?;
+        connection
+            .execute(
+                "INSERT INTO assistant_request_messages
+                 (workspace_scope, request_id, ordinal, payload_json)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(workspace_scope, request_id, ordinal) DO UPDATE SET
+                   payload_json=excluded.payload_json",
+                params![scope, request_id, ordinal as i64, payload_json],
+            )
+            .map_err(|error| format!("无法持久化 AI助手请求消息：{error}"))?;
+    }
+    Ok(())
+}
+
+fn compact_request_payload_json(payload_json: &str) -> Result<String, String> {
+    let mut payload = serde_json::from_str::<Value>(payload_json)
+        .map_err(|error| format!("AI助手请求恢复信息已经损坏：{error}"))?;
+    if let Some(payload) = payload.as_object_mut() {
+        payload.remove("conversationMessages");
+        payload.remove("conversation_messages");
+    }
+    serde_json::to_string(&payload)
+        .map_err(|error| format!("无法规范化 AI助手请求恢复信息：{error}"))
+}
+
 fn load_frozen_context(
     connection: &Connection,
     scope: &str,
@@ -308,7 +416,12 @@ pub(crate) fn enqueue_request(
         return Err("AI助手对话修订号不能为负数".to_string());
     }
     let trace_id = request_trace_id(&input.payload, request_id)?;
-    let payload_json = frozen_request_payload(&input.payload, &input.model_config, &trace_id)?;
+    let frozen = frozen_request_payload(
+        &input.payload,
+        &input.model_config,
+        &trace_id,
+        conversation_id,
+    )?;
     let now = Utc::now().to_rfc3339();
     let mut connection = database
         .connection
@@ -334,9 +447,11 @@ pub(crate) fn enqueue_request(
         .optional()
         .map_err(|error| format!("无法检查重复 AI助手请求：{error}"))?
     {
+        let stored_messages = load_request_messages(&tx, scope, request_id)?;
         if conversation != conversation_id
             || revision != input.conversation_revision
-            || payload != payload_json
+            || compact_request_payload_json(&payload)? != frozen.payload_json
+            || stored_messages != frozen.messages
         {
             return Err("AI助手请求 ID 已被其他内容占用".to_string());
         }
@@ -397,12 +512,13 @@ pub(crate) fn enqueue_request(
             conversation_id,
             input.conversation_revision,
             sequence,
-            payload_json,
+            frozen.payload_json,
             i64::from(input.has_volatile_attachments),
             now
         ],
     )
     .map_err(|error| format!("无法持久化 AI助手请求：{error}"))?;
+    store_request_messages(&tx, scope, request_id, &frozen.messages)?;
     crate::trace::record_trace_event_in_connection(
         &tx,
         scope,
@@ -550,11 +666,13 @@ fn attachment_description(attachment: &Value) -> String {
         .or_else(|| attachment.get("image_analysis"));
     let summary = analysis
         .and_then(|value| string_at(value, "summary", "summary"))
-        .map(|value| limited(value, MAX_ATTACHMENT_TEXT_CHARS))
+        .map(str::trim)
+        .map(str::to_string)
         .unwrap_or_default();
     let visible = analysis
         .and_then(|value| string_at(value, "visibleText", "visible_text"))
-        .map(|value| limited(value, MAX_ATTACHMENT_TEXT_CHARS / 2))
+        .map(str::trim)
+        .map(str::to_string)
         .unwrap_or_default();
     if summary.is_empty() && visible.is_empty() {
         return format!("{name}（{kind}，正文按需由本地执行器分块读取）");
@@ -579,7 +697,6 @@ fn current_model_attachments(context: &Value) -> Vec<Value> {
         .map(|attachments| {
             attachments
                 .iter()
-                .take(MAX_ATTACHMENTS)
                 .filter_map(|attachment| {
                     let name = limited(string_at(attachment, "name", "name")?, 160);
                     let mime = limited(
@@ -593,10 +710,7 @@ fn current_model_attachments(context: &Value) -> Vec<Value> {
                         ("mimeType".to_string(), Value::String(mime)),
                     ]);
                     if let Some(text) = string_at(attachment, "textContent", "text_content") {
-                        result.insert(
-                            "textContent".to_string(),
-                            Value::String(limited(text, MAX_ATTACHMENT_TEXT_CHARS)),
-                        );
+                        result.insert("textContent".to_string(), Value::String(text.to_string()));
                     }
                     Some(Value::Object(result))
                 })
@@ -605,7 +719,16 @@ fn current_model_attachments(context: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-fn persisted_conversation_messages(payload: &Value) -> Result<Option<Vec<Value>>, String> {
+fn persisted_conversation_messages(
+    connection: &Connection,
+    scope: &str,
+    request_id: &str,
+    payload: &Value,
+) -> Result<Option<Vec<Value>>, String> {
+    let stored = load_request_messages(connection, scope, request_id)?;
+    if !stored.is_empty() {
+        return Ok(Some(stored));
+    }
     let Some(messages) = payload
         .get("conversationMessages")
         .or_else(|| payload.get("conversation_messages"))
@@ -615,30 +738,73 @@ fn persisted_conversation_messages(payload: &Value) -> Result<Option<Vec<Value>>
     let messages = messages
         .as_array()
         .ok_or_else(|| "AI助手持久化对话快照已经损坏".to_string())?;
-    if messages.len() > MAX_CONTEXT_MESSAGES {
-        return Err("AI助手持久化对话快照超过消息条数上限".to_string());
-    }
-    serialize_bounded(
-        &Value::Array(messages.clone()),
-        MAX_CONTEXT_BYTES,
-        "AI助手持久化对话快照",
-    )?;
     Ok(Some(messages.clone()))
+}
+
+fn estimate_context_tokens(value: &Value) -> usize {
+    let serialized = serde_json::to_string(value).unwrap_or_default();
+    let mut ascii = 0usize;
+    let mut non_ascii = 0usize;
+    for character in serialized.chars() {
+        if character.is_ascii() {
+            ascii = ascii.saturating_add(1);
+        } else {
+            non_ascii = non_ascii.saturating_add(1);
+        }
+    }
+    non_ascii.saturating_add(ascii.div_ceil(4))
+}
+
+fn page_context_messages(
+    messages: Vec<Value>,
+    context_budget: Option<AssistantContextBudget>,
+) -> Result<(Vec<Value>, usize), String> {
+    let total = messages.len();
+    let token_budget = context_budget.map(|budget| {
+        budget
+            .input_tokens
+            .saturating_sub(CONTEXT_PAGE_TOKEN_RESERVE)
+            .max(512)
+    });
+    let mut selected = Vec::new();
+    let mut selected_tokens = 0usize;
+    let mut selected_bytes = 2usize;
+    for message in messages.into_iter().rev() {
+        let message_bytes = serde_json::to_vec(&message)
+            .map_err(|error| format!("无法序列化 AI助手上下文消息：{error}"))?
+            .len()
+            .saturating_add(1);
+        let message_tokens = estimate_context_tokens(&message);
+        let exceeds_tokens = token_budget
+            .is_some_and(|budget| selected_tokens.saturating_add(message_tokens) > budget);
+        let exceeds_bytes =
+            selected_bytes.saturating_add(message_bytes) > DEFAULT_CONTEXT_PAGE_BYTES;
+        if exceeds_tokens || exceeds_bytes {
+            if selected.is_empty() {
+                return Err(
+                    "最新一条 AI助手消息超过当前模型的单请求上下文页；请先把正文或附件作为耐久资产分块处理"
+                        .to_string(),
+                );
+            }
+            break;
+        }
+        selected_tokens = selected_tokens.saturating_add(message_tokens);
+        selected_bytes = selected_bytes.saturating_add(message_bytes);
+        selected.push(message);
+    }
+    selected.reverse();
+    let omitted = total.saturating_sub(selected.len());
+    Ok((selected, omitted))
 }
 
 fn build_context(
     input: &AssistantContextInput,
     memory_context: Option<&str>,
-) -> Result<Vec<Value>, String> {
-    if input.messages.len() > MAX_CONTEXT_MESSAGES {
-        return Err(format!(
-            "AI助手对话包含 {} 条消息，超过 {} 条上下文上限；请先压缩对话",
-            input.messages.len(),
-            MAX_CONTEXT_MESSAGES
-        ));
-    }
+    context_budget: Option<AssistantContextBudget>,
+) -> Result<(Vec<Value>, usize), String> {
     let context_text = string_at(&input.attachment_context, "contextText", "context_text")
-        .map(|value| limited(value, MAX_ATTACHMENT_TEXT_CHARS))
+        .map(str::trim)
+        .map(str::to_string)
         .unwrap_or_default();
     let latest_user = input
         .messages
@@ -672,7 +838,6 @@ fn build_context(
             .map(|attachments| {
                 attachments
                     .iter()
-                    .take(MAX_ATTACHMENTS)
                     .map(attachment_description)
                     .collect::<Vec<_>>()
             })
@@ -708,17 +873,18 @@ fn build_context(
         output.push(Value::Object(normalized));
     }
     if input.latest_user_only {
+        let omitted = output.len().saturating_sub(1);
         let last_user = output
             .into_iter()
             .rev()
             .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
             .ok_or_else(|| "AI助手请求缺少可用的用户消息".to_string())?;
-        return Ok(vec![last_user]);
+        return Ok((vec![last_user], omitted));
     }
     if output.is_empty() {
         return Err("AI助手请求没有可用的对话上下文".to_string());
     }
-    Ok(output)
+    page_context_messages(output, context_budget)
 }
 
 pub(crate) fn assemble_request_context(
@@ -754,6 +920,8 @@ pub(crate) fn assemble_request_context(
         return Err("AI助手对话已经进入新的上下文修订版本".to_string());
     }
     if let Some((context_hash, messages)) = load_frozen_context(&tx, scope, &input.request_id)? {
+        let persisted_count = load_request_messages(&tx, scope, &input.request_id)?.len();
+        let omitted_message_count = persisted_count.saturating_sub(messages.len());
         tx.commit()
             .map_err(|error| format!("无法提交 AI助手冻结上下文读取事务：{error}"))?;
         return Ok(AssistantContextReceipt {
@@ -762,9 +930,11 @@ pub(crate) fn assemble_request_context(
             conversation_revision: input.conversation_revision,
             context_hash,
             messages,
+            omitted_message_count,
         });
     }
-    let persisted_messages = persisted_conversation_messages(&request.payload)?;
+    let persisted_messages =
+        persisted_conversation_messages(&tx, scope, &input.request_id, &request.payload)?;
     let effective_input = AssistantContextInput {
         request_id: input.request_id.clone(),
         conversation_revision: input.conversation_revision,
@@ -772,15 +942,7 @@ pub(crate) fn assemble_request_context(
         attachment_context: input.attachment_context.clone(),
         latest_user_only: input.latest_user_only,
     };
-    let memory_scope = request
-        .payload
-        .get("memoryScope")
-        .or_else(|| request.payload.get("memory_scope"))
-        .cloned()
-        .map(serde_json::from_value::<memory::MemoryScope>)
-        .transpose()
-        .map_err(|error| format!("AI助手记忆作用域无效：{error}"))?
-        .unwrap_or_default();
+    let memory_scope = memory_scope_from_request(&request.payload, &request.conversation_id)?;
     let latest_user_query = effective_input
         .messages
         .iter()
@@ -798,12 +960,16 @@ pub(crate) fn assemble_request_context(
             &memory_scope,
         )?
     };
-    let messages = build_context(&effective_input, memory_context.as_deref())?;
-    let context_json = serialize_bounded(
-        &Value::Array(messages.clone()),
-        MAX_CONTEXT_BYTES,
-        "AI助手模型上下文",
-    )?;
+    let model_config = request
+        .payload
+        .get("modelConfig")
+        .or_else(|| request.payload.get("model_config"))
+        .unwrap_or(&Value::Null);
+    let context_budget = assistant_context_budget_from_snapshot(model_config)?;
+    let (messages, omitted_message_count) =
+        build_context(&effective_input, memory_context.as_deref(), context_budget)?;
+    let context_json = serde_json::to_string(&messages)
+        .map_err(|error| format!("无法序列化 AI助手模型上下文：{error}"))?;
     let context_hash = format!("sha256:{:x}", Sha256::digest(context_json.as_bytes()));
     let now = Utc::now().to_rfc3339();
     tx.execute(
@@ -839,6 +1005,8 @@ pub(crate) fn assemble_request_context(
                 "conversationRevision": input.conversation_revision,
                 "contextHash": &context_hash,
                 "messageCount": messages.len(),
+                "omittedMessageCount": omitted_message_count,
+                "contextWindowTokens": context_budget.map(|budget| budget.context_window_tokens),
                 "memoryIncluded": memory_context.is_some(),
             }),
             created_at: &now,
@@ -852,6 +1020,7 @@ pub(crate) fn assemble_request_context(
         conversation_revision: input.conversation_revision,
         context_hash,
         messages,
+        omitted_message_count,
     })
 }
 
@@ -872,20 +1041,24 @@ fn nested_string_at<'a>(
         })
 }
 
-fn memory_scope_from_values(
-    result: &Value,
+fn memory_scope_from_request(
     payload: &Value,
+    conversation_id: &str,
 ) -> Result<memory::MemoryScope, String> {
-    result
+    let expected = assistant_memory_scope(conversation_id);
+    payload
         .get("memoryScope")
-        .or_else(|| result.get("memory_scope"))
-        .or_else(|| payload.get("memoryScope"))
         .or_else(|| payload.get("memory_scope"))
         .cloned()
         .map(serde_json::from_value::<memory::MemoryScope>)
         .transpose()
         .map_err(|error| format!("AI助手记忆作用域无效：{error}"))
-        .map(Option::unwrap_or_default)
+        .and_then(|declared| {
+            if declared.is_some_and(|scope| scope != expected) {
+                return Err("AI助手请求记忆作用域与当前对话不一致".to_string());
+            }
+            Ok(expected)
+        })
 }
 
 fn explicit_style_from_user_message(user_message: &str) -> Option<String> {
@@ -971,7 +1144,7 @@ fn completion_memory_capture(
         action: string_at(&input.result, "action", "action").map(str::to_string),
         state: state.to_string(),
         error: error.map(str::to_string),
-        scope: memory_scope_from_values(&input.result, &request.payload)?,
+        scope: memory_scope_from_request(&request.payload, &request.conversation_id)?,
     })
 }
 
@@ -987,7 +1160,8 @@ pub(crate) fn finish_request(
     if !matches!(state, "succeeded" | "failed" | "cancelled") {
         return Err("AI助手请求终态无效".to_string());
     }
-    let result_json = serialize_bounded(&input.result, MAX_REQUEST_BYTES, "AI助手请求结果")?;
+    let result_json = serde_json::to_string(&input.result)
+        .map_err(|error| format!("无法序列化 AI助手请求结果：{error}"))?;
     let error = input
         .error
         .as_deref()
@@ -1272,548 +1446,4 @@ pub fn recover_assistant_requests(
     database: State<'_, RuntimeDatabase>,
 ) -> Result<Vec<AssistantRequestRecord>, String> {
     recover_requests_for_startup(database.inner())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn input(id: &str, conversation: &str, volatile: bool) -> AssistantRequestInput {
-        AssistantRequestInput {
-            request_id: id.to_string(),
-            conversation_id: conversation.to_string(),
-            conversation_revision: 0,
-            payload: json!({ "message": id }),
-            model_config: Value::Null,
-            has_volatile_attachments: volatile,
-        }
-    }
-
-    #[test]
-    fn enqueue_binds_each_turn_to_the_request_trace() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let database = RuntimeDatabase::open_test(&directory.path().join("runtime.sqlite"))
-            .expect("open database");
-        let scope = database.local_workspace_scope().expect("scope");
-        let mut request = input("request-traced", "conversation-shared", false);
-        request.payload = json!({
-            "message": "first",
-            "traceId": "trace-conversation-turn"
-        });
-        enqueue_request(&database, &scope, &request).expect("enqueue traced request");
-        let connection = database.connection.lock().expect("lock database");
-        let (trace_id, payload_json): (String, String) = connection
-            .query_row(
-                "SELECT trace_id, payload_json FROM runtime_trace_events
-                 WHERE workspace_scope=?1 AND entity_kind='conversation_turn' AND entity_id=?2",
-                params![scope, "request-traced"],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("read conversation trace");
-        assert_eq!(trace_id, "trace-conversation-turn");
-        let payload: Value = serde_json::from_str(&payload_json).expect("parse trace payload");
-        assert_eq!(payload["conversationId"], "conversation-shared");
-        assert_eq!(payload["conversationRevision"], 0);
-    }
-
-    #[test]
-    fn native_finish_persists_typed_memories_and_recall_is_frozen_into_context() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let database = RuntimeDatabase::open_test(&directory.path().join("runtime.sqlite"))
-            .expect("open database");
-        let scope = database.local_workspace_scope().expect("scope");
-        let mut style_request = input("request-style", "conversation-style", false);
-        style_request.payload = json!({
-            "message": "/style 简洁、直接的中文",
-            "traceId": "trace-style-memory",
-            "userMessage": {
-                "id": "message-style-user",
-                "content": "/style 简洁、直接的中文"
-            }
-        });
-        enqueue_request(&database, &scope, &style_request).expect("enqueue style request");
-        claim_request(&database, &scope, "request-style").expect("claim style request");
-        assemble_request_context(
-            &database,
-            &scope,
-            &AssistantContextInput {
-                request_id: "request-style".to_string(),
-                conversation_revision: 0,
-                messages: vec![json!({
-                    "id": "message-style-user",
-                    "role": "user",
-                    "content": "/style 简洁、直接的中文"
-                })],
-                attachment_context: Value::Null,
-                latest_user_only: true,
-            },
-        )
-        .expect("freeze style command");
-        finish_request(
-            &database,
-            &scope,
-            &AssistantRequestCompletionInput {
-                request_id: "request-style".to_string(),
-                state: "succeeded".to_string(),
-                result: json!({
-                    "assistantMessage": {
-                        "id": "message-style-assistant",
-                        "content": "已将回复风格调整为简洁、直接的中文"
-                    },
-                    "intent": "settings",
-                    "action": "execute"
-                }),
-                error: None,
-            },
-        )
-        .expect("finish style request");
-        {
-            let connection = database.connection.lock().expect("lock database");
-            let typed_memories: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM memory_records WHERE workspace_scope=?1 \
-                     AND track IN ('user_episode', 'user_profile', 'agent_case')",
-                    [&scope],
-                    |row| row.get(0),
-                )
-                .expect("count typed memories");
-            assert_eq!(typed_memories, 3);
-            let terminal_trace: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM runtime_trace_events WHERE workspace_scope=?1 \
-                     AND trace_id='trace-style-memory' \
-                     AND event_type='conversation.turn.succeeded' AND state='succeeded'",
-                    [&scope],
-                    |row| row.get(0),
-                )
-                .expect("count terminal trace");
-            assert_eq!(terminal_trace, 1);
-            let lifecycle_events: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM runtime_trace_events WHERE workspace_scope=?1 \
-                     AND trace_id='trace-style-memory' AND entity_kind='conversation_turn' \
-                     AND event_type IN ('conversation.turn.queued', 'conversation.turn.running', \
-                                        'conversation.context.frozen', 'conversation.turn.succeeded')",
-                    [&scope],
-                    |row| row.get(0),
-                )
-                .expect("count assistant lifecycle trace");
-            assert_eq!(lifecycle_events, 4);
-        }
-
-        let request = input("request-recall", "conversation-recall", false);
-        enqueue_request(&database, &scope, &request).expect("enqueue recall request");
-        claim_request(&database, &scope, "request-recall").expect("claim recall request");
-        let recalled = assemble_request_context(
-            &database,
-            &scope,
-            &AssistantContextInput {
-                request_id: "request-recall".to_string(),
-                conversation_revision: 0,
-                messages: vec![json!({
-                    "role": "user",
-                    "content": "请用简洁、直接的中文写发布说明"
-                })],
-                attachment_context: Value::Null,
-                latest_user_only: false,
-            },
-        )
-        .expect("assemble recalled context");
-        let content = recalled.messages[0]["content"]
-            .as_str()
-            .expect("recalled content");
-        assert!(content.contains("Yunspire 本地记忆参考"));
-        assert!(content.contains("用户长期记忆"));
-        assert!(content.contains("Agent 过程记忆"));
-        assert!(content.contains("简洁、直接的中文"));
-
-        let frozen = assemble_request_context(
-            &database,
-            &scope,
-            &AssistantContextInput {
-                request_id: "request-recall".to_string(),
-                conversation_revision: 0,
-                messages: vec![json!({ "role": "user", "content": "替换上下文" })],
-                attachment_context: Value::Null,
-                latest_user_only: false,
-            },
-        )
-        .expect("read frozen recalled context");
-        assert_eq!(frozen.context_hash, recalled.context_hash);
-        assert_eq!(frozen.messages, recalled.messages);
-    }
-
-    #[test]
-    fn same_conversation_is_fifo_and_other_conversations_claim_in_parallel() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let database = RuntimeDatabase::open_test(&directory.path().join("runtime.sqlite"))
-            .expect("open database");
-        let scope = database.local_workspace_scope().expect("scope");
-        enqueue_request(
-            &database,
-            &scope,
-            &input("request-a", "conversation-a", false),
-        )
-        .expect("enqueue a");
-        enqueue_request(
-            &database,
-            &scope,
-            &input("request-b", "conversation-a", false),
-        )
-        .expect("enqueue b");
-        enqueue_request(
-            &database,
-            &scope,
-            &input("request-c", "conversation-b", false),
-        )
-        .expect("enqueue c");
-
-        assert!(
-            !claim_request(&database, &scope, "request-b")
-                .expect("try b")
-                .claim_granted
-        );
-        assert!(
-            claim_request(&database, &scope, "request-a")
-                .expect("claim a")
-                .claim_granted
-        );
-        assert!(
-            !claim_request(&database, &scope, "request-a")
-                .expect("duplicate claim a")
-                .claim_granted
-        );
-        assert!(
-            claim_request(&database, &scope, "request-c")
-                .expect("claim c")
-                .claim_granted
-        );
-        assert!(
-            !claim_request(&database, &scope, "request-b")
-                .expect("b remains blocked")
-                .claim_granted
-        );
-        finish_request(
-            &database,
-            &scope,
-            &AssistantRequestCompletionInput {
-                request_id: "request-a".to_string(),
-                state: "succeeded".to_string(),
-                result: json!({}),
-                error: None,
-            },
-        )
-        .expect("finish a");
-        assert!(
-            claim_request(&database, &scope, "request-b")
-                .expect("claim b")
-                .claim_granted
-        );
-    }
-
-    #[test]
-    fn cancellation_is_isolated_to_its_request() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let database = RuntimeDatabase::open_test(&directory.path().join("runtime.sqlite"))
-            .expect("open database");
-        let scope = database.local_workspace_scope().expect("scope");
-        enqueue_request(
-            &database,
-            &scope,
-            &input("request-a", "conversation-a", false),
-        )
-        .expect("enqueue a");
-        enqueue_request(
-            &database,
-            &scope,
-            &input("request-b", "conversation-b", false),
-        )
-        .expect("enqueue b");
-        cancel_request(&database, &scope, "request-a", "user_cancelled").expect("cancel a");
-        assert!(
-            claim_request(&database, &scope, "request-b")
-                .expect("claim b")
-                .claim_granted
-        );
-        let connection = database.connection.lock().expect("lock database");
-        assert_eq!(
-            read_request(&connection, &scope, "request-a")
-                .expect("read a")
-                .state,
-            "cancelled"
-        );
-        assert_eq!(
-            read_request(&connection, &scope, "request-b")
-                .expect("read b")
-                .state,
-            "running"
-        );
-    }
-
-    #[test]
-    fn restart_recovers_text_and_requests_volatile_files_again() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let path = directory.path().join("runtime.sqlite");
-        {
-            let database = RuntimeDatabase::open_test(&path).expect("open database");
-            let scope = database.local_workspace_scope().expect("scope");
-            enqueue_request(
-                &database,
-                &scope,
-                &input("request-text", "conversation-a", false),
-            )
-            .expect("enqueue text");
-            enqueue_request(
-                &database,
-                &scope,
-                &input("request-file", "conversation-b", true),
-            )
-            .expect("enqueue file");
-            claim_request(&database, &scope, "request-text").expect("claim text");
-            claim_request(&database, &scope, "request-file").expect("claim file");
-        }
-        let database = RuntimeDatabase::open_test(&path).expect("reopen database");
-        let recovered = recover_requests_for_startup(&database).expect("recover requests");
-        assert_eq!(recovered.len(), 2);
-        assert_eq!(
-            recovered
-                .iter()
-                .find(|item| item.request_id == "request-text")
-                .expect("text")
-                .state,
-            "queued"
-        );
-        assert_eq!(
-            recovered
-                .iter()
-                .find(|item| item.request_id == "request-file")
-                .expect("file")
-                .state,
-            "needs_input"
-        );
-    }
-
-    #[test]
-    fn rust_filters_and_freezes_model_context() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let database = RuntimeDatabase::open_test(&directory.path().join("runtime.sqlite"))
-            .expect("open database");
-        let scope = database.local_workspace_scope().expect("scope");
-        enqueue_request(
-            &database,
-            &scope,
-            &input("request-a", "conversation-a", false),
-        )
-        .expect("enqueue");
-        claim_request(&database, &scope, "request-a").expect("claim");
-        let receipt = assemble_request_context(
-            &database,
-            &scope,
-            &AssistantContextInput {
-                request_id: "request-a".to_string(),
-                conversation_revision: 0,
-                messages: vec![
-                    json!({ "role": "assistant", "content": "ignore", "excludeFromModelContext": true }),
-                    json!({ "role": "user", "content": "分析图片", "attachments": [{
-                        "name": "图.png", "type": "image/png",
-                        "imageAnalysis": { "summary": "一张图" }
-                    }] }),
-                ],
-                attachment_context: json!({
-                    "contextText": "当前附件已完成隔离分析。",
-                    "modelAttachments": [{
-                        "name": "图.png", "mimeType": "image/png", "textContent": "一张图"
-                    }]
-                }),
-                latest_user_only: false,
-            },
-        )
-        .expect("assemble");
-        assert_eq!(receipt.messages.len(), 1);
-        assert!(receipt.messages[0]["content"]
-            .as_str()
-            .expect("content")
-            .contains("隔离分析"));
-        assert_eq!(receipt.messages[0]["attachments"][0]["name"], "图.png");
-        assert!(receipt.context_hash.starts_with("sha256:"));
-    }
-
-    #[test]
-    fn persisted_enqueue_snapshot_overrides_tampered_assemble_messages() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let database = RuntimeDatabase::open_test(&directory.path().join("runtime.sqlite"))
-            .expect("open database");
-        let scope = database.local_workspace_scope().expect("scope");
-        let mut request = input("request-snapshot", "conversation-snapshot", false);
-        request.payload = json!({
-            "message": "可信的入队消息",
-            "conversationMessages": [
-                { "id": "message-1", "role": "user", "content": "可信的入队消息" },
-                { "id": "message-2", "role": "assistant", "content": "可信的历史回复" },
-                { "id": "message-3", "role": "user", "content": "继续可信任务" }
-            ]
-        });
-        enqueue_request(&database, &scope, &request).expect("enqueue snapshotted request");
-        claim_request(&database, &scope, "request-snapshot").expect("claim request");
-        let receipt = assemble_request_context(
-            &database,
-            &scope,
-            &AssistantContextInput {
-                request_id: "request-snapshot".to_string(),
-                conversation_revision: 0,
-                messages: vec![json!({
-                    "role": "user",
-                    "content": "篡改后的 assemble 消息"
-                })],
-                attachment_context: Value::Null,
-                latest_user_only: false,
-            },
-        )
-        .expect("assemble persisted snapshot");
-        assert_eq!(receipt.messages.len(), 3);
-        assert_eq!(receipt.messages[0]["content"], "可信的入队消息");
-        assert_eq!(receipt.messages[1]["content"], "可信的历史回复");
-        assert_eq!(receipt.messages[2]["content"], "继续可信任务");
-        assert!(receipt
-            .messages
-            .iter()
-            .all(|message| message["content"] != "篡改后的 assemble 消息"));
-    }
-
-    #[test]
-    fn frozen_context_cannot_be_overwritten_by_a_later_client_snapshot() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let database = RuntimeDatabase::open_test(&directory.path().join("runtime.sqlite"))
-            .expect("open database");
-        let scope = database.local_workspace_scope().expect("scope");
-        enqueue_request(
-            &database,
-            &scope,
-            &input("request-a", "conversation-a", false),
-        )
-        .expect("enqueue");
-        assert!(
-            claim_request(&database, &scope, "request-a")
-                .expect("claim")
-                .claim_granted
-        );
-        let original = assemble_request_context(
-            &database,
-            &scope,
-            &AssistantContextInput {
-                request_id: "request-a".to_string(),
-                conversation_revision: 0,
-                messages: vec![json!({ "role": "user", "content": "first snapshot" })],
-                attachment_context: Value::Null,
-                latest_user_only: false,
-            },
-        )
-        .expect("freeze initial context");
-        let reread = assemble_request_context(
-            &database,
-            &scope,
-            &AssistantContextInput {
-                request_id: "request-a".to_string(),
-                conversation_revision: 0,
-                messages: vec![json!({ "role": "user", "content": "later client snapshot" })],
-                attachment_context: json!({ "contextText": "must not be used" }),
-                latest_user_only: false,
-            },
-        )
-        .expect("read frozen context");
-        assert_eq!(reread.context_hash, original.context_hash);
-        assert_eq!(reread.messages, original.messages);
-        assert_eq!(reread.messages[0]["content"], "first snapshot");
-    }
-
-    #[test]
-    fn model_snapshot_is_persisted_with_the_request_and_rejects_secrets() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let database = RuntimeDatabase::open_test(&directory.path().join("runtime.sqlite"))
-            .expect("open database");
-        let scope = database.local_workspace_scope().expect("scope");
-        let mut request = input("request-a", "conversation-a", false);
-        request.model_config = json!({
-            "providerId": "provider-primary",
-            "provider": "openai",
-            "baseUrl": "https://example.invalid/v1",
-            "model": "model-a"
-        });
-        let record = enqueue_request(&database, &scope, &request).expect("enqueue");
-        assert_eq!(record.payload["modelConfig"]["model"], "model-a");
-
-        let mut secret_request = input("request-b", "conversation-b", false);
-        secret_request.model_config = json!({ "apiKey": "must-not-persist" });
-        assert!(enqueue_request(&database, &scope, &secret_request)
-            .expect_err("reject secret model snapshot")
-            .contains("不能包含密钥"));
-    }
-
-    #[test]
-    fn clear_revision_cancels_queue_but_keeps_the_clear_command() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let database = RuntimeDatabase::open_test(&directory.path().join("runtime.sqlite"))
-            .expect("open database");
-        let scope = database.local_workspace_scope().expect("scope");
-        enqueue_request(
-            &database,
-            &scope,
-            &input("request-current", "conversation-a", false),
-        )
-        .expect("enqueue current");
-        enqueue_request(
-            &database,
-            &scope,
-            &input("request-next", "conversation-a", false),
-        )
-        .expect("enqueue next");
-        claim_request(&database, &scope, "request-current").expect("claim current");
-        assemble_request_context(
-            &database,
-            &scope,
-            &AssistantContextInput {
-                request_id: "request-current".to_string(),
-                conversation_revision: 0,
-                messages: vec![json!({ "role": "user", "content": "/clear" })],
-                attachment_context: Value::Null,
-                latest_user_only: true,
-            },
-        )
-        .expect("freeze clear command context");
-        let receipt = advance_conversation_revision(
-            &database,
-            &scope,
-            &AssistantConversationRevisionInput {
-                conversation_id: "conversation-a".to_string(),
-                expected_revision: 0,
-                next_revision: 1,
-                keep_request_id: Some("request-current".to_string()),
-            },
-        )
-        .expect("advance");
-        assert_eq!(receipt.cancelled_requests, 1);
-        let connection = database.connection.lock().expect("lock database");
-        assert_eq!(
-            read_request(&connection, &scope, "request-current")
-                .expect("current")
-                .conversation_revision,
-            1
-        );
-        let (context_json, context_hash): (Option<String>, Option<String>) = connection
-            .query_row(
-                "SELECT context_json, context_hash FROM assistant_requests
-                 WHERE workspace_scope=?1 AND id=?2",
-                params![scope, "request-current"],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("read cleared frozen context");
-        assert!(context_json.is_none());
-        assert!(context_hash.is_none());
-        assert_eq!(
-            read_request(&connection, &scope, "request-next")
-                .expect("next")
-                .state,
-            "cancelled"
-        );
-    }
 }

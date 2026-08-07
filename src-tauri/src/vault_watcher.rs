@@ -57,11 +57,19 @@ pub fn start_vault_watchers(
     vaults: &[VaultDescriptor],
     generation: u64,
 ) -> Result<usize, String> {
+    let database = app.state::<RuntimeDatabase>();
+    let workspace_scope = database.local_workspace_scope()?;
     let mut next_watchers = HashMap::new();
     for vault in vaults
         .iter()
         .filter(|vault| vault.connection_state == "connected")
     {
+        if database
+            .ensure_vault_read_allowed(&workspace_scope, &vault.id)
+            .is_err()
+        {
+            continue;
+        }
         let vault_id = vault.id.clone();
         let root = std::path::PathBuf::from(&vault.path);
         let callback_app = app.clone();
@@ -109,11 +117,24 @@ pub fn start_vault_watchers(
 
 pub fn reconcile_vaults(app: &AppHandle, vaults: &[VaultDescriptor]) -> usize {
     let database = app.state::<RuntimeDatabase>();
+    let workspace_scope = match database.local_workspace_scope() {
+        Ok(scope) => scope,
+        Err(error) => {
+            log::warn!("无法读取 Vault 索引策略工作区：{error}");
+            return 0;
+        }
+    };
     let mut reconciled = 0;
     for vault in vaults
         .iter()
         .filter(|vault| vault.connection_state == "connected")
     {
+        if database
+            .ensure_vault_read_allowed(&workspace_scope, &vault.id)
+            .is_err()
+        {
+            continue;
+        }
         match database.reconcile_vault_index(vault) {
             Ok(result) => {
                 reconciled += 1;
@@ -140,9 +161,32 @@ pub fn refresh_vault_indexing(app: &AppHandle) -> Result<usize, String> {
     }
     let vaults = discover_vaults_for_runtime()?;
     let database = app.state::<RuntimeDatabase>();
+    let workspace_scope = database.local_workspace_scope()?;
     database.sync_vault_registry(&vaults)?;
+    database.purge_unreadable_vault_indexes(&workspace_scope, &vaults)?;
     start_vault_watchers(app, &vaults, generation)?;
     Ok(reconcile_vaults(app, &vaults))
+}
+
+#[tauri::command]
+pub fn refresh_vault_access_policy(app: AppHandle) -> Result<usize, String> {
+    let vaults = discover_vaults_for_runtime()?;
+    let database = app.state::<RuntimeDatabase>();
+    let workspace_scope = database.local_workspace_scope()?;
+    database.sync_vault_registry(&vaults)?;
+    let purged = database.purge_unreadable_vault_indexes(&workspace_scope, &vaults)?;
+    let generation = app
+        .state::<VaultWatcherState>()
+        .generation
+        .load(Ordering::Acquire);
+    if generation != 0 && local_runtime_generation_is_active(&app, generation) {
+        start_vault_watchers(&app, &vaults, generation)?;
+        let reconcile_app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            reconcile_vaults(&reconcile_app, &vaults);
+        });
+    }
+    Ok(purged.len())
 }
 
 pub fn request_vault_index_refresh(app: &AppHandle) {
@@ -163,9 +207,18 @@ fn process_vault_index_batch(app: &AppHandle) -> Result<usize, String> {
         return Ok(0);
     }
     let database = app.state::<RuntimeDatabase>();
+    let workspace_scope = database.local_workspace_scope()?;
     let changes = database.claim_vault_index_changes(VAULT_INDEX_BATCH_SIZE)?;
     let claimed_count = changes.len();
     for change in changes {
+        if database
+            .ensure_vault_read_allowed(&workspace_scope, &change.vault_id)
+            .is_err()
+        {
+            database
+                .discard_claimed_vault_index_change(&change, "Vault 已设为不接入，索引任务取消")?;
+            continue;
+        }
         let result = resolve_vault_for_runtime(&change.vault_id).and_then(|(_, current_root)| {
             database.apply_claimed_vault_index_change(&change, &current_root)
         });

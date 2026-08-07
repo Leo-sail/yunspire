@@ -1,10 +1,25 @@
+use crate::execution_ticket::{
+    ExecutionTicketState, TrustedExecutionReceipt, TrustedHandlerReservation, TrustedHandlerUsage,
+};
 use crate::obsidian::{
     collect_files_for_runtime_with_cancellation, read_file_limited_for_runtime,
-    resolve_vault_for_runtime, OperationEvent, VaultDescriptor,
+    resolve_vault_for_runtime, OperationContext, OperationEvent, VaultDescriptor,
 };
-use crate::policy::{ApplicationCommand, PolicyDecision, PolicyOutcome};
-use crate::task_runtime::NativeRuntimeTask;
-use chrono::Utc;
+use crate::policy::{ApplicationCommand, CommandBudget, PolicyDecision, PolicyOutcome};
+use crate::task_runtime::{
+    NativeRuntimeTask, RuntimeReadOnlyCapabilityResult, RuntimeScheduleDispatchAckInput,
+    RuntimeTaskCompletionContract, RuntimeTaskCompletionContractInput, RuntimeTaskCompletionMode,
+    RuntimeTaskCompletionRequirement, RuntimeTaskCompletionRequirementInput,
+    RuntimeTaskCompletionStatus, RuntimeTaskContractSnapshot, RuntimeTaskEvidence,
+    RuntimeTaskEvidenceInput, RuntimeTaskEvidenceSourceKind, RuntimeTaskExecutionBudgetStatus,
+    RuntimeTaskPlan, RuntimeTaskPlanInput, RuntimeTaskPlanSnapshot, RuntimeTaskPlanStep,
+    RuntimeTaskPlanStepInput, RuntimeTaskRequirementStatus, RuntimeTaskStepClaim,
+    RuntimeTaskStepClaimBatch, RuntimeTaskStepClaimInput, RuntimeTaskStepCommandBinding,
+    RuntimeTaskStepCompletionInput, RuntimeTaskStepEffectClass, RuntimeTaskStepFailureInput,
+    RuntimeTaskStepFrontierItem, RuntimeTaskStepKind, RuntimeTaskStepLeaseRenewalInput,
+    RuntimeTaskStepLeaseRenewalReceipt, RuntimeTaskStepReceipt, MAX_RUNTIME_TASK_EVIDENCE,
+};
+use chrono::{Duration as ChronoDuration, Utc};
 use regex::Regex;
 use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
@@ -21,6 +36,7 @@ use std::{
     path::Path,
     path::PathBuf,
     sync::Mutex,
+    time::Instant,
 };
 use tauri::{AppHandle, Manager, State};
 use unicode_normalization::UnicodeNormalization;
@@ -28,11 +44,15 @@ use uuid::Uuid;
 
 const MAX_SNAPSHOT_RECORDS: usize = 10_000;
 const MAX_RECORD_BYTES: usize = 2 * 1024 * 1024;
-const MAX_INDEXED_NOTE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_CREATION_MANIFEST_BYTES: usize = 256 * 1024;
+const MAX_CREATION_RESOURCE_JSON_DEPTH: usize = 32;
+const MAX_CREATION_RESOURCE_JSON_NODES: usize = 20_000;
 const MAX_SEARCH_QUERY_CHARS: usize = 512;
 const MAX_INBOUND_RECORD_BYTES: usize = 512 * 1024;
+const MAX_RUNTIME_PLAN_BYTES: usize = 256 * 1024;
+const MAX_RUNTIME_EVIDENCE_BYTES: usize = 256 * 1024;
 const DEFAULT_LOCAL_WORKSPACE_SCOPE: &str = "local";
-const CURRENT_SCHEMA_VERSION: i64 = 28;
+const CURRENT_SCHEMA_VERSION: i64 = 41;
 const APPLICATION_AUTHORIZATION_VERSION: i64 = 1;
 const VAULT_INDEX_DEBOUNCE_MS: i64 = 300;
 const VAULT_INDEX_MAX_ATTEMPTS: i64 = 5;
@@ -42,7 +62,33 @@ const LOCAL_FEATURE_VECTOR_VERSION: i64 = 1;
 const LOCAL_FEATURE_VECTOR_DIMENSIONS: usize = 384;
 const MAX_LOCAL_VECTOR_CONTENT_CHARS: usize = 250_000;
 const MIN_LOCAL_VECTOR_SIMILARITY: f64 = 0.025;
+const MIN_NEURAL_EMBEDDING_SIMILARITY: f64 = 0.1;
+const MAX_NEURAL_EMBEDDING_INPUT_CHARS: usize = 24_000;
+const NEURAL_EMBEDDING_BATCH_SIZE: usize = 32;
+const MAX_NEURAL_EMBEDDING_REFRESH_NOTES: usize = 64;
+const NEURAL_RRF_WEIGHT: f64 = 2.0;
+const LOCAL_VECTOR_RRF_WEIGHT_WITH_NEURAL: f64 = 0.5;
 const RRF_K: f64 = 60.0;
+pub(crate) const OPTIMIZATION_RUNTIME_CAPABILITY_ID: &str = "system:optimization";
+pub(crate) const OPTIMIZATION_RUNTIME_OPERATION: &str = "run";
+const SCHEDULE_RUNTIME_HANDLER_PAIRS: &[(&str, &str)] = &[
+    ("system:schedule", "create"),
+    ("system:schedule", "update"),
+    ("system:schedule", "pause"),
+    ("system:schedule", "resume"),
+    ("system:schedule", "delete"),
+    ("system:schedule", "retry"),
+];
+const REPORT_RECORD_UPSERT_RUNTIME_HANDLER_PAIRS: &[(&str, &str)] =
+    &[("system:reports", "run"), ("system:external", "send")];
+const REPORT_RESOURCE_DELETE_RUNTIME_HANDLER_PAIRS: &[(&str, &str)] =
+    &[("system:reports", "delete")];
+const REPORT_SUBSCRIPTION_UPSERT_RUNTIME_HANDLER_PAIRS: &[(&str, &str)] = &[
+    ("system:reports", "create"),
+    ("system:reports", "update"),
+    ("system:reports", "pause"),
+    ("system:reports", "resume"),
+];
 
 pub struct RuntimeDatabase {
     pub(crate) connection: Mutex<Connection>,
@@ -80,6 +126,25 @@ pub struct WorkspaceSnapshot {
     selected_task_id: String,
     #[serde(default)]
     client_state: Value,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceMessagePage {
+    items: Vec<Value>,
+    next_cursor_created_at: Option<String>,
+    next_cursor_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceMessageSearchResult {
+    conversation_id: String,
+    message_id: String,
+    role: String,
+    created_at: String,
+    snippet: String,
+    score: f64,
 }
 
 #[derive(Serialize)]
@@ -223,13 +288,22 @@ pub struct IndexedSearchResult {
 struct IndexedSearchSignals {
     lexical_rank: Option<usize>,
     vector_rank: Option<usize>,
+    neural_rank: Option<usize>,
+    local_vector_rank: Option<usize>,
     lexical_rrf: f64,
     vector_rrf: f64,
+    neural_rrf: f64,
+    local_vector_rrf: f64,
     vector_similarity: Option<f64>,
+    neural_similarity: Option<f64>,
+    local_vector_similarity: Option<f64>,
     title_path_bonus: f64,
     relation_bonus: f64,
     recency_bonus: f64,
-    vector_kind: &'static str,
+    vector_kind: String,
+    embedding_provider: Option<String>,
+    embedding_model: Option<String>,
+    embedding_index_state: Option<String>,
 }
 
 #[derive(Clone)]
@@ -245,12 +319,161 @@ struct IndexedSearchCandidate {
     wiki_links: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+struct NeuralSearchContext {
+    workspace_scope: String,
+    provider_id: String,
+    provider: String,
+    model: String,
+    query_vector: Vec<f32>,
+    index_state: String,
+}
+
+#[derive(Clone, Debug)]
+struct NeuralEmbeddingNoteInput {
+    vault_id: String,
+    relative_path: String,
+    content_hash: String,
+    input_hash: String,
+    input: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NeuralEmbeddingVaultIndexStatus {
+    vault_id: String,
+    state: String,
+    total_notes: i64,
+    indexed_notes: i64,
+    pending_notes: i64,
+    last_error: Option<String>,
+    updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NeuralEmbeddingIndexStatus {
+    workspace_scope: String,
+    vault_id: Option<String>,
+    configured: bool,
+    provider_id: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    state: String,
+    total_notes: i64,
+    indexed_notes: i64,
+    pending_notes: i64,
+    cache_entries: i64,
+    last_error: Option<String>,
+    updated_at: Option<String>,
+    vaults: Vec<NeuralEmbeddingVaultIndexStatus>,
+}
+
+#[derive(Default)]
+struct NeuralEmbeddingRefreshOutcome {
+    loaded_notes: usize,
+    indexed_notes: usize,
+    error: Option<String>,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DueRuntimeSchedule {
     pub(crate) id: String,
     pub(crate) schedule_kind: String,
     pub(crate) payload: Value,
+    pub(crate) payload_hash: String,
+    pub(crate) schedule_revision: u64,
+    pub(crate) occurrence_id: String,
+    pub(crate) scheduled_for: String,
+    pub(crate) runtime_task_id: String,
+}
+
+pub(crate) struct RuntimeScheduleDispatchBinding {
+    pub(crate) schedule_id: String,
+    pub(crate) schedule_kind: String,
+    pub(crate) occurrence_id: String,
+    pub(crate) scheduled_for: String,
+    pub(crate) schedule_revision: u64,
+    pub(crate) schedule_payload_hash: String,
+    pub(crate) runtime_task_id: String,
+}
+
+struct ScheduleOccurrenceTask {
+    occurrence_id: String,
+    runtime_task_id: String,
+    schedule_revision: u64,
+    payload: Value,
+    payload_hash: String,
+}
+
+struct ScheduleOccurrenceClaim<'a> {
+    workspace_scope: &'a str,
+    schedule_id: &'a str,
+    schedule_kind: &'a str,
+    scheduled_for: &'a str,
+    schedule_revision: i64,
+    schedule_payload: &'a Value,
+    schedule_payload_hash: &'a str,
+}
+
+struct RuntimeTaskPlanStepRecord {
+    step_id: String,
+    step_kind: RuntimeTaskStepKind,
+    title: String,
+    depends_on: Vec<String>,
+    parameters: Value,
+    effect_class: RuntimeTaskStepEffectClass,
+}
+
+#[derive(Clone)]
+struct RuntimeChildExecutionExpectation {
+    binding: RuntimeTaskStepCommandBinding,
+    command_id: String,
+    trace_id: String,
+    capability_id: String,
+    operation: String,
+    parameters: Value,
+    vault_id: Option<String>,
+    command_effectful: bool,
+    effect_class: RuntimeTaskStepEffectClass,
+    run_state: String,
+    lease_expires_at: String,
+    parent_state: String,
+    cancellation_fence: u64,
+    budget_cancellation_fence: u64,
+    cancelled_at: Option<String>,
+    reserved_tool_calls: u64,
+    reserved_runtime_seconds: u64,
+    reserved_tokens: u64,
+    reserved_cost: f64,
+    max_tokens: Option<u64>,
+    max_cost: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RuntimeEffectfulHandlerAuthorization {
+    pub(crate) execution_ticket: String,
+    pub(crate) child_task_id: String,
+    pub(crate) command_id: String,
+    pub(crate) trace_id: String,
+    pub(crate) capability_id: String,
+    pub(crate) operation: String,
+    pub(crate) binding: RuntimeTaskStepCommandBinding,
+    pub(crate) reservation: TrustedHandlerReservation,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RuntimeEffectMutationKey {
+    pub(crate) command_id: String,
+    pub(crate) handler_kind: &'static str,
+    pub(crate) request_hash: String,
+}
+
+impl RuntimeEffectMutationKey {
+    pub(crate) fn completion_key(&self) -> String {
+        format!("{}:{}", self.handler_kind, self.request_hash)
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -262,8 +485,23 @@ pub struct RuntimeTaskRecovery {
     resume_step_index: Option<i64>,
     resume_checkpoint_id: Option<String>,
     evidence: Vec<String>,
+    plan_revision: Option<u64>,
+    completion_satisfied: Option<bool>,
+    missing_requirement_ids: Vec<String>,
+    replacement_key: Option<String>,
+    replacement_task_id: Option<String>,
     detail: String,
     detected_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeTaskRecoveryReplacement {
+    interrupted_task_id: String,
+    replacement_key: String,
+    replacement_task_id: Option<String>,
+    state: String,
+    updated_at: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -310,10 +548,6 @@ pub struct ManagedResourceSnapshotInput {
     #[serde(default)]
     schedules: Vec<Value>,
     #[serde(default)]
-    report_subscriptions: Vec<Value>,
-    #[serde(default)]
-    reports: Vec<Value>,
-    #[serde(default)]
     assistant_profile: Value,
     #[serde(default)]
     optimization_profile: Value,
@@ -332,6 +566,210 @@ pub struct ManagedResourceSnapshot {
     assistant_profile: Value,
     optimization_profile: Value,
     optimization_draft: Value,
+}
+
+#[derive(Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedResourcePage {
+    items: Vec<Value>,
+    next_cursor_updated_at: Option<String>,
+    next_cursor_id: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportSourceRecord {
+    kind: String,
+    id: String,
+    state: String,
+    title: String,
+    occurred_at: String,
+    payload: Value,
+}
+
+#[derive(Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportSourcePage {
+    items: Vec<ReportSourceRecord>,
+    next_cursor_occurred_at: Option<String>,
+    next_cursor_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreationResourceInput {
+    schema_version: String,
+    resource_type: String,
+    id: String,
+    version: String,
+    display_name: String,
+    #[serde(default)]
+    description: String,
+    manifest: Value,
+    payload: Value,
+    #[serde(default)]
+    content_hash: Option<String>,
+    #[serde(default)]
+    source_ref_ids: Vec<String>,
+    #[serde(default)]
+    model_run_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreationResource {
+    schema_version: String,
+    resource_type: String,
+    id: String,
+    version: String,
+    display_name: String,
+    description: String,
+    state: String,
+    revision: u64,
+    manifest: Value,
+    payload: Value,
+    content_hash: String,
+    source_ref_ids: Vec<String>,
+    model_run_ids: Vec<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreationResourceArchiveReceipt {
+    resource_type: String,
+    id: String,
+    state: String,
+    revision: u64,
+    content_hash: String,
+    updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreationResourceRestoreInput {
+    resource_type: String,
+    id: String,
+    revision: u64,
+    expected_current_revision: u64,
+}
+
+#[derive(Clone, Debug)]
+struct ValidatedCreationResource {
+    schema_version: String,
+    resource_type: String,
+    id: String,
+    version: String,
+    display_name: String,
+    description: String,
+    manifest: Value,
+    payload: Value,
+    manifest_json: String,
+    payload_json: String,
+    content_hash: String,
+    source_ref_ids: Vec<String>,
+    model_run_ids: Vec<String>,
+    source_ref_ids_json: String,
+    model_run_ids_json: String,
+}
+
+impl ValidatedCreationResource {
+    fn to_public(
+        &self,
+        revision: i64,
+        state: &str,
+        created_at: &str,
+        updated_at: &str,
+    ) -> CreationResource {
+        CreationResource {
+            schema_version: self.schema_version.clone(),
+            resource_type: self.resource_type.clone(),
+            id: self.id.clone(),
+            version: self.version.clone(),
+            display_name: self.display_name.clone(),
+            description: self.description.clone(),
+            state: state.to_string(),
+            revision: revision.max(0) as u64,
+            manifest: self.manifest.clone(),
+            payload: self.payload.clone(),
+            content_hash: self.content_hash.clone(),
+            source_ref_ids: self.source_ref_ids.clone(),
+            model_run_ids: self.model_run_ids.clone(),
+            created_at: created_at.to_string(),
+            updated_at: updated_at.to_string(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct StoredCreationResourceRow {
+    resource_type: String,
+    id: String,
+    revision: i64,
+    state: String,
+    schema_version: String,
+    version: String,
+    display_name: String,
+    description: String,
+    manifest_json: String,
+    payload_json: String,
+    content_hash: String,
+    source_ref_ids_json: String,
+    model_run_ids_json: String,
+    created_at: String,
+    updated_at: String,
+}
+
+impl StoredCreationResourceRow {
+    fn into_input(self) -> Result<CreationResourceInput, String> {
+        let StoredCreationResourceRow {
+            resource_type,
+            id,
+            revision: _,
+            state: _,
+            schema_version,
+            version,
+            display_name,
+            description,
+            manifest_json,
+            payload_json,
+            content_hash,
+            source_ref_ids_json,
+            model_run_ids_json,
+            created_at: _,
+            updated_at: _,
+        } = self;
+        Ok(CreationResourceInput {
+            schema_version,
+            resource_type,
+            id,
+            version,
+            display_name,
+            description,
+            manifest: serde_json::from_str(&manifest_json)
+                .map_err(|error| format!("创作资源 manifest 已损坏：{error}"))?,
+            payload: serde_json::from_str(&payload_json)
+                .map_err(|error| format!("创作资源 payload 已损坏：{error}"))?,
+            content_hash: Some(content_hash),
+            source_ref_ids: serde_json::from_str(&source_ref_ids_json)
+                .map_err(|error| format!("创作资源来源列表已损坏：{error}"))?,
+            model_run_ids: serde_json::from_str(&model_run_ids_json)
+                .map_err(|error| format!("创作资源模型运行列表已损坏：{error}"))?,
+        })
+    }
+
+    fn into_public(self) -> Result<CreationResource, String> {
+        let revision = self.revision;
+        let state = self.state.clone();
+        let created_at = self.created_at.clone();
+        let updated_at = self.updated_at.clone();
+        if !matches!(state.as_str(), "active" | "archived") {
+            return Err("创作资源状态无效".to_string());
+        }
+        let validated = validate_creation_resource_input(&self.into_input()?)?;
+        Ok(validated.to_public(revision, &state, &created_at, &updated_at))
+    }
 }
 
 pub struct LegacyModelProfile {
@@ -418,7 +856,7 @@ pub struct OptimizationEvidenceBatch {
     has_more: bool,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OptimizationCandidateInput {
     id: String,
@@ -440,7 +878,7 @@ pub struct OptimizationCandidateInput {
     expires_at: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OptimizationCandidateResult {
     id: String,
@@ -454,9 +892,11 @@ pub struct OptimizationCandidateResult {
     evidence_count: usize,
     created_at: String,
     evaluated_at: Option<String>,
+    #[serde(default)]
+    expires_at: Option<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OptimizationEvaluationResult {
     candidate_id: String,
@@ -466,11 +906,11 @@ pub struct OptimizationEvaluationResult {
     evaluated_at: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OptimizationProfileResult {
-    version: i64,
-    candidate_id: Option<String>,
+    pub(crate) version: i64,
+    pub(crate) candidate_id: Option<String>,
     guidance: String,
     rules: Vec<String>,
     skill_hints: Value,
@@ -486,6 +926,162 @@ pub struct OptimizationVersion {
     guidance: String,
     created_at: String,
     rollback_target: Option<i64>,
+}
+
+pub(crate) fn load_optimization_profile_in_connection(
+    connection: &Connection,
+    workspace_scope: &str,
+) -> Result<OptimizationProfileResult, String> {
+    let row = connection
+        .query_row(
+            "SELECT version, candidate_id, guidance, rules_json, skill_hints_json, updated_at
+             FROM optimization_profiles WHERE workspace_scope=?1",
+            [workspace_scope],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .map_err(|error| format!("无法读取当前优化配置：{error}"))?;
+    Ok(OptimizationProfileResult {
+        version: row.0,
+        candidate_id: row.1,
+        guidance: row.2,
+        rules: serde_json::from_str(&row.3).unwrap_or_default(),
+        skill_hints: serde_json::from_str(&row.4)
+            .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+        updated_at: row.5,
+    })
+}
+
+pub(crate) fn apply_evaluated_optimization_candidate_in_connection(
+    connection: &Connection,
+    workspace_scope: &str,
+    candidate_id: &str,
+) -> Result<OptimizationProfileResult, String> {
+    if !valid_runtime_identifier(candidate_id, 160) {
+        return Err("优化候选 ID 无效".to_string());
+    }
+    let candidate = connection
+        .query_row(
+            "SELECT base_version, candidate_version, state, summary, rules_json,
+                    skill_hints_json, expires_at
+             FROM optimization_candidates WHERE workspace_scope=?1 AND id=?2",
+            params![workspace_scope, candidate_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("无法读取待应用优化候选：{error}"))?
+        .ok_or_else(|| "优化候选不存在".to_string())?;
+    if candidate.2 == "applied" {
+        let profile = load_optimization_profile_in_connection(connection, workspace_scope)?;
+        if profile.candidate_id.as_deref() == Some(candidate_id) && profile.version == candidate.1 {
+            return Ok(profile);
+        }
+        return Err("优化候选已经应用，但当前配置已发生后续变化".to_string());
+    }
+    if candidate.2 != "pending_review" {
+        return Err(format!(
+            "优化候选当前状态为 {}，未通过独立评估",
+            candidate.2
+        ));
+    }
+    let evaluated = connection
+        .query_row(
+            "SELECT 1 FROM optimization_evaluations
+             WHERE workspace_scope=?1 AND candidate_id=?2 AND state='pending_review'
+             ORDER BY evaluated_at DESC, id DESC LIMIT 1",
+            params![workspace_scope, candidate_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| format!("无法验证优化候选评估：{error}"))?
+        .is_some();
+    if !evaluated {
+        return Err("优化候选缺少通过的独立评估回执".to_string());
+    }
+    if candidate.6.as_deref().is_some_and(|expires_at| {
+        chrono::DateTime::parse_from_rfc3339(expires_at)
+            .ok()
+            .is_some_and(|value| value.with_timezone(&Utc) <= Utc::now())
+    }) {
+        return Err("优化候选已过期，需要重新生成和评估".to_string());
+    }
+    let current_version = connection
+        .query_row(
+            "SELECT version FROM optimization_profiles WHERE workspace_scope=?1",
+            [workspace_scope],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| format!("无法读取当前优化版本：{error}"))?;
+    if candidate.0 != current_version || candidate.1 != current_version + 1 {
+        return Err("优化候选基线已变化，需要重新生成和评估".to_string());
+    }
+    let now = Utc::now().to_rfc3339();
+    connection
+        .execute(
+            "INSERT INTO optimization_profile_revisions
+             (workspace_scope, version, candidate_id, state, guidance, rules_json,
+              skill_hints_json, created_at, rollback_target)
+             VALUES (?1, ?2, ?3, 'active', ?4, ?5, ?6, ?7, NULL)",
+            params![
+                workspace_scope,
+                candidate.1,
+                candidate_id,
+                candidate.3,
+                candidate.4,
+                candidate.5,
+                now,
+            ],
+        )
+        .map_err(|error| format!("无法保存优化版本：{error}"))?;
+    let changed = connection
+        .execute(
+            "UPDATE optimization_profiles SET version=?2, candidate_id=?3, guidance=?4,
+             rules_json=?5, skill_hints_json=?6, updated_at=?7
+             WHERE workspace_scope=?1 AND version=?8",
+            params![
+                workspace_scope,
+                candidate.1,
+                candidate_id,
+                candidate.3,
+                candidate.4,
+                candidate.5,
+                now,
+                current_version,
+            ],
+        )
+        .map_err(|error| format!("无法原子应用优化配置：{error}"))?;
+    if changed != 1 {
+        return Err("优化配置版本已变化，候选没有应用".to_string());
+    }
+    let changed = connection
+        .execute(
+            "UPDATE optimization_candidates SET state='applied'
+             WHERE workspace_scope=?1 AND id=?2 AND state='pending_review'",
+            params![workspace_scope, candidate_id],
+        )
+        .map_err(|error| format!("无法更新优化候选状态：{error}"))?;
+    if changed != 1 {
+        return Err("优化候选状态已变化，候选没有应用".to_string());
+    }
+    load_optimization_profile_in_connection(connection, workspace_scope)
 }
 
 impl RuntimeDatabase {
@@ -522,24 +1118,6 @@ impl RuntimeDatabase {
         Ok(Self {
             connection: Mutex::new(connection),
             path,
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn open_test(path: &Path) -> Result<Self, String> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("无法创建临时 SQLite 目录：{error}"))?;
-        }
-        let connection = Connection::open(path)
-            .map_err(|error| format!("无法打开临时 SQLite 数据库：{error}"))?;
-        connection
-            .execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")
-            .map_err(|error| format!("无法配置临时 SQLite：{error}"))?;
-        run_migrations(&connection)?;
-        Ok(Self {
-            connection: Mutex::new(connection),
-            path: path.to_path_buf(),
         })
     }
 
@@ -1180,7 +1758,7 @@ impl RuntimeDatabase {
     ) -> Result<(), String> {
         validate_records(tasks, "原生任务")?;
         validate_records(schedules, "原生定时任务")?;
-        validate_records(report_subscriptions, "原生报告订阅")?;
+        let _ = report_subscriptions;
         let connection = self
             .connection
             .lock()
@@ -1203,12 +1781,6 @@ impl RuntimeDatabase {
             .map_err(|error| format!("无法保存原生调度开关：{error}"))?;
         sync_runtime_tasks(&transaction, workspace_scope, tasks)?;
         sync_runtime_schedule_group(&transaction, workspace_scope, schedules, "collection")?;
-        sync_runtime_schedule_group(
-            &transaction,
-            workspace_scope,
-            report_subscriptions,
-            "report",
-        )?;
         transaction
             .commit()
             .map_err(|error| format!("无法提交原生运行时同步：{error}"))
@@ -1219,14 +1791,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         snapshot: &ManagedResourceSnapshotInput,
     ) -> Result<ManagedResourceSnapshot, String> {
-        let groups = [
-            ("schedule", snapshot.schedules.as_slice()),
-            (
-                "report_subscription",
-                snapshot.report_subscriptions.as_slice(),
-            ),
-            ("report", snapshot.reports.as_slice()),
-        ];
+        // Reports and report subscriptions are persisted through their dedicated
+        // per-record commands. Keeping them out of this full-snapshot sync avoids
+        // turning a request-size guard into a product-level record ceiling.
+        let groups = [("schedule", snapshot.schedules.as_slice())];
         let total = snapshot.custom_skills.len()
             + groups.iter().map(|(_, values)| values.len()).sum::<usize>();
         if total > MAX_SNAPSHOT_RECORDS {
@@ -1271,6 +1839,263 @@ impl RuntimeDatabase {
             .map_err(|error| format!("无法提交独立资源事务：{error}"))?;
         drop(connection);
         self.load_managed_resources(workspace_scope)
+    }
+
+    pub(crate) fn upsert_report_resource(
+        &self,
+        workspace_scope: &str,
+        resource_type: &str,
+        payload: &Value,
+    ) -> Result<Value, String> {
+        if !matches!(resource_type, "report" | "report_subscription") {
+            return Err("不支持的报告资源类型".to_string());
+        }
+        let id = managed_resource_id(payload, resource_type)?;
+        if resource_type == "report" {
+            validate_report_resource(payload)?;
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("无法开始报告资源事务：{error}"))?;
+        upsert_managed_resource(&transaction, workspace_scope, resource_type, &id, payload)?;
+        if resource_type == "report_subscription" {
+            upsert_runtime_schedule_record(&transaction, workspace_scope, payload, "report")?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交报告资源事务：{error}"))?;
+        Ok(payload.clone())
+    }
+
+    pub(crate) fn delete_report_resource(
+        &self,
+        workspace_scope: &str,
+        resource_type: &str,
+        id: &str,
+    ) -> Result<(), String> {
+        if !matches!(resource_type, "report" | "report_subscription") {
+            return Err("不支持的报告资源类型".to_string());
+        }
+        let id = id.trim();
+        if id.is_empty() || id.chars().count() > 180 || id.chars().any(char::is_control) {
+            return Err("报告资源 id 无效".to_string());
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("无法开始报告资源删除事务：{error}"))?;
+        tombstone_managed_resource(&transaction, workspace_scope, resource_type, id)?;
+        if resource_type == "report_subscription" {
+            transaction
+                .execute(
+                    "DELETE FROM runtime_schedules WHERE workspace_scope=?1 AND id=?2 AND schedule_kind='report'",
+                    params![workspace_scope, id],
+                )
+                .map_err(|error| format!("无法删除报告订阅调度记录：{error}"))?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交报告资源删除事务：{error}"))
+    }
+
+    pub(crate) fn list_report_resources_page(
+        &self,
+        workspace_scope: &str,
+        resource_type: &str,
+        cursor_updated_at: Option<&str>,
+        cursor_id: Option<&str>,
+        limit: usize,
+    ) -> Result<ManagedResourcePage, String> {
+        if !matches!(resource_type, "report" | "report_subscription") {
+            return Err("不支持的报告资源类型".to_string());
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let page_limit = limit.clamp(1, 512);
+        let cursor_updated_at = cursor_updated_at
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let cursor_id = cursor_id.map(str::trim).filter(|value| !value.is_empty());
+        if cursor_updated_at.is_some() != cursor_id.is_some() {
+            return Err("报告资源分页游标不完整".to_string());
+        }
+        let mut statement = connection
+            .prepare(
+                "SELECT id, payload, updated_at FROM managed_resources
+                 WHERE workspace_scope=?1 AND resource_type=?2 AND state='active'
+                   AND (?3 IS NULL OR updated_at < ?3 OR (updated_at = ?3 AND id < ?4))
+                 ORDER BY updated_at DESC, id DESC LIMIT ?5",
+            )
+            .map_err(|error| format!("无法准备报告资源分页查询：{error}"))?;
+        let rows = statement
+            .query_map(
+                params![
+                    workspace_scope,
+                    resource_type,
+                    cursor_updated_at,
+                    cursor_id,
+                    (page_limit + 1) as i64
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .map_err(|error| format!("无法读取报告资源分页：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法解析报告资源分页：{error}"))?;
+        let has_more = rows.len() > page_limit;
+        let visible = rows.into_iter().take(page_limit).collect::<Vec<_>>();
+        let cursor = has_more
+            .then(|| {
+                visible
+                    .last()
+                    .map(|(id, _, updated_at)| (updated_at.clone(), id.clone()))
+            })
+            .flatten();
+        let items = visible
+            .into_iter()
+            .map(|(_, payload, _)| {
+                serde_json::from_str::<Value>(&payload)
+                    .map_err(|error| format!("报告资源 JSON 损坏：{error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ManagedResourcePage {
+            items,
+            next_cursor_updated_at: cursor.as_ref().map(|(updated_at, _)| updated_at.clone()),
+            next_cursor_id: cursor.map(|(_, id)| id),
+        })
+    }
+
+    // The explicit cursor fields mirror the Tauri command contract and keep pagination auditable.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn read_report_source_page(
+        &self,
+        workspace_scope: &str,
+        source_kind: &str,
+        start_at: &str,
+        end_at: &str,
+        cursor_occurred_at: Option<&str>,
+        cursor_id: Option<&str>,
+        limit: usize,
+    ) -> Result<ReportSourcePage, String> {
+        let start = chrono::DateTime::parse_from_rfc3339(start_at)
+            .map_err(|_| "报告数据开始时间必须是 RFC3339".to_string())?
+            .with_timezone(&Utc)
+            .to_rfc3339();
+        let end = chrono::DateTime::parse_from_rfc3339(end_at)
+            .map_err(|_| "报告数据结束时间必须是 RFC3339".to_string())?
+            .with_timezone(&Utc)
+            .to_rfc3339();
+        if start > end {
+            return Err("报告数据时间范围无效".to_string());
+        }
+        let cursor_occurred_at = cursor_occurred_at
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let cursor_id = cursor_id.map(str::trim).filter(|value| !value.is_empty());
+        if cursor_occurred_at.is_some() != cursor_id.is_some() {
+            return Err("报告数据分页游标不完整".to_string());
+        }
+        if let Some(cursor) = cursor_occurred_at {
+            chrono::DateTime::parse_from_rfc3339(cursor)
+                .map_err(|_| "报告数据分页时间游标无效".to_string())?;
+        }
+        let (kind, sql) = match source_kind {
+            "task" => (
+                "task",
+                "SELECT id, state, title, updated_at, payload FROM runtime_tasks
+                 WHERE workspace_scope=?1 AND updated_at>=?2 AND updated_at<=?3
+                   AND (?4 IS NULL OR updated_at < ?4 OR (updated_at = ?4 AND id < ?5))
+                 ORDER BY updated_at DESC, id DESC LIMIT ?6",
+            ),
+            "operation" => (
+                "operation",
+                "SELECT id, state, event_type, created_at, payload FROM operation_events
+                 WHERE created_at>=?2 AND created_at<=?3
+                   AND (?4 IS NULL OR created_at < ?4 OR (created_at = ?4 AND id < ?5))
+                 ORDER BY created_at DESC, id DESC LIMIT ?6",
+            ),
+            "capture" => (
+                "capture",
+                "SELECT id, state, title, updated_at, '{}' FROM inbound_content_records
+                 WHERE workspace_scope=?1 AND updated_at>=?2 AND updated_at<=?3
+                   AND (?4 IS NULL OR updated_at < ?4 OR (updated_at = ?4 AND id < ?5))
+                 ORDER BY updated_at DESC, id DESC LIMIT ?6",
+            ),
+            _ => return Err("报告数据来源类型无效".to_string()),
+        };
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let page_limit = limit.clamp(1, 512);
+        let mut statement = connection
+            .prepare(sql)
+            .map_err(|error| format!("无法准备报告数据分页查询：{error}"))?;
+        let rows = statement
+            .query_map(
+                params![
+                    workspace_scope,
+                    start,
+                    end,
+                    cursor_occurred_at,
+                    cursor_id,
+                    (page_limit + 1) as i64
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .map_err(|error| format!("无法读取报告数据分页：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法解析报告数据分页：{error}"))?;
+        let has_more = rows.len() > page_limit;
+        let visible = rows.into_iter().take(page_limit).collect::<Vec<_>>();
+        let cursor = has_more
+            .then(|| {
+                visible
+                    .last()
+                    .map(|(id, _, _, occurred_at, _)| (occurred_at.clone(), id.clone()))
+            })
+            .flatten();
+        let items = visible
+            .into_iter()
+            .map(
+                |(id, state, title, occurred_at, payload)| ReportSourceRecord {
+                    kind: kind.to_string(),
+                    id,
+                    state,
+                    title,
+                    occurred_at,
+                    payload: serde_json::from_str(&payload)
+                        .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+                },
+            )
+            .collect();
+        Ok(ReportSourcePage {
+            items,
+            next_cursor_occurred_at: cursor.as_ref().map(|(occurred_at, _)| occurred_at.clone()),
+            next_cursor_id: cursor.map(|(_, id)| id),
+        })
     }
 
     pub(crate) fn load_managed_resources(
@@ -1336,11 +2161,384 @@ impl RuntimeDatabase {
             })
             .collect::<Result<Vec<_>, _>>()?,
             schedules: list("schedule")?,
-            report_subscriptions: list("report_subscription")?,
-            reports: list("report")?,
+            // Loaded independently through cursor pages so report history never
+            // has to fit in one IPC response.
+            report_subscriptions: Vec::new(),
+            reports: Vec::new(),
             assistant_profile: fixed("assistant_profile", "assistant-profile")?,
             optimization_profile: fixed("optimization_profile", "optimization-profile")?,
             optimization_draft: fixed("optimization_candidate", "optimization-draft")?,
+        })
+    }
+
+    pub(crate) fn upsert_creation_resource(
+        &self,
+        workspace_scope: &str,
+        input: CreationResourceInput,
+    ) -> Result<CreationResource, String> {
+        let resource = validate_creation_resource_input(&input)?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("无法开始创作资源事务：{error}"))?;
+        let existing = transaction
+            .query_row(
+                "SELECT revision, state, content_hash, created_at, updated_at
+                 FROM creation_resources
+                 WHERE workspace_scope=?1 AND resource_type=?2 AND id=?3",
+                params![workspace_scope, resource.resource_type, resource.id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("无法读取创作资源当前修订：{error}"))?;
+        if let Some((revision, state, content_hash, created_at, updated_at)) = &existing {
+            if state == "active" && content_hash == &resource.content_hash {
+                transaction
+                    .commit()
+                    .map_err(|error| format!("无法提交创作资源读取事务：{error}"))?;
+                return Ok(resource.to_public(*revision, "active", created_at, updated_at));
+            }
+        }
+
+        let revision = existing
+            .as_ref()
+            .map_or(1_i64, |(previous, _, _, _, _)| previous + 1);
+        let now = Utc::now().to_rfc3339();
+        let created_at = existing
+            .as_ref()
+            .map(|(_, _, _, created_at, _)| created_at.as_str())
+            .unwrap_or(now.as_str());
+        transaction
+            .execute(
+                "INSERT INTO creation_resources
+                 (workspace_scope, resource_type, id, revision, state, schema_version, version,
+                  display_name, description, manifest_json, payload_json, content_hash,
+                  source_ref_ids_json, model_run_ids_json, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                 ON CONFLICT(workspace_scope, resource_type, id) DO UPDATE SET
+                   revision=excluded.revision, state='active', schema_version=excluded.schema_version,
+                   version=excluded.version, display_name=excluded.display_name,
+                   description=excluded.description, manifest_json=excluded.manifest_json,
+                   payload_json=excluded.payload_json, content_hash=excluded.content_hash,
+                   source_ref_ids_json=excluded.source_ref_ids_json,
+                   model_run_ids_json=excluded.model_run_ids_json, updated_at=excluded.updated_at",
+                params![
+                    workspace_scope,
+                    resource.resource_type,
+                    resource.id,
+                    revision,
+                    resource.schema_version,
+                    resource.version,
+                    resource.display_name,
+                    resource.description,
+                    resource.manifest_json,
+                    resource.payload_json,
+                    resource.content_hash,
+                    resource.source_ref_ids_json,
+                    resource.model_run_ids_json,
+                    created_at,
+                    now,
+                ],
+            )
+            .map_err(|error| format!("无法保存创作资源：{error}"))?;
+        transaction
+            .execute(
+                "INSERT INTO creation_resource_revisions
+                 (workspace_scope, resource_type, resource_id, revision, state, schema_version,
+                  version, display_name, description, manifest_json, payload_json, content_hash,
+                  source_ref_ids_json, model_run_ids_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    workspace_scope,
+                    resource.resource_type,
+                    resource.id,
+                    revision,
+                    resource.schema_version,
+                    resource.version,
+                    resource.display_name,
+                    resource.description,
+                    resource.manifest_json,
+                    resource.payload_json,
+                    resource.content_hash,
+                    resource.source_ref_ids_json,
+                    resource.model_run_ids_json,
+                    now,
+                ],
+            )
+            .map_err(|error| format!("无法记录创作资源修订：{error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交创作资源事务：{error}"))?;
+        Ok(resource.to_public(revision, "active", created_at, &now))
+    }
+
+    pub(crate) fn list_creation_resources(
+        &self,
+        workspace_scope: &str,
+        include_archived: bool,
+    ) -> Result<Vec<CreationResource>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let sql = if include_archived {
+            "SELECT resource_type, id, revision, state, schema_version, version, display_name,
+                    description, manifest_json, payload_json, content_hash, source_ref_ids_json,
+                    model_run_ids_json, created_at, updated_at
+             FROM creation_resources
+             WHERE workspace_scope=?1
+             ORDER BY state ASC, resource_type ASC, display_name COLLATE NOCASE ASC, id ASC"
+        } else {
+            "SELECT resource_type, id, revision, state, schema_version, version, display_name,
+                    description, manifest_json, payload_json, content_hash, source_ref_ids_json,
+                    model_run_ids_json, created_at, updated_at
+             FROM creation_resources
+             WHERE workspace_scope=?1 AND state='active'
+             ORDER BY resource_type ASC, display_name COLLATE NOCASE ASC, id ASC"
+        };
+        let mut statement = connection
+            .prepare(sql)
+            .map_err(|error| format!("无法准备创作资源查询：{error}"))?;
+        let rows = statement
+            .query_map([workspace_scope], creation_resource_row)
+            .map_err(|error| format!("无法读取创作资源：{error}"))?;
+        rows.map(|row| {
+            row.map_err(|error| format!("无法解析创作资源数据库记录：{error}"))?
+                .into_public()
+        })
+        .collect()
+    }
+
+    pub(crate) fn list_creation_resource_revisions(
+        &self,
+        workspace_scope: &str,
+        resource_type: &str,
+        id: &str,
+    ) -> Result<Vec<CreationResource>, String> {
+        let resource_type = validate_creation_resource_type(resource_type)?;
+        let id = validate_creation_resource_id(id)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT resource_type, resource_id, revision, state, schema_version, version,
+                        display_name, description, manifest_json, payload_json, content_hash,
+                        source_ref_ids_json, model_run_ids_json, created_at, created_at
+                 FROM creation_resource_revisions
+                 WHERE workspace_scope=?1 AND resource_type=?2 AND resource_id=?3
+                 ORDER BY revision DESC",
+            )
+            .map_err(|error| format!("无法准备创作资源版本查询：{error}"))?;
+        let rows = statement
+            .query_map(
+                params![workspace_scope, resource_type, id],
+                creation_resource_row,
+            )
+            .map_err(|error| format!("无法读取创作资源版本：{error}"))?;
+        rows.map(|row| {
+            row.map_err(|error| format!("无法解析创作资源版本记录：{error}"))?
+                .into_public()
+        })
+        .collect()
+    }
+
+    pub(crate) fn restore_creation_resource_revision(
+        &self,
+        workspace_scope: &str,
+        input: CreationResourceRestoreInput,
+    ) -> Result<CreationResource, String> {
+        let resource_type = validate_creation_resource_type(&input.resource_type)?;
+        let id = validate_creation_resource_id(&input.id)?;
+        if input.revision == 0 || input.expected_current_revision == 0 {
+            return Err("创作资源 revision 必须大于 0".to_string());
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("无法开始创作资源恢复事务：{error}"))?;
+        let (current_revision, created_at) = transaction
+            .query_row(
+                "SELECT revision, created_at FROM creation_resources
+                 WHERE workspace_scope=?1 AND resource_type=?2 AND id=?3",
+                params![workspace_scope, resource_type, id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("无法读取创作资源当前版本：{error}"))?
+            .ok_or_else(|| "未找到创作资源".to_string())?;
+        if current_revision.max(0) as u64 != input.expected_current_revision {
+            return Err("创作资源当前 revision 已变化，请重新加载版本历史".to_string());
+        }
+        let source_row = transaction
+            .query_row(
+                "SELECT resource_type, resource_id, revision, state, schema_version, version,
+                        display_name, description, manifest_json, payload_json, content_hash,
+                        source_ref_ids_json, model_run_ids_json, created_at, created_at
+                 FROM creation_resource_revisions
+                 WHERE workspace_scope=?1 AND resource_type=?2 AND resource_id=?3 AND revision=?4",
+                params![workspace_scope, resource_type, id, input.revision as i64],
+                creation_resource_row,
+            )
+            .optional()
+            .map_err(|error| format!("无法读取待恢复创作资源版本：{error}"))?
+            .ok_or_else(|| "未找到指定创作资源版本".to_string())?;
+        let resource = validate_creation_resource_input(&source_row.into_input()?)?;
+        let next_revision = current_revision + 1;
+        let now = Utc::now().to_rfc3339();
+        transaction
+            .execute(
+                "UPDATE creation_resources
+                 SET revision=?4, state='active', schema_version=?5, version=?6,
+                     display_name=?7, description=?8, manifest_json=?9, payload_json=?10,
+                     content_hash=?11, source_ref_ids_json=?12, model_run_ids_json=?13,
+                     updated_at=?14
+                 WHERE workspace_scope=?1 AND resource_type=?2 AND id=?3 AND revision=?15",
+                params![
+                    workspace_scope,
+                    resource.resource_type,
+                    resource.id,
+                    next_revision,
+                    resource.schema_version,
+                    resource.version,
+                    resource.display_name,
+                    resource.description,
+                    resource.manifest_json,
+                    resource.payload_json,
+                    resource.content_hash,
+                    resource.source_ref_ids_json,
+                    resource.model_run_ids_json,
+                    now,
+                    current_revision,
+                ],
+            )
+            .map_err(|error| format!("无法恢复创作资源版本：{error}"))?;
+        transaction
+            .execute(
+                "INSERT INTO creation_resource_revisions
+                 (workspace_scope, resource_type, resource_id, revision, state, schema_version,
+                  version, display_name, description, manifest_json, payload_json, content_hash,
+                  source_ref_ids_json, model_run_ids_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    workspace_scope,
+                    resource.resource_type,
+                    resource.id,
+                    next_revision,
+                    resource.schema_version,
+                    resource.version,
+                    resource.display_name,
+                    resource.description,
+                    resource.manifest_json,
+                    resource.payload_json,
+                    resource.content_hash,
+                    resource.source_ref_ids_json,
+                    resource.model_run_ids_json,
+                    now,
+                ],
+            )
+            .map_err(|error| format!("无法记录创作资源恢复版本：{error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交创作资源恢复事务：{error}"))?;
+        Ok(resource.to_public(next_revision, "active", &created_at, &now))
+    }
+
+    pub(crate) fn archive_creation_resource(
+        &self,
+        workspace_scope: &str,
+        resource_type: &str,
+        id: &str,
+    ) -> Result<CreationResourceArchiveReceipt, String> {
+        let resource_type = validate_creation_resource_type(resource_type)?;
+        let id = validate_creation_resource_id(id)?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("无法开始创作资源归档事务：{error}"))?;
+        let existing = transaction
+            .query_row(
+                "SELECT revision, state, content_hash, updated_at
+                 FROM creation_resources
+                 WHERE workspace_scope=?1 AND resource_type=?2 AND id=?3",
+                params![workspace_scope, resource_type, id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("无法读取待归档创作资源：{error}"))?
+            .ok_or_else(|| "未找到创作资源".to_string())?;
+        if existing.1 == "archived" {
+            transaction
+                .commit()
+                .map_err(|error| format!("无法提交创作资源归档读取事务：{error}"))?;
+            return Ok(CreationResourceArchiveReceipt {
+                resource_type,
+                id,
+                state: "archived".to_string(),
+                revision: existing.0.max(0) as u64,
+                content_hash: existing.2,
+                updated_at: existing.3,
+            });
+        }
+        let revision = existing.0 + 1;
+        let now = Utc::now().to_rfc3339();
+        transaction
+            .execute(
+                "UPDATE creation_resources
+                 SET revision=?4, state='archived', updated_at=?5
+                 WHERE workspace_scope=?1 AND resource_type=?2 AND id=?3",
+                params![workspace_scope, resource_type, id, revision, now],
+            )
+            .map_err(|error| format!("无法归档创作资源：{error}"))?;
+        transaction
+            .execute(
+                "INSERT INTO creation_resource_revisions
+                 (workspace_scope, resource_type, resource_id, revision, state, schema_version,
+                  version, display_name, description, manifest_json, payload_json, content_hash,
+                  source_ref_ids_json, model_run_ids_json, created_at)
+                 SELECT workspace_scope, resource_type, id, revision, state, schema_version,
+                        version, display_name, description, manifest_json, payload_json, content_hash,
+                        source_ref_ids_json, model_run_ids_json, updated_at
+                 FROM creation_resources
+                 WHERE workspace_scope=?1 AND resource_type=?2 AND id=?3",
+                params![workspace_scope, resource_type, id],
+            )
+            .map_err(|error| format!("无法记录创作资源归档修订：{error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交创作资源归档事务：{error}"))?;
+        Ok(CreationResourceArchiveReceipt {
+            resource_type,
+            id,
+            state: "archived".to_string(),
+            revision: revision.max(0) as u64,
+            content_hash: existing.2,
+            updated_at: now,
         })
     }
 
@@ -1371,7 +2569,7 @@ impl RuntimeDatabase {
         let now = Utc::now().to_rfc3339();
         let mut statement = transaction
             .prepare(
-                "SELECT id, schedule_kind, payload
+                "SELECT id, schedule_kind, next_run, revision, payload, payload_hash
                  FROM runtime_schedules
                  WHERE workspace_scope=?1 AND enabled=1 AND next_run IS NOT NULL AND next_run<=?2
                    AND (lease_expires_at IS NULL OR lease_expires_at<=?2)
@@ -1386,6 +2584,9 @@ impl RuntimeDatabase {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
                     ))
                 },
             )
@@ -1396,7 +2597,9 @@ impl RuntimeDatabase {
         let lease_owner = Uuid::new_v4().to_string();
         let lease_expires_at = (Utc::now() + chrono::Duration::seconds(90)).to_rfc3339();
         let mut due = Vec::new();
-        for (id, schedule_kind, payload) in selected {
+        for (id, schedule_kind, scheduled_for, schedule_revision, payload_json, payload_hash) in
+            selected
+        {
             let changed = transaction
                 .execute(
                     "UPDATE runtime_schedules
@@ -1408,11 +2611,31 @@ impl RuntimeDatabase {
             if changed != 1 {
                 continue;
             }
-            if let Ok(payload) = serde_json::from_str(&payload) {
+            if let Ok(payload) = serde_json::from_str::<Value>(&payload_json) {
+                let Some(occurrence) = ensure_schedule_occurrence_task(
+                    &transaction,
+                    ScheduleOccurrenceClaim {
+                        workspace_scope,
+                        schedule_id: &id,
+                        schedule_kind: &schedule_kind,
+                        scheduled_for: &scheduled_for,
+                        schedule_revision,
+                        schedule_payload: &payload,
+                        schedule_payload_hash: &payload_hash,
+                    },
+                )?
+                else {
+                    continue;
+                };
                 due.push(DueRuntimeSchedule {
                     id,
                     schedule_kind,
-                    payload,
+                    payload: occurrence.payload,
+                    payload_hash: occurrence.payload_hash,
+                    schedule_revision: occurrence.schedule_revision,
+                    occurrence_id: occurrence.occurrence_id,
+                    scheduled_for,
+                    runtime_task_id: occurrence.runtime_task_id,
                 });
             }
         }
@@ -1458,6 +2681,22 @@ impl RuntimeDatabase {
         for (task_id, payload_json, task_updated_at) in interrupted {
             let payload = serde_json::from_str::<Value>(&payload_json)
                 .map_err(|error| format!("中断任务 {task_id} 的快照损坏：{error}"))?;
+            let contract_completion =
+                evaluate_runtime_task_completion(&transaction, workspace_scope, &task_id)?;
+            let plan_revision = contract_completion
+                .as_ref()
+                .map(|status| status.plan_revision);
+            let missing_requirement_ids = contract_completion
+                .as_ref()
+                .map(|status| {
+                    status
+                        .requirements
+                        .iter()
+                        .filter(|requirement| !requirement.satisfied)
+                        .map(|requirement| requirement.id.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             let completed_write_events = transaction
                 .query_row(
                     "SELECT COUNT(*) FROM operation_events
@@ -1475,7 +2714,7 @@ impl RuntimeDatabase {
                     |row| row.get::<_, i64>(0),
                 )
                 .map_err(|error| format!("无法读取任务内容提交证据：{error}"))?;
-            let resume_step = transaction
+            let legacy_resume_step = transaction
                 .query_row(
                     "SELECT step_id, position FROM runtime_task_steps
                      WHERE workspace_scope=?1 AND task_id=?2 AND state NOT IN ('done', 'succeeded')
@@ -1485,6 +2724,35 @@ impl RuntimeDatabase {
                 )
                 .optional()
                 .map_err(|error| format!("无法读取任务恢复步骤：{error}"))?;
+            let contract_resume_step = if plan_revision.is_some() {
+                transaction
+                    .query_row(
+                        "SELECT step.step_id, step.position
+                         FROM runtime_task_plan_steps step
+                         JOIN runtime_task_completion_requirements requirement
+                           ON requirement.workspace_scope=step.workspace_scope
+                          AND requirement.task_id=step.task_id
+                          AND requirement.plan_revision=step.plan_revision
+                          AND requirement.step_id=step.step_id
+                         WHERE step.workspace_scope=?1 AND step.task_id=?2
+                           AND step.plan_revision=?3
+                           AND requirement.requirement_id IN (SELECT value FROM json_each(?4))
+                         ORDER BY requirement.position, step.position LIMIT 1",
+                        params![
+                            workspace_scope,
+                            task_id,
+                            plan_revision,
+                            serde_json::to_string(&missing_requirement_ids)
+                                .map_err(|error| format!("无法序列化恢复要求：{error}"))?,
+                        ],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                    )
+                    .optional()
+                    .map_err(|error| format!("无法读取契约恢复步骤：{error}"))?
+            } else {
+                None
+            };
+            let resume_step = contract_resume_step.or(legacy_resume_step);
             let resume_checkpoint_id = transaction
                 .query_row(
                     "SELECT checkpoint_id FROM runtime_task_checkpoints
@@ -1515,7 +2783,20 @@ impl RuntimeDatabase {
             if committed_content > 0 {
                 evidence.push(format!("{committed_content} 条已提交内容记录"));
             }
-            let recommendation = if !evidence.is_empty() {
+            if let Some(status) = contract_completion
+                .as_ref()
+                .filter(|status| status.satisfied)
+            {
+                evidence.push(format!(
+                    "完成契约 v{} 已由不可变证据满足",
+                    status.plan_revision
+                ));
+            }
+            let recommendation = if contract_completion
+                .as_ref()
+                .is_some_and(|status| status.satisfied)
+                || (contract_completion.is_none() && !evidence.is_empty())
+            {
                 "completed"
             } else if attachment_count > 0 {
                 "needs_input"
@@ -1528,6 +2809,10 @@ impl RuntimeDatabase {
                 "completed" => "检测到真实副作用已提交，不应重复执行".to_string(),
                 "needs_input" => "任务依赖进程内附件，应用重启后需要用户重新提供".to_string(),
                 "manual" => "破坏性或外部操作必须重新经过当前用户决策".to_string(),
+                _ if !missing_requirement_ids.is_empty() => format!(
+                    "完成契约尚缺少 {}，可从首个未满足要求对应步骤恢复",
+                    missing_requirement_ids.join("、")
+                ),
                 _ => "未发现已提交副作用，可从首个未完成步骤重新执行".to_string(),
             };
             transaction
@@ -1535,8 +2820,9 @@ impl RuntimeDatabase {
                     "INSERT INTO runtime_task_recoveries
                      (workspace_scope, task_id, interrupted_task_updated_at, recommendation,
                       resume_step_id, resume_step_index, resume_checkpoint_id, evidence_json,
+                      plan_revision, completion_satisfied, missing_requirement_ids_json,
                       detail, state, detected_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10, ?10)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'pending', ?13, ?13)
                      ON CONFLICT(workspace_scope, task_id) DO UPDATE SET
                        interrupted_task_updated_at=excluded.interrupted_task_updated_at,
                        recommendation=excluded.recommendation,
@@ -1544,6 +2830,9 @@ impl RuntimeDatabase {
                        resume_step_index=excluded.resume_step_index,
                        resume_checkpoint_id=excluded.resume_checkpoint_id,
                        evidence_json=excluded.evidence_json, detail=excluded.detail,
+                       plan_revision=excluded.plan_revision,
+                       completion_satisfied=excluded.completion_satisfied,
+                       missing_requirement_ids_json=excluded.missing_requirement_ids_json,
                        state='pending', detected_at=excluded.detected_at, updated_at=excluded.updated_at,
                        resolution=NULL, resolved_at=NULL",
                     params![
@@ -1556,6 +2845,12 @@ impl RuntimeDatabase {
                         resume_checkpoint_id,
                         serde_json::to_string(&evidence)
                             .map_err(|error| format!("无法序列化任务恢复证据：{error}"))?,
+                        plan_revision.map(|value| value as i64),
+                        contract_completion
+                            .as_ref()
+                            .map(|status| i64::from(status.satisfied)),
+                        serde_json::to_string(&missing_requirement_ids)
+                            .map_err(|error| format!("无法序列化恢复要求：{error}"))?,
                         detail,
                         detected_at,
                     ],
@@ -1566,7 +2861,9 @@ impl RuntimeDatabase {
             let mut statement = transaction
                 .prepare(
                     "SELECT task_id, recommendation, resume_step_id, resume_step_index,
-                            resume_checkpoint_id, evidence_json, detail, detected_at
+                            resume_checkpoint_id, evidence_json, plan_revision,
+                            completion_satisfied, missing_requirement_ids_json,
+                            replacement_key, replacement_task_id, detail, detected_at
                      FROM runtime_task_recoveries
                      WHERE workspace_scope=?1 AND state='pending' ORDER BY detected_at",
                 )
@@ -1574,6 +2871,7 @@ impl RuntimeDatabase {
             let rows = statement
                 .query_map([workspace_scope], |row| {
                     let evidence_json: String = row.get(5)?;
+                    let missing_requirement_ids_json: String = row.get(8)?;
                     Ok(RuntimeTaskRecovery {
                         task_id: row.get(0)?,
                         recommendation: row.get(1)?,
@@ -1581,8 +2879,18 @@ impl RuntimeDatabase {
                         resume_step_index: row.get(3)?,
                         resume_checkpoint_id: row.get(4)?,
                         evidence: serde_json::from_str(&evidence_json).unwrap_or_default(),
-                        detail: row.get(6)?,
-                        detected_at: row.get(7)?,
+                        plan_revision: row
+                            .get::<_, Option<i64>>(6)?
+                            .and_then(|value| u64::try_from(value).ok()),
+                        completion_satisfied: row.get::<_, Option<i64>>(7)?.map(|value| value != 0),
+                        missing_requirement_ids: serde_json::from_str(
+                            &missing_requirement_ids_json,
+                        )
+                        .unwrap_or_default(),
+                        replacement_key: row.get(9)?,
+                        replacement_task_id: row.get(10)?,
+                        detail: row.get(11)?,
+                        detected_at: row.get(12)?,
                     })
                 })
                 .map_err(|error| format!("无法枚举待恢复任务：{error}"))?
@@ -1626,6 +2934,240 @@ impl RuntimeDatabase {
             )
             .map_err(|error| format!("无法完成任务恢复登记：{error}"))?;
         Ok(())
+    }
+
+    pub(crate) fn supersede_runtime_task_for_recovery(
+        &self,
+        workspace_scope: &str,
+        interrupted_task_id: &str,
+        replacement_key: &str,
+    ) -> Result<RuntimeTaskRecoveryReplacement, String> {
+        let interrupted_task_id = interrupted_task_id.trim();
+        let replacement_key = replacement_key.trim();
+        if !valid_runtime_identifier(interrupted_task_id, 180)
+            || !valid_runtime_identifier(replacement_key, 180)
+        {
+            return Err("任务恢复替换绑定无效".to_string());
+        }
+        let current = self.runtime_task(workspace_scope, interrupted_task_id)?;
+        if matches!(current.state.as_str(), "succeeded" | "failed") {
+            return Err(format!("终态任务 {} 不能创建恢复替换", current.state));
+        }
+        {
+            let mut connection = self
+                .connection
+                .lock()
+                .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| format!("无法开始恢复替换登记事务：{error}"))?;
+            let recovery = transaction
+                .query_row(
+                    "SELECT state, resolution, replacement_key, recommendation
+                     FROM runtime_task_recoveries
+                     WHERE workspace_scope=?1 AND task_id=?2",
+                    params![workspace_scope, interrupted_task_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, String>(3)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|error| format!("无法读取待替换恢复记录：{error}"))?
+                .ok_or_else(|| "待替换任务没有恢复记录".to_string())?;
+            if recovery.3 != "resume" {
+                return Err("只有明确建议 resume 的恢复记录可以创建 replacement".to_string());
+            }
+            if recovery.0 == "resolved"
+                && !matches!(
+                    recovery.1.as_deref(),
+                    Some("superseded" | "replaced" | "resumed")
+                )
+            {
+                return Err("任务恢复记录已经按其他结果结算".to_string());
+            }
+            if recovery
+                .2
+                .as_deref()
+                .is_some_and(|stored| stored != replacement_key)
+            {
+                return Err("任务恢复记录已经绑定其他 replacement key".to_string());
+            }
+            let changed = transaction
+                .execute(
+                    "UPDATE runtime_task_recoveries
+                     SET replacement_key=COALESCE(replacement_key, ?3), updated_at=?4
+                     WHERE workspace_scope=?1 AND task_id=?2
+                       AND (replacement_key IS NULL OR replacement_key=?3)",
+                    params![
+                        workspace_scope,
+                        interrupted_task_id,
+                        replacement_key,
+                        Utc::now().to_rfc3339(),
+                    ],
+                )
+                .map_err(|error| format!("无法登记恢复 replacement key：{error}"))?;
+            if changed != 1 {
+                return Err("恢复 replacement key 已被并发修改".to_string());
+            }
+            transaction
+                .commit()
+                .map_err(|error| format!("无法提交恢复替换登记：{error}"))?;
+        }
+        let current = self.runtime_task(workspace_scope, interrupted_task_id)?;
+        if current.state != "cancelled" {
+            self.transition_native_runtime_task(
+                workspace_scope,
+                interrupted_task_id,
+                "cancelled",
+                current.progress,
+                "恢复替换已封锁旧任务；后续执行必须使用 replacement 任务",
+                Some(&serde_json::json!({
+                    "id": format!("recovery-supersede-{replacement_key}"),
+                    "replacementKey": replacement_key,
+                    "supersededAt": Utc::now().to_rfc3339(),
+                })),
+            )?;
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("无法开始恢复替换封锁事务：{error}"))?;
+        let state = transaction
+            .query_row(
+                "SELECT state FROM runtime_tasks WHERE workspace_scope=?1 AND id=?2",
+                params![workspace_scope, interrupted_task_id],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| format!("无法验证旧恢复任务终态：{error}"))?;
+        if state != "cancelled" {
+            return Err("旧恢复任务尚未取消，拒绝创建 replacement".to_string());
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE runtime_task_recoveries
+                 SET state='resolved', resolution='superseded', resolved_at=COALESCE(resolved_at, ?4),
+                     updated_at=?4
+                 WHERE workspace_scope=?1 AND task_id=?2 AND replacement_key=?3",
+                params![workspace_scope, interrupted_task_id, replacement_key, now],
+            )
+            .map_err(|error| format!("无法结算旧任务恢复记录：{error}"))?;
+        if changed != 1 {
+            return Err("旧任务已取消，但恢复替换关系没有持久化".to_string());
+        }
+        let replacement_task_id = transaction
+            .query_row(
+                "SELECT replacement_task_id FROM runtime_task_recoveries
+                 WHERE workspace_scope=?1 AND task_id=?2",
+                params![workspace_scope, interrupted_task_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .map_err(|error| format!("无法读取恢复 replacement：{error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交恢复替换封锁：{error}"))?;
+        Ok(RuntimeTaskRecoveryReplacement {
+            interrupted_task_id: interrupted_task_id.to_string(),
+            replacement_key: replacement_key.to_string(),
+            state: if replacement_task_id.is_some() {
+                "bound".to_string()
+            } else {
+                "superseded".to_string()
+            },
+            replacement_task_id,
+            updated_at: now,
+        })
+    }
+
+    pub(crate) fn bind_runtime_task_recovery_replacement(
+        &self,
+        workspace_scope: &str,
+        interrupted_task_id: &str,
+        replacement_task_id: &str,
+        replacement_key: &str,
+    ) -> Result<RuntimeTaskRecoveryReplacement, String> {
+        let interrupted_task_id = interrupted_task_id.trim();
+        let replacement_task_id = replacement_task_id.trim();
+        let replacement_key = replacement_key.trim();
+        if !valid_runtime_identifier(interrupted_task_id, 180)
+            || !valid_runtime_identifier(replacement_task_id, 180)
+            || !valid_runtime_identifier(replacement_key, 180)
+            || interrupted_task_id == replacement_task_id
+        {
+            return Err("任务恢复 replacement 关系无效".to_string());
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("无法开始 replacement 绑定事务：{error}"))?;
+        let interrupted_state = transaction
+            .query_row(
+                "SELECT state FROM runtime_tasks WHERE workspace_scope=?1 AND id=?2",
+                params![workspace_scope, interrupted_task_id],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| format!("无法读取被替换任务：{error}"))?;
+        if interrupted_state != "cancelled" {
+            return Err("旧任务未取消，拒绝绑定 replacement".to_string());
+        }
+        let replacement_state = transaction
+            .query_row(
+                "SELECT state FROM runtime_tasks WHERE workspace_scope=?1 AND id=?2",
+                params![workspace_scope, replacement_task_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| format!("无法读取 replacement 任务：{error}"))?
+            .ok_or_else(|| "replacement 任务不存在".to_string())?;
+        if matches!(
+            replacement_state.as_str(),
+            "succeeded" | "failed" | "cancelled"
+        ) {
+            return Err("replacement 任务已经进入终态".to_string());
+        }
+        let now = Utc::now().to_rfc3339();
+        let changed = transaction
+            .execute(
+                "UPDATE runtime_task_recoveries
+                 SET replacement_task_id=COALESCE(replacement_task_id, ?4),
+                     resolution='replaced', updated_at=?5
+                 WHERE workspace_scope=?1 AND task_id=?2 AND state='resolved'
+                   AND replacement_key=?3
+                   AND resolution IN ('superseded', 'replaced', 'resumed')
+                   AND (replacement_task_id IS NULL OR replacement_task_id=?4)",
+                params![
+                    workspace_scope,
+                    interrupted_task_id,
+                    replacement_key,
+                    replacement_task_id,
+                    now,
+                ],
+            )
+            .map_err(|error| format!("无法绑定恢复 replacement 任务：{error}"))?;
+        if changed != 1 {
+            return Err("恢复 replacement key 不匹配或已经绑定其他任务".to_string());
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交 replacement 绑定：{error}"))?;
+        Ok(RuntimeTaskRecoveryReplacement {
+            interrupted_task_id: interrupted_task_id.to_string(),
+            replacement_key: replacement_key.to_string(),
+            replacement_task_id: Some(replacement_task_id.to_string()),
+            state: "bound".to_string(),
+            updated_at: now,
+        })
     }
 
     pub(crate) fn upsert_inbound_content_record(
@@ -1946,7 +3488,7 @@ impl RuntimeDatabase {
         let transaction = connection
             .transaction()
             .map_err(|error| format!("无法开始模型供应商事务：{error}"))?;
-        for role in ["chat", "analysis", "image"] {
+        for role in ["chat", "analysis", "image", "embedding"] {
             if defaults
                 .get(role)
                 .and_then(Value::as_str)
@@ -2269,6 +3811,18 @@ impl RuntimeDatabase {
                 ("accepted", Some("queued"))
             }
         };
+        let step_binding = if task_state.is_some() {
+            let binding_checked_at = Utc::now().to_rfc3339();
+            validate_runtime_task_step_command_binding_in_connection(
+                &transaction,
+                workspace_scope,
+                command,
+                trace_id,
+                &binding_checked_at,
+            )?
+        } else {
+            None
+        };
         let task_id = task_state.map(|_| format!("task-{}", Uuid::new_v4()));
         transaction
             .execute(
@@ -2331,6 +3885,7 @@ impl RuntimeDatabase {
                     crate::policy::CommandOrigin::Schedule => "scheduled",
                     crate::policy::CommandOrigin::SystemMaintenance => "maintenance",
                     crate::policy::CommandOrigin::Evolution => "evolution",
+                    crate::policy::CommandOrigin::Runtime => "runtime_child",
                     crate::policy::CommandOrigin::DirectUser | crate::policy::CommandOrigin::Assistant => "interactive",
                 },
                 "state": task_state,
@@ -2388,6 +3943,53 @@ impl RuntimeDatabase {
                     ],
                 )
                 .map_err(|error| format!("无法记录原生任务首次尝试：{error}"))?;
+            if let Some(plan) = command.runtime_plan.as_ref() {
+                crate::task_runtime::validate_runtime_task_plan(plan)?;
+                let plan_json = canonical_runtime_json_string(
+                    &serde_json::to_value(plan)
+                        .map_err(|error| format!("无法序列化应用命令原生任务计划：{error}"))?,
+                    "应用命令原生任务计划",
+                )?;
+                if plan_json.len() > MAX_RUNTIME_PLAN_BYTES {
+                    return Err("应用命令原生任务计划超过 256 KB 安全上限".to_string());
+                }
+                let content_hash = format!("sha256:{:x}", Sha256::digest(plan_json.as_bytes()));
+                insert_runtime_task_plan_revision(
+                    &transaction,
+                    workspace_scope,
+                    task_id,
+                    1,
+                    plan,
+                    &plan_json,
+                    &content_hash,
+                    accepted_at,
+                )?;
+                ensure_runtime_task_execution_budget(
+                    &transaction,
+                    workspace_scope,
+                    task_id,
+                    1,
+                    &task_payload,
+                    Some(&command.budget),
+                    accepted_at,
+                )?;
+            }
+            if let Some(binding) = step_binding.as_ref() {
+                transaction
+                    .execute(
+                        "INSERT INTO runtime_task_step_command_bindings
+                         (workspace_scope, claim_id, command_id, child_task_id, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            workspace_scope,
+                            binding.step_claim_id,
+                            command.id,
+                            task_id,
+                            accepted_at,
+                        ],
+                    )
+                    .map_err(|error| format!("无法绑定原生任务步骤与子命令：{error}"))?;
+            }
         }
         let event = OperationEvent {
             id: Uuid::new_v4().to_string(),
@@ -2510,6 +4112,1732 @@ impl RuntimeDatabase {
         read_native_runtime_task(&connection, workspace_scope, task_id)
     }
 
+    pub(crate) fn runtime_task_contract(
+        &self,
+        workspace_scope: &str,
+        task_id: &str,
+    ) -> Result<Option<RuntimeTaskContractSnapshot>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        read_runtime_task_contract(&connection, workspace_scope, task_id)
+    }
+
+    pub(crate) fn runtime_schedule_dispatch_binding(
+        &self,
+        workspace_scope: &str,
+        occurrence_id: &str,
+        runtime_task_id: &str,
+    ) -> Result<RuntimeScheduleDispatchBinding, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let record = connection
+            .query_row(
+                "SELECT occurrence.schedule_id, occurrence.schedule_kind, occurrence.scheduled_for,
+                        occurrence.schedule_revision, occurrence.runtime_task_id, task.payload
+                 FROM runtime_schedule_occurrences occurrence
+                 JOIN runtime_tasks task
+                   ON task.workspace_scope=occurrence.workspace_scope
+                  AND task.id=occurrence.runtime_task_id
+                 WHERE occurrence.workspace_scope=?1 AND occurrence.occurrence_id=?2",
+                params![workspace_scope, occurrence_id.trim()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("无法读取日程派发绑定：{error}"))?
+            .ok_or_else(|| "未找到日程派发 occurrence".to_string())?;
+        let schedule_revision = u64::try_from(record.3)
+            .ok()
+            .filter(|revision| *revision > 0)
+            .ok_or_else(|| "日程 occurrence revision 无效".to_string())?;
+        let task_payload = serde_json::from_str::<Value>(&record.5)
+            .map_err(|error| format!("日程 wrapper payload 无法解析：{error}"))?;
+        let schedule_payload = task_payload
+            .get("schedulePayload")
+            .cloned()
+            .ok_or_else(|| "日程 wrapper 缺少 schedulePayload".to_string())?;
+        let schedule_payload_hash = task_payload
+            .get("schedulePayloadHash")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "日程 wrapper 缺少 schedulePayloadHash".to_string())?;
+        let (_, schedule_payload_hash) = verified_schedule_payload_snapshot(
+            schedule_payload,
+            schedule_payload_hash,
+            "日程 wrapper 快照",
+        )?;
+        if task_payload.get("scheduleId").and_then(Value::as_str) != Some(record.0.as_str())
+            || task_payload.get("scheduleKind").and_then(Value::as_str) != Some(record.1.as_str())
+            || task_payload
+                .get("scheduleOccurrenceId")
+                .and_then(Value::as_str)
+                != Some(occurrence_id.trim())
+            || task_payload.get("scheduledFor").and_then(Value::as_str) != Some(record.2.as_str())
+            || task_payload.get("scheduleRevision").and_then(Value::as_u64)
+                != Some(schedule_revision)
+        {
+            return Err("日程 wrapper 快照绑定与 occurrence 不一致".to_string());
+        }
+        if let Some((_, historical_hash)) = read_runtime_schedule_revision_snapshot(
+            &connection,
+            workspace_scope,
+            &record.0,
+            &record.1,
+            record.3,
+        )? {
+            if historical_hash != schedule_payload_hash {
+                return Err("日程 wrapper 快照与 occurrence 历史 revision 不一致".to_string());
+            }
+        }
+        let binding = RuntimeScheduleDispatchBinding {
+            schedule_id: record.0,
+            schedule_kind: record.1,
+            occurrence_id: occurrence_id.trim().to_string(),
+            scheduled_for: record.2,
+            schedule_revision,
+            schedule_payload_hash,
+            runtime_task_id: record.4,
+        };
+        if binding.runtime_task_id != runtime_task_id.trim() {
+            return Err("日程 occurrence 与 wrapper 任务不匹配".to_string());
+        }
+        Ok(binding)
+    }
+
+    pub(crate) fn define_runtime_task_plan(
+        &self,
+        workspace_scope: &str,
+        task_id: &str,
+        plan: &RuntimeTaskPlanInput,
+    ) -> Result<RuntimeTaskContractSnapshot, String> {
+        crate::task_runtime::validate_runtime_task_plan(plan)?;
+        if !valid_runtime_identifier(task_id, 180) {
+            return Err("原生任务计划 taskId 无效".to_string());
+        }
+        let plan_value = serde_json::to_value(plan)
+            .map_err(|error| format!("无法序列化原生任务计划：{error}"))?;
+        let plan_json = canonical_runtime_json_string(&plan_value, "原生任务计划")?;
+        if plan_json.len() > MAX_RUNTIME_PLAN_BYTES {
+            return Err("原生任务计划超过 256 KB 安全上限".to_string());
+        }
+        let content_hash = format!("sha256:{:x}", Sha256::digest(plan_json.as_bytes()));
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("无法开始原生任务计划事务：{error}"))?;
+        let current = read_native_runtime_task(&transaction, workspace_scope, task_id)?;
+        let latest = transaction
+            .query_row(
+                "SELECT revision, content_hash FROM runtime_task_plans
+                 WHERE workspace_scope=?1 AND task_id=?2 ORDER BY revision DESC LIMIT 1",
+                params![workspace_scope, task_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("无法读取原生任务计划修订：{error}"))?;
+        if latest
+            .as_ref()
+            .is_some_and(|(_, hash)| hash == &content_hash)
+        {
+            transaction
+                .commit()
+                .map_err(|error| format!("无法提交原生任务计划幂等查询：{error}"))?;
+            drop(connection);
+            return self
+                .runtime_task_contract(workspace_scope, task_id)?
+                .ok_or_else(|| "原生任务计划幂等查询未找到计划".to_string());
+        }
+        let execution_started = !matches!(
+            current.state.as_str(),
+            "created" | "queued" | "awaiting_approval"
+        ) || transaction
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM runtime_task_transitions
+                   WHERE workspace_scope=?1 AND task_id=?2 AND to_state='running'
+                 )",
+                params![workspace_scope, task_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| format!("无法检查原生任务计划锁：{error}"))?
+            != 0;
+        if execution_started {
+            return Err("原生任务进入执行或终态后不能追加新的计划修订".to_string());
+        }
+        let revision = latest.map(|(revision, _)| revision + 1).unwrap_or(1);
+        let now = Utc::now().to_rfc3339();
+        insert_runtime_task_plan_revision(
+            &transaction,
+            workspace_scope,
+            task_id,
+            revision,
+            plan,
+            &plan_json,
+            &content_hash,
+            &now,
+        )?;
+        ensure_runtime_task_execution_budget(
+            &transaction,
+            workspace_scope,
+            task_id,
+            revision,
+            &current.payload,
+            None,
+            &now,
+        )?;
+        let trace_id = current
+            .trace_id
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(crate::trace::new_trace_id);
+        crate::trace::validate_trace_id(&trace_id)?;
+        if current.trace_id.as_deref() != Some(trace_id.as_str()) {
+            transaction
+                .execute(
+                    "UPDATE runtime_tasks SET trace_id=?3
+                     WHERE workspace_scope=?1 AND id=?2",
+                    params![workspace_scope, task_id, trace_id],
+                )
+                .map_err(|error| format!("无法绑定原生任务计划 Trace：{error}"))?;
+        }
+        crate::trace::record_trace_event_in_connection(
+            &transaction,
+            workspace_scope,
+            &crate::trace::TraceEventRecord {
+                trace_id: &trace_id,
+                entity_kind: "runtime_task",
+                entity_id: task_id,
+                event_type: "task.plan_defined",
+                state: "defined",
+                payload: &serde_json::json!({
+                    "revision": revision,
+                    "contentHash": content_hash,
+                    "stepCount": plan.steps.len(),
+                    "requirementCount": plan.completion_contract.requirements.len(),
+                }),
+                created_at: &now,
+            },
+        )?;
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交原生任务计划事务：{error}"))?;
+        drop(connection);
+        self.runtime_task_contract(workspace_scope, task_id)?
+            .ok_or_else(|| "原生任务计划提交后无法读取契约".to_string())
+    }
+
+    pub(crate) fn runtime_task_step_frontier(
+        &self,
+        workspace_scope: &str,
+        task_id: &str,
+        plan_revision: Option<u64>,
+    ) -> Result<Vec<RuntimeTaskStepFrontierItem>, String> {
+        if !valid_runtime_identifier(task_id, 180) {
+            return Err("原生任务步骤 frontier taskId 无效".to_string());
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("无法开始原生任务步骤 frontier 事务：{error}"))?;
+        let current = read_native_runtime_task(&transaction, workspace_scope, task_id)?;
+        let revision = latest_runtime_task_plan_revision(
+            &transaction,
+            workspace_scope,
+            task_id,
+            plan_revision,
+        )?;
+        ensure_runtime_task_execution_budget(
+            &transaction,
+            workspace_scope,
+            task_id,
+            revision,
+            &current.payload,
+            None,
+            &current.updated_at,
+        )?;
+        let now = Utc::now().to_rfc3339();
+        expire_runtime_task_step_claims(&transaction, workspace_scope, task_id, revision, &now)?;
+        let records =
+            load_runtime_task_plan_step_records(&transaction, workspace_scope, task_id, revision)?;
+        let states =
+            latest_runtime_task_step_states(&transaction, workspace_scope, task_id, revision)?;
+        let mut frontier = Vec::new();
+        for step in records {
+            let completed = states
+                .get(&step.step_id)
+                .is_some_and(|(state, _)| state == "succeeded");
+            if completed {
+                continue;
+            }
+            let active = states
+                .get(&step.step_id)
+                .is_some_and(|(state, _)| state == "claimed");
+            let dependencies_satisfied = step.depends_on.iter().all(|dependency| {
+                states
+                    .get(dependency)
+                    .is_some_and(|(state, _)| state == "succeeded")
+            });
+            if dependencies_satisfied {
+                frontier.push(RuntimeTaskStepFrontierItem {
+                    runtime_task_id: task_id.to_string(),
+                    plan_revision: u64::try_from(revision).unwrap_or_default(),
+                    step_id: step.step_id,
+                    step_kind: step.step_kind,
+                    title: step.title,
+                    depends_on: step.depends_on,
+                    parameters: step.parameters,
+                    effect_class: step.effect_class,
+                    ready: !active && !matches!(current.state.as_str(), "cancelled" | "succeeded"),
+                    active,
+                });
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交原生任务步骤 frontier：{error}"))?;
+        Ok(frontier)
+    }
+
+    pub(crate) fn claim_runtime_task_plan_steps(
+        &self,
+        workspace_scope: &str,
+        input: &RuntimeTaskStepClaimInput,
+    ) -> Result<RuntimeTaskStepClaimBatch, String> {
+        crate::task_runtime::validate_runtime_task_step_claim(input)?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("无法开始原生任务步骤领取事务：{error}"))?;
+        let current = read_native_runtime_task(&transaction, workspace_scope, &input.task_id)?;
+        let revision = latest_runtime_task_plan_revision(
+            &transaction,
+            workspace_scope,
+            &input.task_id,
+            input.plan_revision,
+        )?;
+        ensure_runtime_task_execution_budget(
+            &transaction,
+            workspace_scope,
+            &input.task_id,
+            revision,
+            &current.payload,
+            None,
+            &current.updated_at,
+        )?;
+        ensure_runtime_task_running_for_step_claim(
+            &transaction,
+            workspace_scope,
+            &input.task_id,
+            &Utc::now().to_rfc3339(),
+        )?;
+        let now = Utc::now().to_rfc3339();
+        expire_runtime_task_step_claims(
+            &transaction,
+            workspace_scope,
+            &input.task_id,
+            revision,
+            &now,
+        )?;
+        let budget = read_runtime_task_execution_budget(
+            &transaction,
+            workspace_scope,
+            &input.task_id,
+            revision,
+        )?;
+        if budget.cancelled_at.is_some() {
+            return Err("父任务已取消，不能领取任务步骤".to_string());
+        }
+        if budget.max_tokens.is_some() && input.reservation.max_tokens.is_none() {
+            return Err("任务 Token 预算要求步骤领取显式预留额度".to_string());
+        }
+        if budget.max_cost.is_some() && input.reservation.max_cost.is_none() {
+            return Err("任务成本预算要求步骤领取显式预留额度".to_string());
+        }
+        let records = load_runtime_task_plan_step_records(
+            &transaction,
+            workspace_scope,
+            &input.task_id,
+            revision,
+        )?;
+        let states = latest_runtime_task_step_states(
+            &transaction,
+            workspace_scope,
+            &input.task_id,
+            revision,
+        )?;
+        let active_effectful = states.values().any(|(state, effect)| {
+            state == "claimed" && *effect == RuntimeTaskStepEffectClass::Effectful
+        });
+        let active_read_only = states.values().any(|(state, effect)| {
+            state == "claimed" && *effect == RuntimeTaskStepEffectClass::ReadOnly
+        });
+        let candidates = records
+            .into_iter()
+            .filter(|step| {
+                let completed = states
+                    .get(&step.step_id)
+                    .is_some_and(|(state, _)| state == "succeeded");
+                let active = states
+                    .get(&step.step_id)
+                    .is_some_and(|(state, _)| state == "claimed");
+                !completed
+                    && !active
+                    && step.depends_on.iter().all(|dependency| {
+                        states
+                            .get(dependency)
+                            .is_some_and(|(state, _)| state == "succeeded")
+                    })
+            })
+            .collect::<Vec<_>>();
+        let candidates = if active_effectful {
+            Vec::new()
+        } else if active_read_only {
+            candidates
+                .into_iter()
+                .filter(|step| step.effect_class == RuntimeTaskStepEffectClass::ReadOnly)
+                .take(input.max_claims)
+                .collect::<Vec<_>>()
+        } else if candidates
+            .first()
+            .is_some_and(|step| step.effect_class == RuntimeTaskStepEffectClass::Effectful)
+        {
+            candidates.into_iter().take(1).collect::<Vec<_>>()
+        } else {
+            candidates
+                .into_iter()
+                .filter(|step| step.effect_class == RuntimeTaskStepEffectClass::ReadOnly)
+                .take(input.max_claims)
+                .collect::<Vec<_>>()
+        };
+        let claim_count = candidates.len() as u64;
+        if claim_count == 0 {
+            let budget = read_runtime_task_execution_budget(
+                &transaction,
+                workspace_scope,
+                &input.task_id,
+                revision,
+            )?;
+            transaction
+                .commit()
+                .map_err(|error| format!("无法提交空原生任务步骤领取：{error}"))?;
+            return Ok(RuntimeTaskStepClaimBatch {
+                claims: Vec::new(),
+                budget,
+            });
+        }
+        let requested_tool_calls = input.reservation.max_tool_calls;
+        let requested_runtime_seconds = input.reservation.max_runtime_seconds;
+        let requested_tokens = input.reservation.max_tokens.unwrap_or(0);
+        let requested_cost = input.reservation.max_cost.unwrap_or(0.0);
+        let available_steps = budget
+            .max_steps
+            .saturating_sub(budget.consumed_steps + budget.reserved_steps);
+        let available_tool_calls = budget
+            .max_tool_calls
+            .saturating_sub(budget.consumed_tool_calls + budget.reserved_tool_calls);
+        let available_runtime_seconds = budget
+            .max_runtime_seconds
+            .saturating_sub(budget.consumed_runtime_seconds + budget.reserved_runtime_seconds);
+        if claim_count > available_steps
+            || requested_tool_calls.saturating_mul(claim_count) > available_tool_calls
+            || requested_runtime_seconds.saturating_mul(claim_count) > available_runtime_seconds
+            || budget.max_tokens.is_some_and(|max| {
+                requested_tokens.saturating_mul(claim_count)
+                    > max.saturating_sub(budget.consumed_tokens + budget.reserved_tokens)
+            })
+            || budget.max_cost.is_some_and(|max| {
+                requested_cost * claim_count as f64
+                    > max - budget.consumed_cost - budget.reserved_cost + f64::EPSILON
+            })
+        {
+            return Err("原生任务步骤领取超出持久化执行预算".to_string());
+        }
+        let lease_expires_at =
+            (Utc::now() + chrono::Duration::seconds(input.lease_seconds as i64)).to_rfc3339();
+        let mut claims = Vec::new();
+        for step in candidates {
+            let attempt: i64 = transaction
+                .query_row(
+                    "SELECT COALESCE(MAX(attempt), 0) + 1
+                     FROM runtime_task_step_runs
+                     WHERE workspace_scope=?1 AND task_id=?2 AND plan_revision=?3 AND step_id=?4",
+                    params![workspace_scope, input.task_id, revision, step.step_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| format!("无法生成原生任务步骤领取序号：{error}"))?;
+            let claim_id = format!("step-claim-{}", Uuid::new_v4());
+            transaction
+                .execute(
+                    "INSERT INTO runtime_task_step_runs
+                     (workspace_scope, claim_id, task_id, plan_revision, step_id, attempt,
+                      effect_class, state, lease_owner, lease_expires_at, reserved_tool_calls,
+                      reserved_runtime_seconds, reserved_tokens, reserved_cost,
+                      cancellation_fence, claimed_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'claimed', ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                    params![
+                        workspace_scope,
+                        claim_id,
+                        input.task_id,
+                        revision,
+                        step.step_id,
+                        attempt,
+                        step.effect_class.as_str(),
+                        input.worker_id,
+                        lease_expires_at,
+                        requested_tool_calls,
+                        requested_runtime_seconds,
+                        requested_tokens,
+                        requested_cost,
+                        budget.cancellation_fence,
+                        now,
+                    ],
+                )
+                .map_err(|error| format!("无法保存原生任务步骤领取：{error}"))?;
+            claims.push(RuntimeTaskStepClaim {
+                claim_id,
+                runtime_task_id: input.task_id.clone(),
+                plan_revision: u64::try_from(revision).unwrap_or_default(),
+                step_id: step.step_id,
+                step_kind: step.step_kind,
+                title: step.title,
+                depends_on: step.depends_on,
+                parameters: step.parameters,
+                effect_class: step.effect_class,
+                attempt: u64::try_from(attempt).unwrap_or_default(),
+                lease_owner: input.worker_id.clone(),
+                lease_expires_at: lease_expires_at.clone(),
+                reserved_tool_calls: requested_tool_calls,
+                reserved_runtime_seconds: requested_runtime_seconds,
+                reserved_tokens: input.reservation.max_tokens,
+                reserved_cost: input.reservation.max_cost,
+                cancellation_fence: budget.cancellation_fence,
+                claimed_at: now.clone(),
+            });
+        }
+        transaction
+            .execute(
+                "UPDATE runtime_task_execution_budgets
+                 SET reserved_steps=reserved_steps+?4,
+                     reserved_tool_calls=reserved_tool_calls+?5,
+                     reserved_runtime_seconds=reserved_runtime_seconds+?6,
+                     reserved_tokens=reserved_tokens+?7,
+                     reserved_cost=reserved_cost+?8, updated_at=?9
+                 WHERE workspace_scope=?1 AND task_id=?2 AND plan_revision=?3",
+                params![
+                    workspace_scope,
+                    input.task_id,
+                    revision,
+                    claim_count as i64,
+                    checked_sqlite_i64(
+                        requested_tool_calls.saturating_mul(claim_count),
+                        "工具调用预留"
+                    )?,
+                    checked_sqlite_i64(
+                        requested_runtime_seconds.saturating_mul(claim_count),
+                        "运行时间预留",
+                    )?,
+                    checked_sqlite_i64(requested_tokens.saturating_mul(claim_count), "Token 预留")?,
+                    requested_cost * claim_count as f64,
+                    now,
+                ],
+            )
+            .map_err(|error| format!("无法更新原生任务步骤预算预留：{error}"))?;
+        let budget = read_runtime_task_execution_budget(
+            &transaction,
+            workspace_scope,
+            &input.task_id,
+            revision,
+        )?;
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交原生任务步骤领取：{error}"))?;
+        Ok(RuntimeTaskStepClaimBatch { claims, budget })
+    }
+
+    pub(crate) fn renew_runtime_task_step_lease(
+        &self,
+        workspace_scope: &str,
+        input: &RuntimeTaskStepLeaseRenewalInput,
+    ) -> Result<RuntimeTaskStepLeaseRenewalReceipt, String> {
+        crate::task_runtime::validate_runtime_task_step_lease_renewal(input)?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("无法开始原生任务步骤 lease 续租事务：{error}"))?;
+        let row = transaction
+            .query_row(
+                "SELECT run.plan_revision, run.step_id, run.state, run.lease_owner,
+                        run.lease_expires_at, run.cancellation_fence,
+                        budget.cancellation_fence, budget.cancelled_at, task.state
+                 FROM runtime_task_step_runs run
+                 JOIN runtime_task_execution_budgets budget
+                   ON budget.workspace_scope=run.workspace_scope
+                  AND budget.task_id=run.task_id
+                  AND budget.plan_revision=run.plan_revision
+                 JOIN runtime_tasks task
+                   ON task.workspace_scope=run.workspace_scope AND task.id=run.task_id
+                 WHERE run.workspace_scope=?1 AND run.task_id=?2 AND run.claim_id=?3",
+                params![workspace_scope, input.task_id, input.step_claim_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, String>(8)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("无法读取原生任务步骤 lease：{error}"))?
+            .ok_or_else(|| "原生任务步骤领取不存在".to_string())?;
+        if row.2 != "claimed" {
+            return Err("只有 claimed 状态的原生任务步骤可以续租".to_string());
+        }
+        if row.3 != input.worker_id {
+            return Err("原生任务步骤 lease owner 不匹配".to_string());
+        }
+        if row.7.is_some()
+            || row.5 != row.6
+            || !matches!(row.8.as_str(), "queued" | "running" | "awaiting_approval")
+        {
+            return Err("原生任务步骤已被父任务状态或取消栅栏封锁".to_string());
+        }
+        let now = Utc::now();
+        let previous_expiry = chrono::DateTime::parse_from_rfc3339(&row.4)
+            .map_err(|_| "原生任务步骤 lease 时间无效".to_string())?
+            .with_timezone(&Utc);
+        if previous_expiry <= now {
+            return Err("原生任务步骤 lease 已过期，必须重新领取".to_string());
+        }
+        let lease_seconds = i64::try_from(input.lease_seconds)
+            .map_err(|_| "原生任务步骤 lease 续租时长无效".to_string())?;
+        let proposed_expiry = now
+            .checked_add_signed(ChronoDuration::seconds(lease_seconds))
+            .ok_or_else(|| "无法计算原生任务步骤 lease 续租时间".to_string())?;
+        let renewed_expiry = previous_expiry.max(proposed_expiry).to_rfc3339();
+        let changed = transaction
+            .execute(
+                "UPDATE runtime_task_step_runs SET lease_expires_at=?4
+                 WHERE workspace_scope=?1 AND task_id=?2 AND claim_id=?3
+                   AND state='claimed' AND lease_owner=?5 AND lease_expires_at=?6",
+                params![
+                    workspace_scope,
+                    input.task_id,
+                    input.step_claim_id,
+                    renewed_expiry,
+                    input.worker_id,
+                    row.4,
+                ],
+            )
+            .map_err(|error| format!("无法续租原生任务步骤 lease：{error}"))?;
+        if changed != 1 {
+            return Err("原生任务步骤 lease 已被并发修改".to_string());
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交原生任务步骤 lease 续租：{error}"))?;
+        Ok(RuntimeTaskStepLeaseRenewalReceipt {
+            runtime_task_id: input.task_id.clone(),
+            step_claim_id: input.step_claim_id.clone(),
+            plan_revision: u64::try_from(row.0).unwrap_or_default(),
+            step_id: row.1,
+            lease_owner: input.worker_id.clone(),
+            previous_lease_expires_at: row.4,
+            lease_expires_at: renewed_expiry,
+            cancellation_fence: u64::try_from(row.5).unwrap_or_default(),
+        })
+    }
+
+    pub(crate) fn validate_runtime_execution_ticket_renewal(
+        &self,
+        workspace_scope: &str,
+        child_task_id: &str,
+        binding: &RuntimeTaskStepCommandBinding,
+    ) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let child = read_native_runtime_task(&connection, workspace_scope, child_task_id)?;
+        if child.payload.get("kind").and_then(Value::as_str) != Some("runtime_child")
+            || !matches!(
+                child.state.as_str(),
+                "queued" | "running" | "awaiting_approval"
+            )
+        {
+            return Err("只有存活的 Runtime 子任务可以续期执行票据".to_string());
+        }
+        let expected =
+            read_runtime_child_execution_expectation(&connection, workspace_scope, child_task_id)?
+                .ok_or_else(|| "Runtime 子任务缺少步骤绑定，不能续期执行票据".to_string())?;
+        if expected.binding != *binding {
+            return Err("Runtime 执行票据续期步骤绑定不一致".to_string());
+        }
+        validate_live_runtime_child_execution_expectation(&expected, &Utc::now().to_rfc3339())
+    }
+
+    pub(crate) fn validate_runtime_effectful_handler(
+        &self,
+        ticket_state: &ExecutionTicketState,
+        workspace_scope: &str,
+        operation_context: &OperationContext,
+        capability_id: &str,
+        operation: &str,
+    ) -> Result<RuntimeEffectfulHandlerAuthorization, String> {
+        let authorization = {
+            let connection = self
+                .connection
+                .lock()
+                .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+            runtime_effectful_handler_authorization(
+                &connection,
+                workspace_scope,
+                operation_context,
+                &[(capability_id, operation)],
+            )?
+        };
+        ticket_state.validate_effectful_handler_authorization(
+            &authorization.execution_ticket,
+            workspace_scope,
+            &authorization.child_task_id,
+            &authorization.command_id,
+            &authorization.trace_id,
+            &authorization.capability_id,
+            &authorization.operation,
+            &authorization.binding,
+        )?;
+        Ok(authorization)
+    }
+
+    pub(crate) fn validate_runtime_effectful_handler_pairs(
+        &self,
+        ticket_state: &ExecutionTicketState,
+        workspace_scope: &str,
+        operation_context: &OperationContext,
+        allowed_pairs: &[(&str, &str)],
+    ) -> Result<RuntimeEffectfulHandlerAuthorization, String> {
+        let authorization = {
+            let connection = self
+                .connection
+                .lock()
+                .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+            runtime_effectful_handler_authorization(
+                &connection,
+                workspace_scope,
+                operation_context,
+                allowed_pairs,
+            )?
+        };
+        ticket_state.validate_effectful_handler_authorization(
+            &authorization.execution_ticket,
+            workspace_scope,
+            &authorization.child_task_id,
+            &authorization.command_id,
+            &authorization.trace_id,
+            &authorization.capability_id,
+            &authorization.operation,
+            &authorization.binding,
+        )?;
+        Ok(authorization)
+    }
+
+    pub(crate) fn record_runtime_effectful_handler_completion(
+        &self,
+        ticket_state: &ExecutionTicketState,
+        workspace_scope: &str,
+        operation_context: &OperationContext,
+        capability_id: &str,
+        operation: &str,
+        usage: TrustedHandlerUsage,
+    ) -> Result<(), String> {
+        let authorization = self.validate_runtime_effectful_handler(
+            ticket_state,
+            workspace_scope,
+            operation_context,
+            capability_id,
+            operation,
+        )?;
+        ticket_state.record_effectful_handler_completion(
+            &authorization.execution_ticket,
+            workspace_scope,
+            &authorization.child_task_id,
+            &authorization.command_id,
+            &authorization.trace_id,
+            &authorization.capability_id,
+            &authorization.operation,
+            &authorization.binding,
+            usage,
+            authorization.reservation,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_runtime_effectful_handler_completion_once(
+        &self,
+        ticket_state: &ExecutionTicketState,
+        workspace_scope: &str,
+        operation_context: &OperationContext,
+        capability_id: &str,
+        operation: &str,
+        completion_key: &str,
+        usage: TrustedHandlerUsage,
+    ) -> Result<bool, String> {
+        let authorization = self.validate_runtime_effectful_handler(
+            ticket_state,
+            workspace_scope,
+            operation_context,
+            capability_id,
+            operation,
+        )?;
+        ticket_state.record_effectful_handler_completion_once(
+            &authorization.execution_ticket,
+            workspace_scope,
+            &authorization.child_task_id,
+            &authorization.command_id,
+            &authorization.trace_id,
+            &authorization.capability_id,
+            &authorization.operation,
+            &authorization.binding,
+            completion_key,
+            usage,
+            authorization.reservation,
+        )
+    }
+
+    pub(crate) fn execute_runtime_read_only_capability(
+        &self,
+        workspace_scope: &str,
+        child_task_id: &str,
+        binding: &RuntimeTaskStepCommandBinding,
+    ) -> Result<RuntimeReadOnlyCapabilityResult, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let child = read_native_runtime_task(&connection, workspace_scope, child_task_id)?;
+        if child.payload.get("kind").and_then(Value::as_str) != Some("runtime_child")
+            || child.state != "running"
+        {
+            return Err("只有 running 状态的 Runtime 子任务可以执行只读原生门禁".to_string());
+        }
+        let expected =
+            read_runtime_child_execution_expectation(&connection, workspace_scope, child_task_id)?
+                .ok_or_else(|| "Runtime 子任务缺少只读步骤绑定".to_string())?;
+        validate_live_runtime_child_execution_expectation(&expected, &Utc::now().to_rfc3339())?;
+        if expected.binding != *binding {
+            return Err("Runtime 只读能力步骤绑定不一致".to_string());
+        }
+        if expected.effect_class != RuntimeTaskStepEffectClass::ReadOnly
+            || expected.command_effectful
+        {
+            return Err("有副作用的 Runtime 能力不能使用只读原生门禁".to_string());
+        }
+        if !matches!(
+            expected.operation.as_str(),
+            "read" | "query" | "search" | "list" | "open" | "preview"
+        ) {
+            return Err("Runtime 只读能力操作不在原生处理器白名单内".to_string());
+        }
+        let parameter_json =
+            canonical_runtime_json_string(&expected.parameters, "Runtime 只读能力参数")?;
+        let parameter_hash = format!("sha256:{:x}", Sha256::digest(parameter_json.as_bytes()));
+        let mut output = execute_runtime_read_only_handler_in_connection(
+            &connection,
+            workspace_scope,
+            &expected,
+        )?;
+        let output = output
+            .as_object_mut()
+            .ok_or_else(|| "Runtime 只读原生处理器返回了无效结果".to_string())?;
+        output.insert("validated".to_string(), Value::Bool(true));
+        output.insert("handler".to_string(), Value::String("native".to_string()));
+        output.insert("parameterHash".to_string(), Value::String(parameter_hash));
+        output.insert(
+            "snapshotAt".to_string(),
+            Value::String(Utc::now().to_rfc3339()),
+        );
+        Ok(RuntimeReadOnlyCapabilityResult {
+            task_id: child.id,
+            command_id: expected.command_id,
+            trace_id: expected.trace_id,
+            capability_id: expected.capability_id,
+            operation: expected.operation,
+            trust_kind: "read_only_native_handler".to_string(),
+            output: Value::Object(output.clone()),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finalize_runtime_task_step(
+        &self,
+        workspace_scope: &str,
+        task_id: &str,
+        claim_id: &str,
+        receipt_id: &str,
+        state: &str,
+        consumed_tool_calls: u64,
+        consumed_runtime_seconds: u64,
+        consumed_tokens: u64,
+        consumed_cost: f64,
+        output: &Value,
+        error: Option<&str>,
+    ) -> Result<RuntimeTaskStepReceipt, String> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("无法开始原生任务步骤回执事务：{error}"))?;
+        let now = Utc::now().to_rfc3339();
+        if let Some(existing) =
+            read_runtime_task_step_receipt(&transaction, workspace_scope, receipt_id)?
+        {
+            if existing.step_claim_id != claim_id
+                || existing.runtime_task_id != task_id
+                || existing.state != state
+                || existing.output != *output
+                || existing.error.as_deref() != error
+                || existing.consumed_tool_calls != consumed_tool_calls
+                || existing.consumed_runtime_seconds != consumed_runtime_seconds
+                || existing.consumed_tokens != consumed_tokens
+                || (existing.consumed_cost - consumed_cost).abs() > f64::EPSILON
+            {
+                return Err("原生任务步骤回执 ID 已绑定不同内容".to_string());
+            }
+            transaction.commit().map_err(|commit_error| {
+                format!("无法提交原生任务步骤回执幂等查询：{commit_error}")
+            })?;
+            return Ok(existing);
+        }
+        let run = transaction
+            .query_row(
+                "SELECT plan_revision, step_id, state, lease_expires_at, cancellation_fence,
+                        reserved_tool_calls, reserved_runtime_seconds, reserved_tokens,
+                        reserved_cost
+                 FROM runtime_task_step_runs
+                 WHERE workspace_scope=?1 AND claim_id=?2 AND task_id=?3",
+                params![workspace_scope, claim_id, task_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, f64>(8)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("无法读取原生任务步骤领取：{error}"))?
+            .ok_or_else(|| "原生任务步骤领取不存在".to_string())?;
+        if run.2 != "claimed" {
+            return Err("原生任务步骤领取已经完成或被封锁".to_string());
+        }
+        if run.3.as_str() <= now.as_str() {
+            expire_runtime_task_step_claims(&transaction, workspace_scope, task_id, run.0, &now)?;
+            return Err("原生任务步骤领取 lease 已过期".to_string());
+        }
+        let task = read_native_runtime_task(&transaction, workspace_scope, task_id)?;
+        if task.state == "cancelled" {
+            return Err("父任务已取消，拒绝迟到步骤回执".to_string());
+        }
+        let trace_id = task
+            .trace_id
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(crate::trace::new_trace_id);
+        crate::trace::validate_trace_id(&trace_id)?;
+        if task.trace_id.as_deref() != Some(trace_id.as_str()) {
+            transaction
+                .execute(
+                    "UPDATE runtime_tasks SET trace_id=?3
+                     WHERE workspace_scope=?1 AND id=?2",
+                    params![workspace_scope, task_id, trace_id],
+                )
+                .map_err(|error| format!("无法绑定步骤回执 Trace：{error}"))?;
+        }
+        let budget =
+            read_runtime_task_execution_budget(&transaction, workspace_scope, task_id, run.0)?;
+        if budget.cancelled_at.is_some()
+            || budget.cancellation_fence != u64::try_from(run.4).unwrap_or_default()
+        {
+            return Err("原生任务步骤已被父任务取消栅栏封锁".to_string());
+        }
+        // Reject an over-reported completion before checking capability-child
+        // proof. This keeps the persisted reservation as the first authority
+        // for every terminal receipt, including a missing or failed child.
+        let reported_cost_valid = consumed_cost.is_finite() && consumed_cost >= 0.0;
+        if consumed_tool_calls > u64::try_from(run.5).unwrap_or_default()
+            || consumed_runtime_seconds > u64::try_from(run.6).unwrap_or_default()
+            || budget.max_tokens.is_some()
+                && consumed_tokens > u64::try_from(run.7).unwrap_or_default()
+            || !reported_cost_valid
+            || budget.max_cost.is_some() && consumed_cost > run.8 + f64::EPSILON
+        {
+            return Err("原生任务步骤回执消耗超过已预留预算".to_string());
+        }
+        let trusted_execution_receipt = if state == "succeeded" {
+            Self::validate_runtime_capability_step_child_completion(
+                &transaction,
+                workspace_scope,
+                task_id,
+                run.0,
+                &run.1,
+                claim_id,
+                &trace_id,
+            )?
+        } else {
+            None
+        };
+        if let Some(receipt) = trusted_execution_receipt.as_ref() {
+            if consumed_tool_calls != receipt.consumed_tool_calls
+                || consumed_runtime_seconds != receipt.consumed_runtime_seconds
+                || consumed_tokens != receipt.consumed_tokens
+                || (consumed_cost - receipt.consumed_cost).abs() > f64::EPSILON
+            {
+                return Err("capability 步骤上报消耗与 Rust 可信处理器回执不一致".to_string());
+            }
+        }
+        let consumed_tool_calls = trusted_execution_receipt
+            .as_ref()
+            .map_or(consumed_tool_calls, |receipt| receipt.consumed_tool_calls);
+        let consumed_runtime_seconds = trusted_execution_receipt
+            .as_ref()
+            .map_or(consumed_runtime_seconds, |receipt| {
+                receipt.consumed_runtime_seconds
+            });
+        let consumed_tokens = trusted_execution_receipt
+            .as_ref()
+            .map_or(consumed_tokens, |receipt| receipt.consumed_tokens);
+        let consumed_cost = trusted_execution_receipt
+            .as_ref()
+            .map_or(consumed_cost, |receipt| receipt.consumed_cost);
+        let consumed_cost_valid = consumed_cost.is_finite() && consumed_cost >= 0.0;
+        if consumed_tool_calls > u64::try_from(run.5).unwrap_or_default()
+            || consumed_runtime_seconds > u64::try_from(run.6).unwrap_or_default()
+            || budget.max_tokens.is_some()
+                && consumed_tokens > u64::try_from(run.7).unwrap_or_default()
+            || !consumed_cost_valid
+            || budget.max_cost.is_some() && consumed_cost > run.8 + f64::EPSILON
+        {
+            return Err("原生任务步骤回执消耗超过已预留预算".to_string());
+        }
+        let output_json = canonical_runtime_json_string(output, "原生任务步骤回执输出")?;
+        let content = serde_json::json!({
+            "state": state,
+            "output": output,
+            "error": error,
+            "consumedToolCalls": consumed_tool_calls,
+            "consumedRuntimeSeconds": consumed_runtime_seconds,
+            "consumedTokens": consumed_tokens,
+            "consumedCost": consumed_cost,
+            "trustedExecutionReceiptId": trusted_execution_receipt
+                .as_ref()
+                .map(|receipt| receipt.receipt_id.as_str()),
+        });
+        let content_json = canonical_runtime_json_string(&content, "原生任务步骤回执")?;
+        let content_hash = format!("sha256:{:x}", Sha256::digest(content_json.as_bytes()));
+        let changed = transaction
+            .execute(
+                "UPDATE runtime_task_step_runs
+                 SET state=?4, finished_at=?5
+                 WHERE workspace_scope=?1 AND claim_id=?2 AND state='claimed'",
+                params![workspace_scope, claim_id, task_id, state, now],
+            )
+            .map_err(|error| format!("无法完成原生任务步骤领取：{error}"))?;
+        if changed != 1 {
+            return Err("原生任务步骤领取状态已被并发修改".to_string());
+        }
+        transaction
+            .execute(
+                "UPDATE runtime_task_execution_budgets
+                 SET reserved_steps=MAX(0, reserved_steps-1),
+                     reserved_tool_calls=MAX(0, reserved_tool_calls-?4),
+                     reserved_runtime_seconds=MAX(0, reserved_runtime_seconds-?5),
+                     reserved_tokens=MAX(0, reserved_tokens-?6),
+                     reserved_cost=MAX(0, reserved_cost-?7),
+                     consumed_steps=consumed_steps+1,
+                     consumed_tool_calls=consumed_tool_calls+?8,
+                     consumed_runtime_seconds=consumed_runtime_seconds+?9,
+                     consumed_tokens=consumed_tokens+?10,
+                     consumed_cost=consumed_cost+?11,
+                     updated_at=?12
+                 WHERE workspace_scope=?1 AND task_id=?2 AND plan_revision=?3",
+                params![
+                    workspace_scope,
+                    task_id,
+                    run.0,
+                    run.5,
+                    run.6,
+                    run.7,
+                    run.8,
+                    checked_sqlite_i64(consumed_tool_calls, "工具调用消耗")?,
+                    checked_sqlite_i64(consumed_runtime_seconds, "运行时间消耗")?,
+                    checked_sqlite_i64(consumed_tokens, "Token 消耗")?,
+                    consumed_cost,
+                    now,
+                ],
+            )
+            .map_err(|error| format!("无法结算原生任务步骤预算：{error}"))?;
+        transaction
+            .execute(
+                "INSERT INTO runtime_task_step_receipts
+                 (workspace_scope, receipt_id, claim_id, task_id, plan_revision, step_id, state,
+                  output_json, error, consumed_tool_calls, consumed_runtime_seconds,
+                  consumed_tokens, consumed_cost, content_hash, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    workspace_scope,
+                    receipt_id,
+                    claim_id,
+                    task_id,
+                    run.0,
+                    run.1,
+                    state,
+                    output_json,
+                    error,
+                    checked_sqlite_i64(consumed_tool_calls, "工具调用消耗")?,
+                    checked_sqlite_i64(consumed_runtime_seconds, "运行时间消耗")?,
+                    checked_sqlite_i64(consumed_tokens, "Token 消耗")?,
+                    consumed_cost,
+                    content_hash,
+                    now,
+                ],
+            )
+            .map_err(|error| format!("无法保存原生任务步骤回执：{error}"))?;
+        if state == "succeeded" {
+            append_runtime_step_receipt_evidence(
+                &transaction,
+                workspace_scope,
+                task_id,
+                run.0,
+                &run.1,
+                claim_id,
+                receipt_id,
+                &content_hash,
+                &trace_id,
+                &now,
+            )?;
+        }
+        let receipt = read_runtime_task_step_receipt(&transaction, workspace_scope, receipt_id)?
+            .ok_or_else(|| "原生任务步骤回执保存后无法读取".to_string())?;
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交原生任务步骤回执：{error}"))?;
+        Ok(receipt)
+    }
+
+    fn validate_runtime_capability_step_child_completion(
+        connection: &Connection,
+        workspace_scope: &str,
+        task_id: &str,
+        plan_revision: i64,
+        step_id: &str,
+        claim_id: &str,
+        parent_trace_id: &str,
+    ) -> Result<Option<TrustedExecutionReceipt>, String> {
+        let step_kind = connection
+            .query_row(
+                "SELECT step_kind FROM runtime_task_plan_steps
+             WHERE workspace_scope=?1 AND task_id=?2 AND plan_revision=?3 AND step_id=?4",
+                params![workspace_scope, task_id, plan_revision, step_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| format!("无法读取 capability 步骤类型：{error}"))?
+            .ok_or_else(|| "原生任务步骤不存在，无法验证绑定子任务".to_string())?;
+        if step_kind != RuntimeTaskStepKind::Capability.as_str() {
+            return Ok(None);
+        }
+        let child_task_id = connection
+            .query_row(
+                "SELECT binding.child_task_id
+                 FROM runtime_task_step_command_bindings binding
+                 WHERE binding.workspace_scope=?1 AND binding.claim_id=?2",
+                params![workspace_scope, claim_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| format!("无法读取 capability 步骤绑定子任务：{error}"))?
+            .ok_or_else(|| {
+                "capability 原生任务步骤成功前必须存在绑定的 Runtime 子任务".to_string()
+            })?;
+        let child = read_native_runtime_task(connection, workspace_scope, &child_task_id)?;
+        if child.state != "succeeded" {
+            return Err(format!(
+                "capability 原生任务步骤绑定的子任务 {} 尚未成功终态：{}",
+                child.id, child.state
+            ));
+        }
+        let expected =
+            read_runtime_child_execution_expectation(connection, workspace_scope, &child_task_id)?
+                .ok_or_else(|| "capability 子任务缺少可信执行绑定快照".to_string())?;
+        if expected.binding.runtime_task_id != task_id
+            || expected.binding.plan_revision != u64::try_from(plan_revision).unwrap_or_default()
+            || expected.binding.step_id != step_id
+            || expected.binding.step_claim_id != claim_id
+            || child.trace_id.as_deref() != Some(parent_trace_id)
+            || expected.trace_id != parent_trace_id
+        {
+            return Err("capability 原生任务步骤绑定子任务的 Trace 与父任务不一致".to_string());
+        }
+        let receipt_value = child
+            .payload
+            .get("trustedExecutionReceipt")
+            .cloned()
+            .ok_or_else(|| "capability Runtime 子任务缺少可信原生处理器回执".to_string())?;
+        let receipt = serde_json::from_value::<TrustedExecutionReceipt>(receipt_value)
+            .map_err(|error| format!("capability Runtime 子任务可信回执无法解析：{error}"))?;
+        validate_trusted_execution_receipt(workspace_scope, &child, &expected, &receipt)?;
+        validate_trusted_execution_usage_within_reservation(&expected, &receipt)?;
+        Ok(Some(receipt))
+    }
+
+    pub(crate) fn complete_runtime_task_plan_step(
+        &self,
+        workspace_scope: &str,
+        input: &RuntimeTaskStepCompletionInput,
+    ) -> Result<RuntimeTaskStepReceipt, String> {
+        crate::task_runtime::validate_runtime_task_step_completion(input)?;
+        self.finalize_runtime_task_step(
+            workspace_scope,
+            &input.task_id,
+            &input.step_claim_id,
+            &input.receipt_id,
+            "succeeded",
+            input.consumed_tool_calls,
+            input.consumed_runtime_seconds,
+            input.consumed_tokens,
+            input.consumed_cost,
+            &input.output,
+            None,
+        )
+    }
+
+    pub(crate) fn fail_runtime_task_plan_step(
+        &self,
+        workspace_scope: &str,
+        input: &RuntimeTaskStepFailureInput,
+    ) -> Result<RuntimeTaskStepReceipt, String> {
+        crate::task_runtime::validate_runtime_task_step_failure(input)?;
+        self.finalize_runtime_task_step(
+            workspace_scope,
+            &input.task_id,
+            &input.step_claim_id,
+            &input.receipt_id,
+            "failed",
+            input.consumed_tool_calls,
+            input.consumed_runtime_seconds,
+            input.consumed_tokens,
+            input.consumed_cost,
+            &input.output,
+            Some(input.error.trim()),
+        )
+    }
+
+    pub(crate) fn list_runtime_task_step_receipts(
+        &self,
+        workspace_scope: &str,
+        task_id: &str,
+        plan_revision: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<RuntimeTaskStepReceipt>, String> {
+        let limit = limit.clamp(1, 512);
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let revision = plan_revision.map(|value| checked_sqlite_i64(value, "计划版本"));
+        let revision = revision.transpose()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT receipt_id FROM runtime_task_step_receipts
+                 WHERE workspace_scope=?1 AND task_id=?2
+                   AND (?3 IS NULL OR plan_revision=?3)
+                 ORDER BY created_at ASC, receipt_id ASC LIMIT ?4",
+            )
+            .map_err(|error| format!("无法查询原生任务步骤回执：{error}"))?;
+        let ids = statement
+            .query_map(
+                params![workspace_scope, task_id, revision, limit as i64],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| format!("无法读取原生任务步骤回执列表：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法解析原生任务步骤回执列表：{error}"))?;
+        ids.into_iter()
+            .map(|receipt_id| {
+                read_runtime_task_step_receipt(&connection, workspace_scope, &receipt_id)?
+                    .ok_or_else(|| "原生任务步骤回执列表包含缺失记录".to_string())
+            })
+            .collect()
+    }
+
+    pub(crate) fn append_runtime_task_evidence(
+        &self,
+        workspace_scope: &str,
+        input: &RuntimeTaskEvidenceInput,
+    ) -> Result<RuntimeTaskEvidence, String> {
+        crate::task_runtime::validate_runtime_task_evidence_shape(input)?;
+        let task_id = input.task_id.trim();
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("无法开始原生任务证据事务：{error}"))?;
+        let task = read_native_runtime_task(&transaction, workspace_scope, task_id)?;
+        let latest_revision = transaction
+            .query_row(
+                "SELECT revision FROM runtime_task_plans
+                 WHERE workspace_scope=?1 AND task_id=?2 ORDER BY revision DESC LIMIT 1",
+                params![workspace_scope, task_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| format!("无法读取原生任务完成契约版本：{error}"))?
+            .ok_or_else(|| "原生任务尚未定义完成契约".to_string())?;
+        let revision = input
+            .plan_revision
+            .map(|value| i64::try_from(value).map_err(|_| "原生任务计划版本无效".to_string()))
+            .transpose()?
+            .unwrap_or(latest_revision);
+        if revision != latest_revision {
+            return Err("证据必须写入当前生效的原生任务计划版本".to_string());
+        }
+        let requirement = transaction
+            .query_row(
+                "SELECT step_id, evidence_type FROM runtime_task_completion_requirements
+                 WHERE workspace_scope=?1 AND task_id=?2 AND plan_revision=?3 AND requirement_id=?4",
+                params![workspace_scope, task_id, revision, input.requirement_id.trim()],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("无法读取原生任务完成要求：{error}"))?
+            .ok_or_else(|| "原生任务完成要求不存在".to_string())?;
+        if requirement.1 != input.evidence_type.trim() {
+            return Err("证据类型与完成要求不匹配".to_string());
+        }
+        let payload_json = canonical_runtime_json_string(&input.payload, "原生任务证据")?;
+        let envelope = serde_json::json!({
+            "planRevision": revision,
+            "requirementId": input.requirement_id.trim(),
+            "evidenceType": input.evidence_type.trim(),
+            "sourceKind": input.source_kind.as_str(),
+            "sourceRef": input.source_ref.trim(),
+            "payload": canonical_runtime_json(&input.payload),
+        });
+        let envelope_json = canonical_runtime_json_string(&envelope, "原生任务证据封套")?;
+        if envelope_json.len() > MAX_RUNTIME_EVIDENCE_BYTES {
+            return Err("原生任务证据超过 256 KB 安全上限".to_string());
+        }
+        let content_hash = format!("sha256:{:x}", Sha256::digest(envelope_json.as_bytes()));
+        let existing = transaction
+            .query_row(
+                "SELECT plan_revision, requirement_id, step_id, evidence_type, source_kind,
+                        source_ref, payload_json, content_hash, created_at
+                 FROM runtime_task_evidence
+                 WHERE workspace_scope=?1 AND task_id=?2 AND evidence_id=?3",
+                params![workspace_scope, task_id, input.evidence_id.trim()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("无法读取原生任务已有证据：{error}"))?;
+        if let Some(existing) = existing {
+            if existing.7 != content_hash {
+                return Err("证据 id 已经绑定到不同内容，拒绝覆盖不可变证据".to_string());
+            }
+            transaction
+                .commit()
+                .map_err(|error| format!("无法提交原生任务证据幂等查询：{error}"))?;
+            return runtime_task_evidence_from_parts(
+                task_id,
+                input.evidence_id.trim(),
+                existing.0,
+                &existing.1,
+                existing.2,
+                &existing.3,
+                &existing.4,
+                &existing.5,
+                &existing.6,
+                &existing.7,
+                &existing.8,
+            );
+        }
+        crate::task_runtime::validate_runtime_task_evidence(input)?;
+        if matches!(task.state.as_str(), "succeeded" | "failed" | "cancelled") {
+            return Err("终态原生任务不能追加新证据".to_string());
+        }
+        let evidence_count: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM runtime_task_evidence
+                 WHERE workspace_scope=?1 AND task_id=?2",
+                params![workspace_scope, task_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("无法统计原生任务证据：{error}"))?;
+        if evidence_count >= MAX_RUNTIME_TASK_EVIDENCE as i64 {
+            return Err("单个原生任务证据超过 2048 条安全上限".to_string());
+        }
+        let now = Utc::now().to_rfc3339();
+        transaction
+            .execute(
+                "INSERT INTO runtime_task_evidence
+                 (workspace_scope, task_id, evidence_id, plan_revision, requirement_id, step_id,
+                  evidence_type, source_kind, source_ref, payload_json, content_hash, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    workspace_scope,
+                    task_id,
+                    input.evidence_id.trim(),
+                    revision,
+                    input.requirement_id.trim(),
+                    requirement.0,
+                    input.evidence_type.trim(),
+                    input.source_kind.as_str(),
+                    input.source_ref.trim(),
+                    payload_json,
+                    content_hash,
+                    now,
+                ],
+            )
+            .map_err(|error| format!("无法保存原生任务证据：{error}"))?;
+        let trace_id = task
+            .trace_id
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(crate::trace::new_trace_id);
+        if task.trace_id.as_deref() != Some(trace_id.as_str()) {
+            transaction
+                .execute(
+                    "UPDATE runtime_tasks SET trace_id=?3
+                     WHERE workspace_scope=?1 AND id=?2",
+                    params![workspace_scope, task_id, trace_id],
+                )
+                .map_err(|error| format!("无法绑定原生任务证据 Trace：{error}"))?;
+        }
+        crate::trace::record_trace_event_in_connection(
+            &transaction,
+            workspace_scope,
+            &crate::trace::TraceEventRecord {
+                trace_id: &trace_id,
+                entity_kind: "runtime_task",
+                entity_id: task_id,
+                event_type: "task.evidence_appended",
+                state: "recorded",
+                payload: &serde_json::json!({
+                    "evidenceId": input.evidence_id.trim(),
+                    "planRevision": revision,
+                    "requirementId": input.requirement_id.trim(),
+                    "evidenceType": input.evidence_type.trim(),
+                    "sourceKind": input.source_kind.as_str(),
+                    "contentHash": content_hash,
+                }),
+                created_at: &now,
+            },
+        )?;
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交原生任务证据事务：{error}"))?;
+        Ok(RuntimeTaskEvidence {
+            task_id: task_id.to_string(),
+            evidence_id: input.evidence_id.trim().to_string(),
+            plan_revision: revision as u64,
+            requirement_id: input.requirement_id.trim().to_string(),
+            step_id: requirement.0,
+            evidence_type: input.evidence_type.trim().to_string(),
+            source_kind: input.source_kind.clone(),
+            source_ref: input.source_ref.trim().to_string(),
+            payload: input.payload.clone(),
+            content_hash,
+            created_at: now,
+        })
+    }
+
+    pub(crate) fn acknowledge_runtime_schedule_dispatch(
+        &self,
+        workspace_scope: &str,
+        input: &RuntimeScheduleDispatchAckInput,
+    ) -> Result<NativeRuntimeTask, String> {
+        crate::task_runtime::validate_runtime_schedule_dispatch_ack(input)?;
+        let occurrence_id = input.occurrence_id.trim();
+        let runtime_task_id = input.runtime_task_id.trim();
+        let binding = self.runtime_schedule_dispatch_binding(
+            workspace_scope,
+            occurrence_id,
+            runtime_task_id,
+        )?;
+        if binding.schedule_revision != input.schedule_revision
+            || binding.schedule_payload_hash
+                != canonical_schedule_payload_hash(&input.schedule_payload_hash)
+        {
+            return Err("日程 occurrence 的 revision 或快照哈希不匹配".to_string());
+        }
+        let (schedule_id, schedule_kind, scheduled_for, dispatch_task_ids) = {
+            let connection = self
+                .connection
+                .lock()
+                .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+            let occurrence = connection
+                .query_row(
+                    "SELECT schedule_id, schedule_kind, scheduled_for, schedule_revision,
+                            runtime_task_id
+                     FROM runtime_schedule_occurrences
+                     WHERE workspace_scope=?1 AND occurrence_id=?2",
+                    params![workspace_scope, occurrence_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|error| format!("无法读取日程派发 occurrence：{error}"))?
+                .ok_or_else(|| "未找到日程派发 occurrence".to_string())?;
+            if occurrence.4 != runtime_task_id
+                || u64::try_from(occurrence.3).unwrap_or_default() != input.schedule_revision
+            {
+                return Err("日程 occurrence 与 wrapper 任务不匹配".to_string());
+            }
+            let schedule_revision = input.schedule_revision.to_string();
+            let matches_binding = |payload_json: &str| -> Result<bool, String> {
+                let payload = serde_json::from_str::<Value>(payload_json)
+                    .map_err(|error| format!("日程派发子任务快照损坏：{error}"))?;
+                let parameters = payload
+                    .get("parameters")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| "日程派发子任务缺少命令参数".to_string())?;
+                Ok([
+                    ("schedule_occurrence_id", occurrence_id),
+                    ("schedule_wrapper_task_id", runtime_task_id),
+                    ("schedule_id", occurrence.0.as_str()),
+                    ("schedule_kind", occurrence.1.as_str()),
+                    ("schedule_scheduled_for", occurrence.2.as_str()),
+                    ("schedule_revision", schedule_revision.as_str()),
+                    ("schedule_payload_hash", input.schedule_payload_hash.trim()),
+                ]
+                .into_iter()
+                .all(|(key, expected)| {
+                    parameters.get(key).and_then(Value::as_str) == Some(expected)
+                }))
+            };
+            let mut dispatch_task_ids = Vec::new();
+            if input.dispatch_task_ids.is_empty() {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT DISTINCT task.id, task.payload
+                         FROM runtime_tasks task
+                         JOIN application_commands command
+                           ON command.workspace_scope=task.workspace_scope
+                          AND command.task_id=task.id
+                         WHERE task.workspace_scope=?1 AND task.state='succeeded'
+                           AND command.state='accepted'
+                           AND json_valid(task.payload)=1
+                           AND json_extract(task.payload, '$.parameters.schedule_occurrence_id')=?2
+                           AND json_extract(task.payload, '$.parameters.schedule_wrapper_task_id')=?3
+                           AND json_extract(task.payload, '$.parameters.schedule_id')=?4
+                           AND json_extract(task.payload, '$.parameters.schedule_kind')=?5
+                           AND json_extract(task.payload, '$.parameters.schedule_scheduled_for')=?6
+                           AND json_extract(task.payload, '$.parameters.schedule_revision')=?7
+                           AND json_extract(task.payload, '$.parameters.schedule_payload_hash')=?8
+                         ORDER BY task.updated_at DESC LIMIT 129",
+                    )
+                    .map_err(|error| format!("无法准备日程派发恢复查询：{error}"))?;
+                let candidates = statement
+                    .query_map(
+                        params![
+                            workspace_scope,
+                            occurrence_id,
+                            runtime_task_id,
+                            occurrence.0,
+                            occurrence.1,
+                            occurrence.2,
+                            schedule_revision,
+                            input.schedule_payload_hash.trim(),
+                        ],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .map_err(|error| format!("无法查询日程派发恢复子任务：{error}"))?;
+                for candidate in candidates {
+                    let (task_id, payload_json) = candidate
+                        .map_err(|error| format!("无法读取日程派发恢复子任务：{error}"))?;
+                    if matches_binding(&payload_json)? {
+                        dispatch_task_ids.push(task_id);
+                    }
+                }
+                if dispatch_task_ids.len() > 128 {
+                    return Err("日程派发恢复子任务超过安全上限".to_string());
+                }
+            } else {
+                for dispatch_task_id in &input.dispatch_task_ids {
+                    let task_record = connection
+                        .query_row(
+                            "SELECT task.state, task.payload
+                         FROM runtime_tasks task
+                         JOIN application_commands command
+                           ON command.workspace_scope=task.workspace_scope
+                          AND command.task_id=task.id
+                         WHERE task.workspace_scope=?1 AND task.id=?2
+                           AND command.state='accepted'",
+                            params![workspace_scope, dispatch_task_id.trim()],
+                            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                        )
+                        .optional()
+                        .map_err(|error| format!("无法验证日程派发子任务：{error}"))?
+                        .ok_or_else(|| "日程派发子任务没有已接受的策略命令".to_string())?;
+                    if task_record.0 != "succeeded" {
+                        return Err(format!(
+                            "日程派发子任务尚未成功完成（当前状态：{}）",
+                            task_record.0
+                        ));
+                    }
+                    if !matches_binding(&task_record.1)? {
+                        return Err("日程派发子任务未绑定到当前 occurrence".to_string());
+                    }
+                    dispatch_task_ids.push(dispatch_task_id.trim().to_string());
+                }
+            }
+            if dispatch_task_ids.is_empty() {
+                return Err("日程派发没有可验证的成功子任务".to_string());
+            }
+            (occurrence.0, occurrence.1, occurrence.2, dispatch_task_ids)
+        };
+        self.append_runtime_task_evidence(
+            workspace_scope,
+            &RuntimeTaskEvidenceInput {
+                task_id: runtime_task_id.to_string(),
+                evidence_id: format!("schedule-dispatch-{occurrence_id}"),
+                plan_revision: None,
+                requirement_id: "dispatch-ack".to_string(),
+                evidence_type: "schedule.dispatch_ack".to_string(),
+                source_kind: RuntimeTaskEvidenceSourceKind::Scheduler,
+                source_ref: occurrence_id.to_string(),
+                payload: serde_json::json!({
+                    "scheduleId": schedule_id,
+                    "scheduleKind": schedule_kind,
+                    "occurrenceId": occurrence_id,
+                    "scheduledFor": scheduled_for,
+                    "scheduleRevision": input.schedule_revision,
+                    "schedulePayloadHash": input.schedule_payload_hash,
+                    "runtimeTaskId": runtime_task_id,
+                    "dispatchTaskIds": dispatch_task_ids,
+                    "disposition": "dispatched",
+                }),
+            },
+        )?;
+        let mut task = self.runtime_task(workspace_scope, runtime_task_id)?;
+        if task.state == "succeeded" {
+            return Ok(task);
+        }
+        if matches!(
+            task.state.as_str(),
+            "failed" | "cancelled" | "awaiting_approval"
+        ) {
+            return Err(format!(
+                "日程 wrapper 任务状态 {} 不能确认派发完成",
+                task.state
+            ));
+        }
+        if task.state == "paused" {
+            task = self.transition_native_runtime_task(
+                workspace_scope,
+                runtime_task_id,
+                "queued",
+                task.progress,
+                "恢复日程派发确认",
+                None,
+            )?;
+        }
+        if task.state == "created" {
+            task = self.transition_native_runtime_task(
+                workspace_scope,
+                runtime_task_id,
+                "queued",
+                task.progress,
+                "排队日程派发确认",
+                None,
+            )?;
+        }
+        if task.state == "queued" {
+            task = self.transition_native_runtime_task(
+                workspace_scope,
+                runtime_task_id,
+                "running",
+                task.progress.max(10),
+                "原生已验证日程派发子任务",
+                None,
+            )?;
+        }
+        if task.state != "running" {
+            return Err(format!("日程 wrapper 任务状态 {} 无法完成", task.state));
+        }
+        self.transition_native_runtime_task(
+            workspace_scope,
+            runtime_task_id,
+            "succeeded",
+            100,
+            "到期日程已进入受策略约束的执行路径",
+            Some(&serde_json::json!({
+                "id": format!("schedule-complete-{occurrence_id}"),
+                "occurrenceId": occurrence_id,
+                "scheduledFor": scheduled_for,
+                "scheduleRevision": input.schedule_revision,
+                "schedulePayloadHash": input.schedule_payload_hash,
+                "dispatchTaskIds": dispatch_task_ids,
+            })),
+        )
+    }
+
     pub(crate) fn resolve_operation_trace_id(
         &self,
         workspace_scope: &str,
@@ -2630,6 +5958,50 @@ impl RuntimeDatabase {
         detail: &str,
         checkpoint: Option<&Value>,
     ) -> Result<NativeRuntimeTask, String> {
+        self.transition_native_runtime_task_internal(
+            workspace_scope,
+            task_id,
+            target_state,
+            progress,
+            detail,
+            checkpoint,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn transition_native_runtime_task_with_trusted_execution_receipt(
+        &self,
+        workspace_scope: &str,
+        task_id: &str,
+        target_state: &str,
+        progress: u8,
+        detail: &str,
+        checkpoint: Option<&Value>,
+        trusted_execution_receipt: &TrustedExecutionReceipt,
+    ) -> Result<NativeRuntimeTask, String> {
+        self.transition_native_runtime_task_internal(
+            workspace_scope,
+            task_id,
+            target_state,
+            progress,
+            detail,
+            checkpoint,
+            Some(trusted_execution_receipt),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn transition_native_runtime_task_internal(
+        &self,
+        workspace_scope: &str,
+        task_id: &str,
+        target_state: &str,
+        progress: u8,
+        detail: &str,
+        checkpoint: Option<&Value>,
+        trusted_execution_receipt: Option<&TrustedExecutionReceipt>,
+    ) -> Result<NativeRuntimeTask, String> {
         if !valid_runtime_task_state(target_state) {
             return Err("目标任务状态无效".to_string());
         }
@@ -2647,7 +6019,104 @@ impl RuntimeDatabase {
                 current.state
             ));
         }
+        let child_execution =
+            read_runtime_child_execution_expectation(&transaction, workspace_scope, task_id)?;
+        if target_state == "succeeded" {
+            match (child_execution.as_ref(), trusted_execution_receipt) {
+                (Some(expected), Some(receipt)) => {
+                    validate_live_runtime_child_execution_expectation(
+                        expected,
+                        &Utc::now().to_rfc3339(),
+                    )?;
+                    validate_trusted_execution_receipt(
+                        workspace_scope,
+                        &current,
+                        expected,
+                        receipt,
+                    )?;
+                    validate_trusted_execution_usage_within_reservation(expected, receipt)?;
+                }
+                (Some(_), None) => {
+                    return Err("绑定原生任务步骤的 Runtime 子任务缺少可信处理器回执".to_string());
+                }
+                (None, Some(_)) => {
+                    return Err("非步骤绑定任务不能附加可信处理器回执".to_string());
+                }
+                (None, None) => {}
+            }
+        } else if trusted_execution_receipt.is_some() {
+            return Err("可信处理器回执只能用于 Runtime 子任务成功结算".to_string());
+        }
+        let completion = if target_state == "succeeded" {
+            let completion =
+                evaluate_runtime_task_completion(&transaction, workspace_scope, task_id)?;
+            let latest_plan_revision = transaction
+                .query_row(
+                    "SELECT revision FROM runtime_task_plans
+                     WHERE workspace_scope=?1 AND task_id=?2 ORDER BY revision DESC LIMIT 1",
+                    params![workspace_scope, task_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(|error| format!("无法读取成功任务的计划版本：{error}"))?;
+            if let Some(plan_revision) = latest_plan_revision {
+                let step_run_count: i64 = transaction
+                    .query_row(
+                        "SELECT COUNT(*) FROM runtime_task_step_runs
+                         WHERE workspace_scope=?1 AND task_id=?2 AND plan_revision=?3",
+                        params![workspace_scope, task_id, plan_revision],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| format!("无法检查原生任务步骤执行记录：{error}"))?;
+                let missing_steps: i64 = if step_run_count > 0 {
+                    transaction
+                        .query_row(
+                            "SELECT COUNT(*)
+                         FROM runtime_task_plan_steps step
+                         WHERE step.workspace_scope=?1 AND step.task_id=?2
+                           AND step.plan_revision=?3
+                           AND NOT EXISTS(
+                             SELECT 1 FROM runtime_task_step_receipts receipt
+                             WHERE receipt.workspace_scope=step.workspace_scope
+                               AND receipt.task_id=step.task_id
+                               AND receipt.plan_revision=step.plan_revision
+                               AND receipt.step_id=step.step_id
+                               AND receipt.state='succeeded'
+                           )",
+                            params![workspace_scope, task_id, plan_revision],
+                            |row| row.get(0),
+                        )
+                        .map_err(|error| format!("无法验证原生任务步骤完成状态：{error}"))?
+                } else {
+                    0
+                };
+                if missing_steps > 0 {
+                    return Err(format!(
+                        "原生任务计划仍有 {missing_steps} 个步骤未形成成功回执"
+                    ));
+                }
+            }
+            if let Some(status) = completion.as_ref().filter(|status| !status.satisfied) {
+                let missing = status
+                    .requirements
+                    .iter()
+                    .filter(|requirement| !requirement.satisfied)
+                    .map(|requirement| requirement.id.as_str())
+                    .take(16)
+                    .collect::<Vec<_>>()
+                    .join("、");
+                return Err(format!(
+                    "原生任务完成契约尚未满足，缺少不可变证据：{missing}"
+                ));
+            }
+            completion
+        } else {
+            None
+        };
         let now = Utc::now().to_rfc3339();
+        if target_state == "cancelled" {
+            cancel_runtime_task_step_claims(&transaction, workspace_scope, task_id, &now)?;
+        }
         let current_state = current.state.clone();
         let title = current.title.clone();
         let trace_id = current
@@ -2665,6 +6134,20 @@ impl RuntimeDatabase {
         object.insert("progress".to_string(), Value::from(progress));
         object.insert("updatedAt".to_string(), Value::String(now.clone()));
         object.insert("traceId".to_string(), Value::String(trace_id.clone()));
+        if let Some(receipt) = trusted_execution_receipt {
+            object.insert(
+                "trustedExecutionReceipt".to_string(),
+                serde_json::to_value(receipt)
+                    .map_err(|error| format!("无法序列化可信原生执行回执：{error}"))?,
+            );
+        }
+        if let Some(completion) = completion.as_ref() {
+            object.insert(
+                "completionContract".to_string(),
+                serde_json::to_value(completion)
+                    .map_err(|error| format!("无法序列化任务完成契约状态：{error}"))?,
+            );
+        }
         if !detail.trim().is_empty() {
             object.insert(
                 "result".to_string(),
@@ -2813,6 +6296,7 @@ impl RuntimeDatabase {
                     "fromState": current_state,
                     "progress": progress,
                     "detail": detail,
+                    "completionContract": completion,
                 }),
                 created_at: &now,
             },
@@ -2852,9 +6336,145 @@ impl RuntimeDatabase {
             .optional()
             .map_err(|error| format!("无法读取 Vault 写入策略：{error}"))?
             .and_then(|value| serde_json::from_str::<Value>(&value).ok())
-            .and_then(|snapshot| snapshot.get("clientState").cloned())
+            .and_then(|snapshot| {
+                snapshot
+                    .get("clientState")
+                    .or_else(|| snapshot.get("client_state"))
+                    .cloned()
+            })
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
         evaluate_vault_write_policy(&client_state, vault_id, relative_path)
+    }
+
+    pub fn ensure_vault_read_allowed(
+        &self,
+        workspace_scope: &str,
+        vault_id: &str,
+    ) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let client_state = connection
+            .query_row(
+                "SELECT payload FROM workspace_snapshots WHERE workspace_scope=?1",
+                [workspace_scope],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| format!("无法读取 Vault 读取策略：{error}"))?
+            .and_then(|value| serde_json::from_str::<Value>(&value).ok())
+            .and_then(|snapshot| {
+                snapshot
+                    .get("clientState")
+                    .or_else(|| snapshot.get("client_state"))
+                    .cloned()
+            })
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        evaluate_vault_read_policy(&client_state, vault_id)
+    }
+
+    pub(crate) fn purge_unreadable_vault_indexes(
+        &self,
+        workspace_scope: &str,
+        vaults: &[VaultDescriptor],
+    ) -> Result<Vec<String>, String> {
+        let unreadable_vault_ids = vaults
+            .iter()
+            .filter(|vault| vault.connection_state == "connected")
+            .filter_map(|vault| {
+                self.ensure_vault_read_allowed(workspace_scope, &vault.id)
+                    .is_err()
+                    .then_some(vault.id.clone())
+            })
+            .collect::<Vec<_>>();
+        if unreadable_vault_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("无法开始 Vault 读取策略清理事务：{error}"))?;
+        for vault_id in &unreadable_vault_ids {
+            transaction
+                .execute("DELETE FROM note_fts WHERE vault_id=?1", [vault_id])
+                .map_err(|error| format!("无法清理禁用 Vault 的全文索引：{error}"))?;
+            transaction
+                .execute("DELETE FROM note_lexical_fts WHERE vault_id=?1", [vault_id])
+                .map_err(|error| format!("无法清理禁用 Vault 的中文词法索引：{error}"))?;
+            transaction
+                .execute(
+                    "DELETE FROM note_feature_vectors WHERE vault_id=?1",
+                    [vault_id],
+                )
+                .map_err(|error| format!("无法清理禁用 Vault 的本地特征向量：{error}"))?;
+            transaction
+                .execute(
+                    "DELETE FROM note_neural_embeddings WHERE workspace_scope=?1 AND vault_id=?2",
+                    params![workspace_scope, vault_id],
+                )
+                .map_err(|error| format!("无法清理禁用 Vault 的神经 Embedding 引用：{error}"))?;
+            transaction
+                .execute(
+                    "DELETE FROM neural_embedding_index_state WHERE workspace_scope=?1 AND vault_id=?2",
+                    params![workspace_scope, vault_id],
+                )
+                .map_err(|error| format!("无法清理禁用 Vault 的神经 Embedding 状态：{error}"))?;
+            transaction
+                .execute("DELETE FROM note_index WHERE vault_id=?1", [vault_id])
+                .map_err(|error| format!("无法清理禁用 Vault 的笔记索引：{error}"))?;
+            transaction
+                .execute(
+                    "DELETE FROM vault_index_changes WHERE vault_id=?1",
+                    [vault_id],
+                )
+                .map_err(|error| format!("无法清理禁用 Vault 的索引队列：{error}"))?;
+        }
+        transaction
+            .execute(
+                "DELETE FROM neural_embedding_cache
+                 WHERE workspace_scope=?1 AND NOT EXISTS (
+                   SELECT 1 FROM note_neural_embeddings e
+                   WHERE e.workspace_scope=neural_embedding_cache.workspace_scope
+                     AND e.provider_id=neural_embedding_cache.provider_id
+                     AND e.model=neural_embedding_cache.model
+                     AND e.input_hash=neural_embedding_cache.input_hash
+                 )",
+                [workspace_scope],
+            )
+            .map_err(|error| format!("无法清理禁用 Vault 的孤立 Embedding 缓存：{error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交 Vault 读取策略清理事务：{error}"))?;
+        Ok(unreadable_vault_ids)
+    }
+
+    fn readable_indexed_vault_ids(&self, workspace_scope: &str) -> Result<Vec<String>, String> {
+        let vault_ids = {
+            let connection = self
+                .connection
+                .lock()
+                .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+            let mut statement = connection
+                .prepare("SELECT DISTINCT vault_id FROM note_index ORDER BY vault_id")
+                .map_err(|error| format!("无法准备索引 Vault 查询：{error}"))?;
+            let collected = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| format!("无法读取索引 Vault：{error}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("无法解析索引 Vault：{error}"))?;
+            collected
+        };
+        Ok(vault_ids
+            .into_iter()
+            .filter(|vault_id| {
+                self.ensure_vault_read_allowed(workspace_scope, vault_id)
+                    .is_ok()
+            })
+            .collect())
     }
 
     pub fn list_native_operation_events(
@@ -2890,6 +6510,8 @@ impl RuntimeDatabase {
     where
         F: Fn() -> bool,
     {
+        let workspace_scope = self.local_workspace_scope()?;
+        self.ensure_vault_read_allowed(&workspace_scope, vault_id)?;
         let (_, root) = resolve_vault_for_runtime(vault_id)?;
         let mut markdown = Vec::new();
         let mut attachments = 0;
@@ -2973,6 +6595,8 @@ impl RuntimeDatabase {
         path: &Path,
         inherited_trace_id: Option<&str>,
     ) -> Result<(), String> {
+        let workspace_scope = self.local_workspace_scope()?;
+        self.ensure_vault_read_allowed(&workspace_scope, vault_id)?;
         let relative_path = normalized_index_relative_path(root, path)?;
         validate_index_relative_path(&relative_path)?;
         let canonical_root = canonical_index_root(root)?;
@@ -3248,6 +6872,52 @@ impl RuntimeDatabase {
         }))
     }
 
+    pub(crate) fn discard_claimed_vault_index_change(
+        &self,
+        change: &ClaimedVaultIndexChange,
+        reason: &str,
+    ) -> Result<bool, String> {
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("无法开始 Vault 索引取消事务：{error}"))?;
+        let deleted = transaction
+            .execute(
+                "DELETE FROM vault_index_changes
+                 WHERE id=?1 AND generation=?2 AND state='processing'",
+                params![change.id, change.generation],
+            )
+            .map_err(|error| format!("无法取消 Vault 索引任务：{error}"))?
+            == 1;
+        if deleted {
+            crate::trace::record_trace_event_in_connection(
+                &transaction,
+                DEFAULT_LOCAL_WORKSPACE_SCOPE,
+                &crate::trace::TraceEventRecord {
+                    trace_id: &change.trace_id,
+                    entity_kind: "index_change",
+                    entity_id: &format!("{}:{}", change.id, change.generation),
+                    event_type: "index.cancelled",
+                    state: "cancelled",
+                    payload: &serde_json::json!({
+                        "vaultId": change.vault_id,
+                        "relativePath": change.relative_path,
+                        "reason": reason,
+                    }),
+                    created_at: &now,
+                },
+            )?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交 Vault 索引取消事务：{error}"))?;
+        Ok(deleted)
+    }
+
     pub(crate) fn fail_claimed_vault_index_change(
         &self,
         change: &ClaimedVaultIndexChange,
@@ -3333,6 +7003,8 @@ impl RuntimeDatabase {
         if vault.connection_state != "connected" {
             return Err("只能校准已连接的 Vault".to_string());
         }
+        let workspace_scope = self.local_workspace_scope()?;
+        self.ensure_vault_read_allowed(&workspace_scope, &vault.id)?;
         let canonical_root = canonical_index_root(Path::new(&vault.path))?;
         let root_text = strict_path_text(&canonical_root, "Vault 根目录")?;
         let mut markdown = Vec::new();
@@ -3453,7 +7125,13 @@ impl RuntimeDatabase {
             schema_version,
             task_count: workspace_count("tasks"),
             approval_count: workspace_count("approvals"),
-            message_count: workspace_count("messages"),
+            message_count: connection
+                .query_row(
+                    "SELECT COUNT(*) FROM workspace_messages WHERE workspace_scope=?1",
+                    [workspace_scope],
+                    |row| row.get(0),
+                )
+                .map_err(|error| format!("无法统计独立消息记录：{error}"))?,
             operation_event_count: table_count(&connection, "operation_events")?,
             indexed_note_count: table_count(&connection, "note_index")?,
         })
@@ -3747,6 +7425,7 @@ impl RuntimeDatabase {
         &self,
         workspace_scope: &str,
         input: OptimizationCandidateInput,
+        mutation_key: Option<&RuntimeEffectMutationKey>,
     ) -> Result<OptimizationCandidateResult, String> {
         validate_optimization_candidate_input(&input)?;
         let mut connection = self
@@ -3756,6 +7435,87 @@ impl RuntimeDatabase {
         let transaction = connection
             .transaction()
             .map_err(|error| format!("无法开始后台优化候选事务：{error}"))?;
+        if let Some(key) = mutation_key {
+            if let Some(result) =
+                read_runtime_effect_mutation_result(&transaction, workspace_scope, key)?
+            {
+                transaction
+                    .commit()
+                    .map_err(|error| format!("无法完成后台优化候选幂等重放：{error}"))?;
+                return Ok(result);
+            }
+        }
+        let existing = transaction
+            .query_row(
+                "SELECT base_version, candidate_version, summary, rules_json,
+                        skill_hints_json, metrics_json, evidence_count,
+                        evidence_occurred_at, evidence_event_id, created_at, expires_at
+                 FROM optimization_candidates
+                 WHERE workspace_scope=?1 AND id=?2",
+                params![workspace_scope, input.id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, Option<String>>(10)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("无法检查后台优化候选重放：{error}"))?;
+        if let Some(existing) = existing {
+            let rules = serde_json::from_str::<Vec<String>>(&existing.3)
+                .map_err(|error| format!("优化候选规则载荷损坏：{error}"))?;
+            let skill_hints = serde_json::from_str::<Value>(&existing.4)
+                .map_err(|error| format!("优化候选 Skill 提示载荷损坏：{error}"))?;
+            let metrics = serde_json::from_str::<Value>(&existing.5)
+                .map_err(|error| format!("优化候选指标载荷损坏：{error}"))?;
+            if existing.2 != input.summary.trim()
+                || rules != input.rules
+                || skill_hints != input.skill_hints
+                || metrics != input.metrics
+                || existing.6 != input.evidence_count as i64
+                || existing.7 != input.evidence_cursor_occurred_at
+                || existing.8 != input.evidence_cursor_event_id
+                || existing.10 != input.expires_at
+            {
+                return Err("后台优化候选 ID 已绑定到不同请求".to_string());
+            }
+            let result = OptimizationCandidateResult {
+                id: input.id,
+                base_version: existing.0,
+                candidate_version: existing.1,
+                state: "pending_evaluation".to_string(),
+                summary: existing.2,
+                rules,
+                skill_hints,
+                metrics,
+                evidence_count: usize::try_from(existing.6).unwrap_or_default(),
+                created_at: existing.9,
+                evaluated_at: None,
+                expires_at: existing.10,
+            };
+            if let Some(key) = mutation_key {
+                persist_runtime_effect_mutation_result(
+                    &transaction,
+                    workspace_scope,
+                    key,
+                    &result,
+                )?;
+            }
+            transaction
+                .commit()
+                .map_err(|error| format!("无法完成后台优化候选重放：{error}"))?;
+            return Ok(result);
+        }
         let (cursor_revision, cursor_occurred_at, cursor_event_id) = transaction
             .query_row(
                 "SELECT revision, last_occurred_at, last_event_id
@@ -3834,10 +7594,7 @@ impl RuntimeDatabase {
         if advanced != 1 {
             return Err("后台优化游标推进失败，候选没有提交".to_string());
         }
-        transaction
-            .commit()
-            .map_err(|error| format!("无法提交后台优化候选：{error}"))?;
-        Ok(OptimizationCandidateResult {
+        let result = OptimizationCandidateResult {
             id: input.id,
             base_version,
             candidate_version: base_version + 1,
@@ -3849,13 +7606,22 @@ impl RuntimeDatabase {
             evidence_count: input.evidence_count,
             created_at: now,
             evaluated_at: None,
-        })
+            expires_at: input.expires_at,
+        };
+        if let Some(key) = mutation_key {
+            persist_runtime_effect_mutation_result(&transaction, workspace_scope, key, &result)?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交后台优化候选：{error}"))?;
+        Ok(result)
     }
 
     fn evaluate_optimization_candidate(
         &self,
         workspace_scope: &str,
         candidate_id: &str,
+        mutation_key: Option<&RuntimeEffectMutationKey>,
     ) -> Result<OptimizationEvaluationResult, String> {
         if !valid_runtime_identifier(candidate_id, 160) {
             return Err("优化候选 ID 无效".to_string());
@@ -3867,6 +7633,16 @@ impl RuntimeDatabase {
         let transaction = connection
             .transaction()
             .map_err(|error| format!("无法开始优化候选评估事务：{error}"))?;
+        if let Some(key) = mutation_key {
+            if let Some(result) =
+                read_runtime_effect_mutation_result(&transaction, workspace_scope, key)?
+            {
+                transaction
+                    .commit()
+                    .map_err(|error| format!("无法完成优化候选评估幂等重放：{error}"))?;
+                return Ok(result);
+            }
+        }
         let row = transaction
             .query_row(
                 "SELECT base_version, state, summary, rules_json, skill_hints_json,
@@ -3889,7 +7665,44 @@ impl RuntimeDatabase {
             .map_err(|error| format!("无法读取优化候选：{error}"))?
             .ok_or_else(|| "优化候选不存在".to_string())?;
         if row.1 != "pending_evaluation" {
-            return Err(format!("优化候选当前状态为 {}，不能重复评估", row.1));
+            let result = transaction
+                .query_row(
+                    "SELECT state, checks_json, evaluated_at
+                     FROM optimization_evaluations
+                     WHERE workspace_scope=?1 AND candidate_id=?2
+                     ORDER BY evaluated_at DESC, id DESC LIMIT 1",
+                    params![workspace_scope, candidate_id],
+                    |evaluation| {
+                        Ok((
+                            evaluation.get::<_, String>(0)?,
+                            evaluation.get::<_, String>(1)?,
+                            evaluation.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|error| format!("无法读取优化候选评估重放：{error}"))?
+                .ok_or_else(|| format!("优化候选当前状态为 {}，但缺少评估结果", row.1))?;
+            let result = OptimizationEvaluationResult {
+                candidate_id: candidate_id.to_string(),
+                passed: result.0 == "pending_review",
+                state: result.0,
+                checks: serde_json::from_str(&result.1)
+                    .map_err(|error| format!("优化候选评估载荷损坏：{error}"))?,
+                evaluated_at: result.2,
+            };
+            if let Some(key) = mutation_key {
+                persist_runtime_effect_mutation_result(
+                    &transaction,
+                    workspace_scope,
+                    key,
+                    &result,
+                )?;
+            }
+            transaction
+                .commit()
+                .map_err(|error| format!("无法完成优化候选评估重放：{error}"))?;
+            return Ok(result);
         }
         let current_version = transaction
             .query_row(
@@ -3959,16 +7772,80 @@ impl RuntimeDatabase {
                 ],
             )
             .map_err(|error| format!("无法保存优化候选评估：{error}"))?;
-        transaction
-            .commit()
-            .map_err(|error| format!("无法提交优化候选评估：{error}"))?;
-        Ok(OptimizationEvaluationResult {
+        let result = OptimizationEvaluationResult {
             candidate_id: candidate_id.to_string(),
             state: state.to_string(),
             passed,
             checks,
             evaluated_at,
+        };
+        if let Some(key) = mutation_key {
+            persist_runtime_effect_mutation_result(&transaction, workspace_scope, key, &result)?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交优化候选评估：{error}"))?;
+        Ok(result)
+    }
+
+    fn optimization_candidate(
+        &self,
+        workspace_scope: &str,
+        candidate_id: &str,
+    ) -> Result<Option<OptimizationCandidateResult>, String> {
+        if !valid_runtime_identifier(candidate_id, 160) {
+            return Err("优化候选 ID 无效".to_string());
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let row = connection
+            .query_row(
+                "SELECT base_version, candidate_version, state, summary, rules_json,
+                        skill_hints_json, metrics_json, evidence_count, created_at,
+                        evaluated_at, expires_at
+                 FROM optimization_candidates
+                 WHERE workspace_scope=?1 AND id=?2",
+                params![workspace_scope, candidate_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, Option<String>>(10)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("无法读取优化候选：{error}"))?;
+        row.map(|row| {
+            Ok(OptimizationCandidateResult {
+                id: candidate_id.to_string(),
+                base_version: row.0,
+                candidate_version: row.1,
+                state: row.2,
+                summary: row.3,
+                rules: serde_json::from_str(&row.4)
+                    .map_err(|error| format!("优化候选规则载荷损坏：{error}"))?,
+                skill_hints: serde_json::from_str(&row.5)
+                    .map_err(|error| format!("优化候选 Skill 提示载荷损坏：{error}"))?,
+                metrics: serde_json::from_str(&row.6)
+                    .map_err(|error| format!("优化候选指标载荷损坏：{error}"))?,
+                evidence_count: usize::try_from(row.7).unwrap_or_default(),
+                created_at: row.8,
+                evaluated_at: row.9,
+                expires_at: row.10,
+            })
         })
+        .transpose()
     }
 
     fn load_optimization_profile(
@@ -4007,10 +7884,11 @@ impl RuntimeDatabase {
         })
     }
 
-    fn apply_optimization_candidate(
+    pub(crate) fn apply_optimization_candidate(
         &self,
         workspace_scope: &str,
         candidate_id: &str,
+        mutation_key: Option<&RuntimeEffectMutationKey>,
     ) -> Result<OptimizationProfileResult, String> {
         if !valid_runtime_identifier(candidate_id, 160) {
             return Err("优化候选 ID 无效".to_string());
@@ -4022,6 +7900,16 @@ impl RuntimeDatabase {
         let transaction = connection
             .transaction()
             .map_err(|error| format!("无法开始应用优化候选事务：{error}"))?;
+        if let Some(key) = mutation_key {
+            if let Some(result) =
+                read_runtime_effect_mutation_result(&transaction, workspace_scope, key)?
+            {
+                transaction
+                    .commit()
+                    .map_err(|error| format!("无法完成优化候选应用幂等重放：{error}"))?;
+                return Ok(result);
+            }
+        }
         let candidate = transaction
             .query_row(
                 "SELECT base_version, candidate_version, state, summary, rules_json, skill_hints_json
@@ -4042,6 +7930,20 @@ impl RuntimeDatabase {
                 "优化候选当前状态为 {}，未通过独立评估",
                 candidate.2
             ));
+        }
+        let bound_reflection_job = transaction
+            .query_row(
+                "SELECT reflection_job_id
+                 FROM memory_reflection_optimization_candidates
+                 WHERE workspace_scope=?1 AND candidate_id=?2 AND state='bound'
+                 LIMIT 1",
+                params![workspace_scope, candidate_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| format!("无法检查反思优化候选绑定：{error}"))?;
+        if bound_reflection_job.is_some() {
+            return Err("已绑定反思任务的优化候选必须使用原子审批命令".to_string());
         }
         let current_version = transaction
             .query_row(
@@ -4083,17 +7985,21 @@ impl RuntimeDatabase {
                 params![workspace_scope, candidate_id],
             )
             .map_err(|error| format!("无法更新优化候选状态：{error}"))?;
+        let result = load_optimization_profile_in_connection(&transaction, workspace_scope)?;
+        if let Some(key) = mutation_key {
+            persist_runtime_effect_mutation_result(&transaction, workspace_scope, key, &result)?;
+        }
         transaction
             .commit()
             .map_err(|error| format!("无法提交优化配置：{error}"))?;
-        drop(connection);
-        self.load_optimization_profile(workspace_scope)
+        Ok(result)
     }
 
     fn rollback_optimization_profile(
         &self,
         workspace_scope: &str,
         target_version: Option<i64>,
+        mutation_key: Option<&RuntimeEffectMutationKey>,
     ) -> Result<OptimizationProfileResult, String> {
         let mut connection = self
             .connection
@@ -4102,6 +8008,16 @@ impl RuntimeDatabase {
         let transaction = connection
             .transaction()
             .map_err(|error| format!("无法开始优化回滚事务：{error}"))?;
+        if let Some(key) = mutation_key {
+            if let Some(result) =
+                read_runtime_effect_mutation_result(&transaction, workspace_scope, key)?
+            {
+                transaction
+                    .commit()
+                    .map_err(|error| format!("无法完成优化回滚幂等重放：{error}"))?;
+                return Ok(result);
+            }
+        }
         let current_version = transaction
             .query_row(
                 "SELECT version FROM optimization_profiles WHERE workspace_scope=?1",
@@ -4156,11 +8072,14 @@ impl RuntimeDatabase {
                 ],
             )
             .map_err(|error| format!("无法提交优化回滚：{error}"))?;
+        let result = load_optimization_profile_in_connection(&transaction, workspace_scope)?;
+        if let Some(key) = mutation_key {
+            persist_runtime_effect_mutation_result(&transaction, workspace_scope, key, &result)?;
+        }
         transaction
             .commit()
             .map_err(|error| format!("无法提交优化回滚事务：{error}"))?;
-        drop(connection);
-        self.load_optimization_profile(workspace_scope)
+        Ok(result)
     }
 
     fn list_optimization_versions(
@@ -4336,6 +8255,22 @@ fn evaluate_vault_write_policy(
     }
 }
 
+fn evaluate_vault_read_policy(client_state: &Value, vault_id: &str) -> Result<(), String> {
+    let access = client_state
+        .get("settings")
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("vaultAccess"))
+        .and_then(Value::as_object)
+        .and_then(|value| value.get(vault_id))
+        .and_then(Value::as_str)
+        .unwrap_or("readwrite");
+    match access {
+        "readwrite" | "readonly" => Ok(()),
+        "disabled" => Err("当前 Obsidian 知识库已设为不接入，已拒绝读取".to_string()),
+        _ => Err("当前 Obsidian 知识库访问策略无效，已拒绝读取".to_string()),
+    }
+}
+
 fn valid_runtime_task_state(value: &str) -> bool {
     matches!(
         value,
@@ -4348,6 +8283,2683 @@ fn valid_runtime_task_state(value: &str) -> bool {
             | "failed"
             | "cancelled"
     )
+}
+
+fn canonical_runtime_json(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(canonical_runtime_json).collect()),
+        Value::Object(object) => {
+            let mut keys = object.keys().collect::<Vec<_>>();
+            keys.sort();
+            let mut canonical = serde_json::Map::new();
+            for key in keys {
+                canonical.insert(key.clone(), canonical_runtime_json(&object[key]));
+            }
+            Value::Object(canonical)
+        }
+        _ => value.clone(),
+    }
+}
+
+fn canonical_runtime_json_string(value: &Value, label: &str) -> Result<String, String> {
+    serde_json::to_string(&canonical_runtime_json(value))
+        .map_err(|error| format!("无法序列化{label}：{error}"))
+}
+
+pub(crate) fn runtime_effect_mutation_request_hash(
+    value: &Value,
+    label: &str,
+) -> Result<String, String> {
+    let canonical = canonical_runtime_json_string(value, label)?;
+    Ok(format!("sha256:{:x}", Sha256::digest(canonical.as_bytes())))
+}
+
+pub(crate) fn runtime_effect_mutation_key(
+    authorization: &RuntimeEffectfulHandlerAuthorization,
+    handler_kind: &'static str,
+    request: &Value,
+) -> Result<RuntimeEffectMutationKey, String> {
+    Ok(RuntimeEffectMutationKey {
+        command_id: authorization.command_id.clone(),
+        handler_kind,
+        request_hash: runtime_effect_mutation_request_hash(request, "Runtime 副作用请求")?,
+    })
+}
+
+pub(crate) fn read_runtime_effect_mutation_result<T: serde::de::DeserializeOwned>(
+    connection: &Connection,
+    workspace_scope: &str,
+    key: &RuntimeEffectMutationKey,
+) -> Result<Option<T>, String> {
+    let stored = connection
+        .query_row(
+            "SELECT request_hash, result_json
+             FROM runtime_effect_mutation_results
+             WHERE workspace_scope=?1 AND command_id=?2 AND handler_kind=?3",
+            params![workspace_scope, key.command_id, key.handler_kind],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("无法读取 Runtime 副作用重放结果：{error}"))?;
+    let Some((request_hash, result_json)) = stored else {
+        return Ok(None);
+    };
+    if request_hash != key.request_hash {
+        return Err("同一 Runtime command 的处理器请求已绑定到不同参数".to_string());
+    }
+    serde_json::from_str(&result_json)
+        .map(Some)
+        .map_err(|error| format!("无法解析 Runtime 副作用重放结果：{error}"))
+}
+
+pub(crate) fn persist_runtime_effect_mutation_result<T: Serialize>(
+    connection: &Connection,
+    workspace_scope: &str,
+    key: &RuntimeEffectMutationKey,
+    result: &T,
+) -> Result<(), String> {
+    let result_json = serde_json::to_string(result)
+        .map_err(|error| format!("无法序列化 Runtime 副作用结果：{error}"))?;
+    connection
+        .execute(
+            "INSERT INTO runtime_effect_mutation_results
+             (workspace_scope, command_id, handler_kind, request_hash, result_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                workspace_scope,
+                key.command_id,
+                key.handler_kind,
+                key.request_hash,
+                result_json,
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(|error| format!("无法保存 Runtime 副作用幂等结果：{error}"))?;
+    Ok(())
+}
+
+fn runtime_budget_value(payload: &Value, key: &str) -> Option<u64> {
+    payload
+        .get("budget")
+        .and_then(Value::as_object)
+        .and_then(|budget| budget.get(key))
+        .and_then(Value::as_u64)
+}
+
+fn runtime_budget_cost(payload: &Value) -> Option<f64> {
+    payload
+        .get("budget")
+        .and_then(Value::as_object)
+        .and_then(|budget| budget.get("maxCost"))
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+}
+
+fn checked_sqlite_i64(value: u64, label: &str) -> Result<i64, String> {
+    i64::try_from(value).map_err(|_| format!("{label} 超出 SQLite 整数范围"))
+}
+
+fn read_runtime_task_execution_budget(
+    connection: &Connection,
+    workspace_scope: &str,
+    task_id: &str,
+    plan_revision: i64,
+) -> Result<RuntimeTaskExecutionBudgetStatus, String> {
+    connection
+        .query_row(
+            "SELECT max_steps, max_tool_calls, max_runtime_seconds, max_tokens, max_cost,
+                    reserved_steps, reserved_tool_calls, reserved_runtime_seconds,
+                    reserved_tokens, reserved_cost, consumed_steps, consumed_tool_calls,
+                    consumed_runtime_seconds, consumed_tokens, consumed_cost,
+                    cancellation_fence, cancelled_at
+             FROM runtime_task_execution_budgets
+             WHERE workspace_scope=?1 AND task_id=?2 AND plan_revision=?3",
+            params![workspace_scope, task_id, plan_revision],
+            |row| {
+                Ok(RuntimeTaskExecutionBudgetStatus {
+                    runtime_task_id: task_id.to_string(),
+                    plan_revision: u64::try_from(plan_revision).unwrap_or_default(),
+                    max_steps: u64::try_from(row.get::<_, i64>(0)?).unwrap_or_default(),
+                    max_tool_calls: u64::try_from(row.get::<_, i64>(1)?).unwrap_or_default(),
+                    max_runtime_seconds: u64::try_from(row.get::<_, i64>(2)?).unwrap_or_default(),
+                    max_tokens: row
+                        .get::<_, Option<i64>>(3)?
+                        .and_then(|value| u64::try_from(value).ok()),
+                    max_cost: row.get(4)?,
+                    reserved_steps: u64::try_from(row.get::<_, i64>(5)?).unwrap_or_default(),
+                    reserved_tool_calls: u64::try_from(row.get::<_, i64>(6)?).unwrap_or_default(),
+                    reserved_runtime_seconds: u64::try_from(row.get::<_, i64>(7)?)
+                        .unwrap_or_default(),
+                    reserved_tokens: u64::try_from(row.get::<_, i64>(8)?).unwrap_or_default(),
+                    reserved_cost: row.get(9)?,
+                    consumed_steps: u64::try_from(row.get::<_, i64>(10)?).unwrap_or_default(),
+                    consumed_tool_calls: u64::try_from(row.get::<_, i64>(11)?).unwrap_or_default(),
+                    consumed_runtime_seconds: u64::try_from(row.get::<_, i64>(12)?)
+                        .unwrap_or_default(),
+                    consumed_tokens: u64::try_from(row.get::<_, i64>(13)?).unwrap_or_default(),
+                    consumed_cost: row.get(14)?,
+                    cancellation_fence: u64::try_from(row.get::<_, i64>(15)?).unwrap_or_default(),
+                    cancelled_at: row.get(16)?,
+                })
+            },
+        )
+        .map_err(|error| format!("无法读取原生任务执行预算：{error}"))
+}
+
+fn ensure_runtime_task_execution_budget(
+    connection: &Connection,
+    workspace_scope: &str,
+    task_id: &str,
+    plan_revision: i64,
+    payload: &Value,
+    explicit_budget: Option<&CommandBudget>,
+    created_at: &str,
+) -> Result<RuntimeTaskExecutionBudgetStatus, String> {
+    let step_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM runtime_task_plan_steps
+             WHERE workspace_scope=?1 AND task_id=?2 AND plan_revision=?3",
+            params![workspace_scope, task_id, plan_revision],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("无法统计原生任务计划步骤：{error}"))?;
+    let minimum_steps = u64::try_from(step_count.max(1)).unwrap_or(1);
+    let (max_steps, max_tool_calls, max_runtime_seconds, max_tokens, max_cost) =
+        if let Some(budget) = explicit_budget {
+            if budget.max_steps < minimum_steps {
+                return Err("原生任务计划步骤数量超过应用命令步骤预算".to_string());
+            }
+            (
+                budget.max_steps,
+                budget.max_tool_calls,
+                budget.max_runtime_seconds,
+                budget.max_tokens,
+                budget.max_cost,
+            )
+        } else {
+            let max_steps = runtime_budget_value(payload, "maxSteps").unwrap_or(minimum_steps);
+            if max_steps < minimum_steps {
+                return Err("原生任务计划步骤数量超过任务步骤预算".to_string());
+            }
+            (
+                max_steps,
+                runtime_budget_value(payload, "maxToolCalls").unwrap_or(minimum_steps),
+                runtime_budget_value(payload, "maxRuntimeSeconds")
+                    .unwrap_or(3_600)
+                    .max(1),
+                runtime_budget_value(payload, "maxTokens"),
+                runtime_budget_cost(payload),
+            )
+        };
+    if max_runtime_seconds == 0 || max_cost.is_some_and(|value| !value.is_finite() || value < 0.0) {
+        return Err("原生任务执行预算无效".to_string());
+    }
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO runtime_task_execution_budgets
+             (workspace_scope, task_id, plan_revision, max_steps, max_tool_calls,
+              max_runtime_seconds, max_tokens, max_cost, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+            params![
+                workspace_scope,
+                task_id,
+                plan_revision,
+                checked_sqlite_i64(max_steps, "步骤预算")?,
+                checked_sqlite_i64(max_tool_calls, "工具调用预算")?,
+                checked_sqlite_i64(max_runtime_seconds, "运行时间预算")?,
+                max_tokens
+                    .map(|value| checked_sqlite_i64(value, "Token 预算"))
+                    .transpose()?,
+                max_cost,
+                created_at,
+            ],
+        )
+        .map_err(|error| format!("无法初始化原生任务执行预算：{error}"))?;
+    read_runtime_task_execution_budget(connection, workspace_scope, task_id, plan_revision)
+}
+
+fn read_runtime_child_execution_expectation(
+    connection: &Connection,
+    workspace_scope: &str,
+    child_task_id: &str,
+) -> Result<Option<RuntimeChildExecutionExpectation>, String> {
+    let row = connection
+        .query_row(
+            "SELECT binding.claim_id, binding.command_id, run.task_id, run.plan_revision,
+                    run.step_id, command.trace_id, command.payload, run.state,
+                    run.lease_expires_at, parent.state, run.cancellation_fence,
+                    budget.cancellation_fence, budget.cancelled_at,
+                    run.reserved_tool_calls, run.reserved_runtime_seconds,
+                    run.reserved_tokens, run.reserved_cost, run.effect_class,
+                    budget.max_tokens, budget.max_cost
+             FROM runtime_task_step_command_bindings binding
+             JOIN runtime_task_step_runs run
+               ON run.workspace_scope=binding.workspace_scope AND run.claim_id=binding.claim_id
+             JOIN runtime_task_execution_budgets budget
+               ON budget.workspace_scope=run.workspace_scope
+              AND budget.task_id=run.task_id
+              AND budget.plan_revision=run.plan_revision
+             JOIN application_commands command
+               ON command.workspace_scope=binding.workspace_scope
+              AND command.id=binding.command_id
+              AND command.task_id=binding.child_task_id
+             JOIN runtime_tasks parent
+               ON parent.workspace_scope=run.workspace_scope AND parent.id=run.task_id
+             WHERE binding.workspace_scope=?1 AND binding.child_task_id=?2",
+            params![workspace_scope, child_task_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, i64>(13)?,
+                    row.get::<_, i64>(14)?,
+                    row.get::<_, i64>(15)?,
+                    row.get::<_, f64>(16)?,
+                    row.get::<_, String>(17)?,
+                    row.get::<_, Option<i64>>(18)?,
+                    row.get::<_, Option<f64>>(19)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("无法读取 Runtime 子任务可信执行绑定：{error}"))?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let command = serde_json::from_str::<ApplicationCommand>(&row.6)
+        .map_err(|error| format!("无法解析 Runtime 子任务应用命令：{error}"))?;
+    if command.id != row.1 || !matches!(command.origin, crate::policy::CommandOrigin::Runtime) {
+        return Err("Runtime 子任务绑定的应用命令身份无效".to_string());
+    }
+    if command.trace_id.as_deref() != Some(row.5.as_str()) {
+        return Err("Runtime 子任务应用命令 Trace 快照不一致".to_string());
+    }
+    let command_effectful = crate::policy::command_is_effectful(&command);
+    let binding = RuntimeTaskStepCommandBinding {
+        runtime_task_id: row.2,
+        plan_revision: u64::try_from(row.3)
+            .ok()
+            .filter(|revision| *revision > 0)
+            .ok_or_else(|| "Runtime 子任务绑定的计划版本无效".to_string())?,
+        step_id: row.4,
+        step_claim_id: row.0,
+    };
+    if command.step_binding.as_ref() != Some(&binding) {
+        return Err("Runtime 子任务应用命令的步骤绑定快照不一致".to_string());
+    }
+    Ok(Some(RuntimeChildExecutionExpectation {
+        binding,
+        command_id: row.1,
+        trace_id: row.5,
+        capability_id: command.capability_id,
+        operation: command.operation,
+        parameters: command.parameters,
+        vault_id: command.vault_id,
+        command_effectful,
+        effect_class: RuntimeTaskStepEffectClass::parse(&row.17)
+            .ok_or_else(|| "Runtime 子任务绑定的步骤 effect class 无效".to_string())?,
+        run_state: row.7,
+        lease_expires_at: row.8,
+        parent_state: row.9,
+        cancellation_fence: u64::try_from(row.10).unwrap_or_default(),
+        budget_cancellation_fence: u64::try_from(row.11).unwrap_or_default(),
+        cancelled_at: row.12,
+        reserved_tool_calls: u64::try_from(row.13).unwrap_or_default(),
+        reserved_runtime_seconds: u64::try_from(row.14).unwrap_or_default(),
+        reserved_tokens: u64::try_from(row.15).unwrap_or_default(),
+        reserved_cost: row.16,
+        max_tokens: row.18.map(|value| u64::try_from(value).unwrap_or_default()),
+        max_cost: row.19,
+    }))
+}
+
+fn validate_trusted_execution_receipt(
+    workspace_scope: &str,
+    child: &NativeRuntimeTask,
+    expected: &RuntimeChildExecutionExpectation,
+    receipt: &TrustedExecutionReceipt,
+) -> Result<(), String> {
+    if receipt.workspace_scope != workspace_scope
+        || receipt.child_task_id != child.id
+        || receipt.command_id != expected.command_id
+        || receipt.trace_id != expected.trace_id
+        || receipt.capability_id != expected.capability_id
+        || receipt.operation != expected.operation
+        || receipt.step_binding != expected.binding
+    {
+        return Err("可信原生执行回执与 Runtime 子任务绑定不一致".to_string());
+    }
+    let expected_trust_kind = match expected.effect_class {
+        RuntimeTaskStepEffectClass::ReadOnly => "read_only_native_handler",
+        RuntimeTaskStepEffectClass::Effectful => "effectful_native_handler",
+    };
+    if receipt.trust_kind != expected_trust_kind {
+        return Err("可信原生执行回执类型与步骤 effect class 不一致".to_string());
+    }
+    if child.trace_id.as_deref() != Some(expected.trace_id.as_str())
+        || child.payload.get("commandId").and_then(Value::as_str)
+            != Some(expected.command_id.as_str())
+        || child.payload.get("operation").and_then(Value::as_str)
+            != Some(expected.operation.as_str())
+        || !child
+            .payload
+            .get("capabilityIds")
+            .and_then(Value::as_array)
+            .is_some_and(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|value| value == expected.capability_id)
+            })
+    {
+        return Err("Runtime 子任务负载与可信原生执行回执不一致".to_string());
+    }
+    if !receipt.receipt_id.starts_with("native-handler:sha256:")
+        || receipt.consumed_tool_calls == 0
+        || receipt.consumed_runtime_seconds == 0
+        || !receipt.consumed_cost.is_finite()
+        || receipt.consumed_cost < 0.0
+        || (!receipt.cost_measured && receipt.consumed_cost != 0.0)
+        || chrono::DateTime::parse_from_rfc3339(&receipt.completed_at).is_err()
+    {
+        return Err("可信原生执行回执用量或时间无效".to_string());
+    }
+    Ok(())
+}
+
+fn validate_trusted_execution_usage_within_reservation(
+    expected: &RuntimeChildExecutionExpectation,
+    receipt: &TrustedExecutionReceipt,
+) -> Result<(), String> {
+    if receipt.consumed_tool_calls > expected.reserved_tool_calls
+        || receipt.consumed_runtime_seconds > expected.reserved_runtime_seconds
+        || expected
+            .max_tokens
+            .is_some_and(|_| receipt.consumed_tokens > expected.reserved_tokens)
+        || expected.max_cost.is_some_and(|_| {
+            !receipt.cost_measured || receipt.consumed_cost > expected.reserved_cost + f64::EPSILON
+        })
+    {
+        return Err("可信原生执行回执消耗超过步骤预留预算".to_string());
+    }
+    Ok(())
+}
+
+fn validate_live_runtime_child_execution_expectation(
+    expected: &RuntimeChildExecutionExpectation,
+    now: &str,
+) -> Result<(), String> {
+    if expected.run_state != "claimed" {
+        return Err("Runtime 子任务绑定的步骤领取已经完成或被封锁".to_string());
+    }
+    if expected.lease_expires_at.as_str() <= now {
+        return Err("Runtime 子任务绑定的步骤领取 lease 已过期".to_string());
+    }
+    if !matches!(
+        expected.parent_state.as_str(),
+        "queued" | "running" | "awaiting_approval"
+    ) || expected.cancelled_at.is_some()
+        || expected.cancellation_fence != expected.budget_cancellation_fence
+    {
+        return Err("Runtime 子任务绑定已被父任务状态或取消栅栏封锁".to_string());
+    }
+    Ok(())
+}
+
+fn runtime_handler_pair_allowed(
+    allowed_pairs: &[(&str, &str)],
+    capability_id: &str,
+    operation: &str,
+) -> bool {
+    allowed_pairs
+        .iter()
+        .any(|(allowed_capability, allowed_operation)| {
+            capability_id == *allowed_capability && operation == *allowed_operation
+        })
+}
+
+fn runtime_effectful_handler_authorization(
+    connection: &Connection,
+    workspace_scope: &str,
+    operation_context: &OperationContext,
+    allowed_pairs: &[(&str, &str)],
+) -> Result<RuntimeEffectfulHandlerAuthorization, String> {
+    if allowed_pairs.is_empty() {
+        return Err("effectful 原生处理器没有声明允许的命令身份".to_string());
+    }
+    let execution_ticket = operation_context
+        .execution_ticket
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.chars().count() <= 240)
+        .ok_or_else(|| "effectful Runtime 处理器缺少有效执行票据".to_string())?;
+    let child_task_id = operation_context
+        .task_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "effectful Runtime 处理器缺少 Runtime 子任务 ID".to_string())?;
+    let trace_id = operation_context
+        .trace_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "effectful Runtime 处理器缺少 Trace".to_string())?;
+    crate::trace::validate_trace_id(trace_id)?;
+    let child = read_native_runtime_task(connection, workspace_scope, child_task_id)?;
+    if child.payload.get("kind").and_then(Value::as_str) != Some("runtime_child")
+        || child.state != "running"
+    {
+        return Err("只有 running 状态的 Runtime 子任务可以调用 effectful 原生处理器".to_string());
+    }
+    let expected =
+        read_runtime_child_execution_expectation(connection, workspace_scope, child_task_id)?
+            .ok_or_else(|| "Runtime 子任务缺少 effectful 步骤绑定".to_string())?;
+    validate_live_runtime_child_execution_expectation(&expected, &Utc::now().to_rfc3339())?;
+    if expected.effect_class != RuntimeTaskStepEffectClass::Effectful || !expected.command_effectful
+    {
+        return Err("只读 Runtime 能力不能调用 effectful 原生处理器".to_string());
+    }
+    if expected.trace_id != trace_id
+        || !runtime_handler_pair_allowed(
+            allowed_pairs,
+            &expected.capability_id,
+            &expected.operation,
+        )
+    {
+        return Err("effectful 原生处理器与 Runtime 子命令身份不一致".to_string());
+    }
+    Ok(RuntimeEffectfulHandlerAuthorization {
+        execution_ticket: execution_ticket.to_string(),
+        child_task_id: child_task_id.to_string(),
+        command_id: expected.command_id,
+        trace_id: expected.trace_id,
+        capability_id: expected.capability_id,
+        operation: expected.operation,
+        binding: expected.binding,
+        reservation: TrustedHandlerReservation {
+            max_tool_calls: expected.reserved_tool_calls,
+            max_runtime_seconds: expected.reserved_runtime_seconds,
+            max_tokens: expected.max_tokens.map(|_| expected.reserved_tokens),
+            max_cost: expected.max_cost.map(|_| expected.reserved_cost),
+        },
+    })
+}
+
+fn runtime_read_only_result_limit(parameters: &Value) -> usize {
+    parameters
+        .get("limit")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(50)
+        .clamp(1, 200)
+}
+
+fn runtime_read_only_client_state(
+    connection: &Connection,
+    workspace_scope: &str,
+) -> Result<Value, String> {
+    Ok(connection
+        .query_row(
+            "SELECT payload FROM workspace_snapshots WHERE workspace_scope=?1",
+            [workspace_scope],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("无法读取 Runtime 只读 Vault 策略：{error}"))?
+        .and_then(|value| serde_json::from_str::<Value>(&value).ok())
+        .and_then(|snapshot| {
+            snapshot
+                .get("clientState")
+                .or_else(|| snapshot.get("client_state"))
+                .cloned()
+        })
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new())))
+}
+
+fn runtime_read_only_search_output(
+    connection: &Connection,
+    workspace_scope: &str,
+    expected: &RuntimeChildExecutionExpectation,
+) -> Result<Value, String> {
+    let query = expected
+        .parameters
+        .get("query")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Runtime 原生搜索缺少不可变 query 参数".to_string())?;
+    if query.chars().count() > MAX_SEARCH_QUERY_CHARS {
+        return Err("Runtime 原生搜索词超过 512 个字符的安全上限".to_string());
+    }
+    let limit = runtime_read_only_result_limit(&expected.parameters);
+    let client_state = runtime_read_only_client_state(connection, workspace_scope)?;
+    let explicit_vault_id = expected
+        .vault_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "all");
+    let vault_ids = if let Some(vault_id) = explicit_vault_id {
+        evaluate_vault_read_policy(&client_state, vault_id)?;
+        vec![vault_id.to_string()]
+    } else {
+        let mut statement = connection
+            .prepare("SELECT DISTINCT vault_id FROM note_index ORDER BY vault_id")
+            .map_err(|error| format!("无法准备 Runtime 原生搜索 Vault 范围：{error}"))?;
+        let vault_ids = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| format!("无法读取 Runtime 原生搜索 Vault 范围：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法解析 Runtime 原生搜索 Vault 范围：{error}"))?;
+        vault_ids
+            .into_iter()
+            .filter(|vault_id| evaluate_vault_read_policy(&client_state, vault_id).is_ok())
+            .collect::<Vec<_>>()
+    };
+    let mut results = Vec::new();
+    for vault_id in &vault_ids {
+        results.extend(indexed_search_in_connection_with_neural(
+            connection,
+            Some(vault_id),
+            query,
+            limit,
+            None,
+        )?);
+    }
+    results.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right.modified_at.cmp(&left.modified_at))
+            .then_with(|| left.vault_id.cmp(&right.vault_id))
+            .then_with(|| left.relative_path.cmp(&right.relative_path))
+    });
+    results.truncate(limit);
+    Ok(serde_json::json!({
+        "kind": "indexed_search",
+        "query": query,
+        "vaultId": explicit_vault_id.unwrap_or("all"),
+        "searchedVaultIds": vault_ids,
+        "resultCount": results.len(),
+        "results": results,
+    }))
+}
+
+fn runtime_task_state_counts(
+    connection: &Connection,
+    workspace_scope: &str,
+) -> Result<Value, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT state, COUNT(*) FROM runtime_tasks
+             WHERE workspace_scope=?1 GROUP BY state ORDER BY state",
+        )
+        .map_err(|error| format!("无法准备 Runtime 任务状态快照：{error}"))?;
+    let rows = statement
+        .query_map([workspace_scope], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|error| format!("无法读取 Runtime 任务状态快照：{error}"))?;
+    let mut counts = serde_json::Map::new();
+    for row in rows {
+        let (state, count) =
+            row.map_err(|error| format!("无法解析 Runtime 任务状态快照：{error}"))?;
+        counts.insert(state, Value::from(count));
+    }
+    Ok(Value::Object(counts))
+}
+
+fn runtime_read_only_tasks_output(
+    connection: &Connection,
+    workspace_scope: &str,
+    limit: usize,
+) -> Result<Value, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, state, title, trace_id, updated_at FROM runtime_tasks
+             WHERE workspace_scope=?1 ORDER BY updated_at DESC, id DESC LIMIT ?2",
+        )
+        .map_err(|error| format!("无法准备 Runtime 原生任务快照：{error}"))?;
+    let items = statement
+        .query_map(params![workspace_scope, limit as i64], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "state": row.get::<_, String>(1)?,
+                "title": row.get::<_, String>(2)?,
+                "traceId": row.get::<_, Option<String>>(3)?,
+                "updatedAt": row.get::<_, String>(4)?,
+            }))
+        })
+        .map_err(|error| format!("无法读取 Runtime 原生任务快照：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法解析 Runtime 原生任务快照：{error}"))?;
+    Ok(serde_json::json!({
+        "kind": "runtime_tasks",
+        "stateCounts": runtime_task_state_counts(connection, workspace_scope)?,
+        "itemCount": items.len(),
+        "items": items,
+    }))
+}
+
+fn runtime_read_only_logs_output(connection: &Connection, limit: usize) -> Result<Value, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, task_id, event_type, state, created_at FROM operation_events
+             ORDER BY created_at DESC, id DESC LIMIT ?1",
+        )
+        .map_err(|error| format!("无法准备 Runtime 原生日志快照：{error}"))?;
+    let items = statement
+        .query_map([limit as i64], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "taskId": row.get::<_, Option<String>>(1)?,
+                "eventType": row.get::<_, String>(2)?,
+                "state": row.get::<_, String>(3)?,
+                "createdAt": row.get::<_, String>(4)?,
+            }))
+        })
+        .map_err(|error| format!("无法读取 Runtime 原生日志快照：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法解析 Runtime 原生日志快照：{error}"))?;
+    Ok(serde_json::json!({
+        "kind": "operation_events",
+        "itemCount": items.len(),
+        "items": items,
+    }))
+}
+
+fn runtime_read_only_dashboard_output(
+    connection: &Connection,
+    workspace_scope: &str,
+) -> Result<Value, String> {
+    let pending_approvals = connection
+        .query_row(
+            "SELECT COUNT(*) FROM approvals WHERE state='pending'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| format!("无法读取 Runtime 待审批快照：{error}"))?;
+    let pending_inbound = connection
+        .query_row(
+            "SELECT COUNT(*) FROM inbound_content_records
+             WHERE workspace_scope=?1 AND state NOT IN ('committed', 'failed', 'cancelled')",
+            [workspace_scope],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| format!("无法读取 Runtime Inbox 快照：{error}"))?;
+    let connected_vaults = connection
+        .query_row(
+            "SELECT COUNT(*) FROM vault_registry WHERE connection_state='connected'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| format!("无法读取 Runtime Vault 快照：{error}"))?;
+    let operation_events = connection
+        .query_row("SELECT COUNT(*) FROM operation_events", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|error| format!("无法读取 Runtime 日志计数：{error}"))?;
+    Ok(serde_json::json!({
+        "kind": "dashboard",
+        "taskStateCounts": runtime_task_state_counts(connection, workspace_scope)?,
+        "pendingApprovals": pending_approvals,
+        "pendingInbound": pending_inbound,
+        "connectedVaults": connected_vaults,
+        "operationEvents": operation_events,
+    }))
+}
+
+fn runtime_read_only_settings_output(
+    connection: &Connection,
+    workspace_scope: &str,
+) -> Result<Value, String> {
+    let runtime = connection
+        .query_row(
+            "SELECT scheduler_enabled, updated_at FROM runtime_settings WHERE workspace_scope=?1",
+            [workspace_scope],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("无法读取 Runtime 设置快照：{error}"))?;
+    let authorization = connection
+        .query_row(
+            "SELECT status, authorization_version, updated_at FROM application_authorization WHERE id=1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("无法读取 Runtime 应用授权快照：{error}"))?;
+    Ok(serde_json::json!({
+        "kind": "settings",
+        "schedulerEnabled": runtime.as_ref().is_none_or(|value| value.0 != 0),
+        "runtimeUpdatedAt": runtime.map(|value| value.1),
+        "authorization": authorization.map(|value| serde_json::json!({
+            "status": value.0,
+            "version": value.1,
+            "updatedAt": value.2,
+        })),
+    }))
+}
+
+fn runtime_read_only_skills_output(
+    connection: &Connection,
+    workspace_scope: &str,
+    limit: usize,
+) -> Result<Value, String> {
+    let registry_exists = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='skill_registry'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| format!("无法检查 Runtime Skill 表：{error}"))?
+        .is_some();
+    let items = if registry_exists {
+        let mut statement = connection
+            .prepare(
+                "SELECT id, current_version, state, name, payload_hash, updated_at
+                 FROM skill_registry WHERE workspace_scope=?1
+                 ORDER BY updated_at DESC, id DESC LIMIT ?2",
+            )
+            .map_err(|error| format!("无法准备 Runtime Skill 快照：{error}"))?;
+        let items = statement
+            .query_map(params![workspace_scope, limit as i64], |row| {
+                Ok(serde_json::json!({
+                    "id": row.get::<_, String>(0)?,
+                    "version": row.get::<_, i64>(1)?,
+                    "state": row.get::<_, String>(2)?,
+                    "name": row.get::<_, String>(3)?,
+                    "payloadHash": row.get::<_, String>(4)?,
+                    "updatedAt": row.get::<_, String>(5)?,
+                }))
+            })
+            .map_err(|error| format!("无法读取 Runtime Skill 快照：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法解析 Runtime Skill 快照：{error}"))?;
+        items
+    } else {
+        let mut statement = connection
+            .prepare(
+                "SELECT id, revision, state, payload_hash, updated_at FROM managed_resources
+                 WHERE workspace_scope=?1 AND resource_type='user_skill' AND state='active'
+                 ORDER BY updated_at DESC, id DESC LIMIT ?2",
+            )
+            .map_err(|error| format!("无法准备 Runtime 兼容 Skill 快照：{error}"))?;
+        let items = statement
+            .query_map(params![workspace_scope, limit as i64], |row| {
+                Ok(serde_json::json!({
+                    "id": row.get::<_, String>(0)?,
+                    "version": row.get::<_, i64>(1)?,
+                    "state": row.get::<_, String>(2)?,
+                    "payloadHash": row.get::<_, String>(3)?,
+                    "updatedAt": row.get::<_, String>(4)?,
+                }))
+            })
+            .map_err(|error| format!("无法读取 Runtime 兼容 Skill 快照：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法解析 Runtime 兼容 Skill 快照：{error}"))?;
+        items
+    };
+    Ok(serde_json::json!({
+        "kind": "skills",
+        "itemCount": items.len(),
+        "items": items,
+    }))
+}
+
+fn runtime_read_only_vaults_output(
+    connection: &Connection,
+    workspace_scope: &str,
+    limit: usize,
+) -> Result<Value, String> {
+    let client_state = runtime_read_only_client_state(connection, workspace_scope)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, display_name, note_count, attachment_count, connection_state,
+                    is_open, last_indexed_at, last_error
+             FROM vault_registry ORDER BY display_name, id LIMIT ?1",
+        )
+        .map_err(|error| format!("无法准备 Runtime Vault 快照：{error}"))?;
+    let rows = statement
+        .query_map([limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+            ))
+        })
+        .map_err(|error| format!("无法读取 Runtime Vault 快照：{error}"))?;
+    let mut items = Vec::new();
+    for row in rows {
+        let row = row.map_err(|error| format!("无法解析 Runtime Vault 快照：{error}"))?;
+        if evaluate_vault_read_policy(&client_state, &row.0).is_err() {
+            continue;
+        }
+        items.push(serde_json::json!({
+            "id": row.0,
+            "name": row.1,
+            "noteCount": row.2,
+            "attachmentCount": row.3,
+            "connectionState": row.4,
+            "isOpen": row.5 != 0,
+            "lastIndexedAt": row.6,
+            "lastError": row.7,
+        }));
+    }
+    Ok(serde_json::json!({
+        "kind": "vaults",
+        "itemCount": items.len(),
+        "items": items,
+    }))
+}
+
+fn runtime_read_only_managed_resources_output(
+    connection: &Connection,
+    workspace_scope: &str,
+    resource_types: &[&str],
+    kind: &str,
+    limit: usize,
+) -> Result<Value, String> {
+    let mut items = Vec::new();
+    for resource_type in resource_types {
+        let remaining = limit.saturating_sub(items.len());
+        if remaining == 0 {
+            break;
+        }
+        let mut statement = connection
+            .prepare(
+                "SELECT resource_type, id, revision, state, payload_hash, updated_at
+                 FROM managed_resources
+                 WHERE workspace_scope=?1 AND resource_type=?2 AND state='active'
+                 ORDER BY updated_at DESC, id DESC LIMIT ?3",
+            )
+            .map_err(|error| format!("无法准备 Runtime {kind} 快照：{error}"))?;
+        let mut rows = statement
+            .query_map(
+                params![workspace_scope, resource_type, remaining as i64],
+                |row| {
+                    Ok(serde_json::json!({
+                        "resourceType": row.get::<_, String>(0)?,
+                        "id": row.get::<_, String>(1)?,
+                        "revision": row.get::<_, i64>(2)?,
+                        "state": row.get::<_, String>(3)?,
+                        "payloadHash": row.get::<_, String>(4)?,
+                        "updatedAt": row.get::<_, String>(5)?,
+                    }))
+                },
+            )
+            .map_err(|error| format!("无法读取 Runtime {kind} 快照：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法解析 Runtime {kind} 快照：{error}"))?;
+        items.append(&mut rows);
+    }
+    items.sort_by(|left, right| {
+        right
+            .get("updatedAt")
+            .and_then(Value::as_str)
+            .cmp(&left.get("updatedAt").and_then(Value::as_str))
+            .then_with(|| {
+                left.get("id")
+                    .and_then(Value::as_str)
+                    .cmp(&right.get("id").and_then(Value::as_str))
+            })
+    });
+    items.truncate(limit);
+    Ok(serde_json::json!({
+        "kind": kind,
+        "itemCount": items.len(),
+        "items": items,
+    }))
+}
+
+fn runtime_read_only_schedules_output(
+    connection: &Connection,
+    workspace_scope: &str,
+    limit: usize,
+) -> Result<Value, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, schedule_kind, enabled, next_run, revision, updated_at
+             FROM runtime_schedules WHERE workspace_scope=?1
+             ORDER BY updated_at DESC, id DESC LIMIT ?2",
+        )
+        .map_err(|error| format!("无法准备 Runtime 日程快照：{error}"))?;
+    let items = statement
+        .query_map(params![workspace_scope, limit as i64], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "scheduleKind": row.get::<_, String>(1)?,
+                "enabled": row.get::<_, i64>(2)? != 0,
+                "nextRun": row.get::<_, Option<String>>(3)?,
+                "revision": row.get::<_, i64>(4)?,
+                "updatedAt": row.get::<_, String>(5)?,
+            }))
+        })
+        .map_err(|error| format!("无法读取 Runtime 日程快照：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法解析 Runtime 日程快照：{error}"))?;
+    Ok(serde_json::json!({
+        "kind": "schedules",
+        "itemCount": items.len(),
+        "items": items,
+    }))
+}
+
+fn runtime_read_only_inbox_output(
+    connection: &Connection,
+    workspace_scope: &str,
+    limit: usize,
+) -> Result<Value, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, task_id, state, source_type, title, updated_at
+             FROM inbound_content_records WHERE workspace_scope=?1
+             ORDER BY updated_at DESC, id DESC LIMIT ?2",
+        )
+        .map_err(|error| format!("无法准备 Runtime Inbox 快照：{error}"))?;
+    let items = statement
+        .query_map(params![workspace_scope, limit as i64], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "taskId": row.get::<_, Option<String>>(1)?,
+                "state": row.get::<_, String>(2)?,
+                "sourceType": row.get::<_, String>(3)?,
+                "title": row.get::<_, String>(4)?,
+                "updatedAt": row.get::<_, String>(5)?,
+            }))
+        })
+        .map_err(|error| format!("无法读取 Runtime Inbox 快照：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法解析 Runtime Inbox 快照：{error}"))?;
+    Ok(serde_json::json!({
+        "kind": "inbox",
+        "itemCount": items.len(),
+        "items": items,
+    }))
+}
+
+fn execute_runtime_read_only_handler_in_connection(
+    connection: &Connection,
+    workspace_scope: &str,
+    expected: &RuntimeChildExecutionExpectation,
+) -> Result<Value, String> {
+    let limit = runtime_read_only_result_limit(&expected.parameters);
+    match expected.capability_id.as_str() {
+        "system:search" => runtime_read_only_search_output(connection, workspace_scope, expected),
+        "system:tasks" => runtime_read_only_tasks_output(connection, workspace_scope, limit),
+        "system:logs" => runtime_read_only_logs_output(connection, limit),
+        "system:dashboard" => runtime_read_only_dashboard_output(connection, workspace_scope),
+        "system:settings" => runtime_read_only_settings_output(connection, workspace_scope),
+        "system:skills" => runtime_read_only_skills_output(connection, workspace_scope, limit),
+        "system:vaults" => runtime_read_only_vaults_output(connection, workspace_scope, limit),
+        "system:reports" => runtime_read_only_managed_resources_output(
+            connection,
+            workspace_scope,
+            &["report", "report_subscription"],
+            "reports",
+            limit,
+        ),
+        "system:schedule" => runtime_read_only_schedules_output(connection, workspace_scope, limit),
+        "system:inbox" => runtime_read_only_inbox_output(connection, workspace_scope, limit),
+        _ => Err(format!(
+            "Runtime 只读能力 {} 没有受信任的原生处理器",
+            expected.capability_id
+        )),
+    }
+}
+
+fn validate_runtime_task_step_command_binding_in_connection(
+    connection: &Connection,
+    workspace_scope: &str,
+    command: &ApplicationCommand,
+    trace_id: &str,
+    now: &str,
+) -> Result<Option<RuntimeTaskStepCommandBinding>, String> {
+    let Some(binding) = command.step_binding.as_ref() else {
+        return Ok(None);
+    };
+    crate::task_runtime::validate_runtime_task_step_binding(binding)?;
+    let row = connection
+        .query_row(
+            "SELECT run.task_id, run.plan_revision, run.step_id, run.state,
+                    run.lease_expires_at, run.effect_class, run.cancellation_fence,
+                    budget.cancellation_fence, budget.cancelled_at,
+                    run.reserved_tool_calls, run.reserved_runtime_seconds,
+                    run.reserved_tokens, run.reserved_cost, task.state
+             FROM runtime_task_step_runs run
+             JOIN runtime_task_execution_budgets budget
+               ON budget.workspace_scope=run.workspace_scope
+              AND budget.task_id=run.task_id
+              AND budget.plan_revision=run.plan_revision
+             JOIN runtime_tasks task
+               ON task.workspace_scope=run.workspace_scope AND task.id=run.task_id
+             WHERE run.workspace_scope=?1 AND run.claim_id=?2",
+            params![workspace_scope, binding.step_claim_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, f64>(12)?,
+                    row.get::<_, String>(13)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("无法验证原生任务步骤绑定：{error}"))?
+        .ok_or_else(|| "原生任务步骤领取不存在".to_string())?;
+    if row.0 != binding.runtime_task_id
+        || u64::try_from(row.1).ok() != Some(binding.plan_revision)
+        || row.2 != binding.step_id
+    {
+        return Err("应用命令与原生任务步骤绑定不一致".to_string());
+    }
+    if row.3 != "claimed" || row.4.as_str() <= now || row.8.is_some() || row.13 == "cancelled" {
+        return Err("原生任务步骤领取已过期、完成或被父任务取消".to_string());
+    }
+    if row.6 != row.7 {
+        return Err("原生任务步骤领取已被取消栅栏封锁".to_string());
+    }
+    let step = load_runtime_task_plan_step_records(
+        connection,
+        workspace_scope,
+        &binding.runtime_task_id,
+        row.1,
+    )?
+    .into_iter()
+    .find(|step| step.step_id == binding.step_id)
+    .ok_or_else(|| "原生任务步骤绑定引用的计划步骤不存在".to_string())?;
+    let parent_task =
+        read_native_runtime_task(connection, workspace_scope, &binding.runtime_task_id)?;
+    validate_runtime_task_step_child_authority(command, trace_id, &step, &parent_task)?;
+    let effect_class = RuntimeTaskStepEffectClass::parse(&row.5)
+        .ok_or_else(|| "原生任务步骤效果分类损坏".to_string())?;
+    if effect_class == RuntimeTaskStepEffectClass::ReadOnly
+        && crate::policy::command_is_effectful(command)
+    {
+        return Err("只读任务步骤不能派发有副作用的应用命令".to_string());
+    }
+    let reserved_tool_calls = u64::try_from(row.9).unwrap_or_default();
+    let reserved_runtime_seconds = u64::try_from(row.10).unwrap_or_default();
+    let reserved_tokens = u64::try_from(row.11).unwrap_or_default();
+    if command.budget.max_tool_calls > reserved_tool_calls
+        || command.budget.max_runtime_seconds > reserved_runtime_seconds
+    {
+        return Err("应用命令预算超过原生任务步骤已预留额度".to_string());
+    }
+    match (reserved_tokens, command.budget.max_tokens) {
+        (0, Some(tokens)) if tokens > 0 => {
+            return Err("应用命令 Token 预算超过原生任务步骤已预留额度".to_string())
+        }
+        (reserved, Some(tokens)) if tokens > reserved => {
+            return Err("应用命令 Token 预算超过原生任务步骤已预留额度".to_string())
+        }
+        (reserved, None) if reserved > 0 => {
+            return Err("原生任务步骤已预留 Token 时应用命令必须声明 Token 上限".to_string())
+        }
+        _ => {}
+    }
+    match (row.12, command.budget.max_cost) {
+        (reserved, Some(cost)) if cost > reserved + f64::EPSILON => {
+            return Err("应用命令成本预算超过原生任务步骤已预留额度".to_string())
+        }
+        (reserved, None) if reserved > 0.0 => {
+            return Err("原生任务步骤已预留成本时应用命令必须声明成本上限".to_string())
+        }
+        _ => {}
+    }
+    Ok(Some(binding.clone()))
+}
+
+fn runtime_scope_array(
+    value: &Value,
+    key: &str,
+    label: &str,
+) -> Result<Option<HashSet<String>>, String> {
+    let Some(scope) = value.get(key) else {
+        return Ok(None);
+    };
+    if scope.is_null() {
+        return Ok(Some(HashSet::new()));
+    }
+    let items = scope
+        .as_array()
+        .ok_or_else(|| format!("{label} 必须是字符串数组"))?;
+    let mut normalized = HashSet::new();
+    for item in items {
+        let item = item
+            .as_str()
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .ok_or_else(|| format!("{label} 包含无效范围"))?;
+        normalized.insert(item.to_string());
+    }
+    Ok(Some(normalized))
+}
+
+fn runtime_scope_vault(
+    value: &Value,
+    key: &str,
+    label: &str,
+) -> Result<Option<Option<String>>, String> {
+    let Some(scope) = value.get(key) else {
+        return Ok(None);
+    };
+    if scope.is_null() {
+        return Ok(Some(None));
+    }
+    let scope = scope
+        .as_str()
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .ok_or_else(|| format!("{label} 必须是非空字符串或 null"))?;
+    Ok(Some(Some(scope.to_string())))
+}
+
+fn ensure_runtime_child_scope_subset(
+    child_values: &[String],
+    parent_scope: Option<&HashSet<String>>,
+    step_scope: Option<&HashSet<String>>,
+    label: &str,
+) -> Result<(), String> {
+    for child_value in child_values {
+        let child_value = child_value.trim();
+        if child_value.is_empty()
+            || !parent_scope.is_some_and(|allowed| allowed.contains(child_value))
+        {
+            return Err(format!("Runtime 子命令{label}超出父任务授权范围"));
+        }
+        if step_scope.is_some_and(|allowed| !allowed.contains(child_value)) {
+            return Err(format!("Runtime 子命令{label}超出父步骤授权范围"));
+        }
+    }
+    Ok(())
+}
+
+fn runtime_scope_allows_vault(scope: Option<&str>, vault_id: &str) -> bool {
+    scope.is_some_and(|scope| scope == "all" || scope == vault_id)
+}
+
+fn validate_runtime_task_step_child_authority(
+    command: &ApplicationCommand,
+    trace_id: &str,
+    step: &RuntimeTaskPlanStepRecord,
+    parent_task: &NativeRuntimeTask,
+) -> Result<(), String> {
+    if step.step_kind != RuntimeTaskStepKind::Capability {
+        return Err("只有 capability 原生任务步骤可以派发 Runtime 子命令".to_string());
+    }
+    let step_capability = step
+        .parameters
+        .get("capabilityId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "capability 原生任务步骤缺少 capabilityId 授权".to_string())?;
+    if step_capability != command.capability_id {
+        return Err("Runtime 子命令 capabilityId 与父步骤授权不一致".to_string());
+    }
+    let parent_capabilities = runtime_scope_array(
+        &parent_task.payload,
+        "capabilityIds",
+        "父任务 capabilityIds",
+    )?
+    .ok_or_else(|| "父任务缺少 capabilityIds 授权".to_string())?;
+    if !parent_capabilities.contains(command.capability_id.trim()) {
+        return Err("Runtime 子命令 capabilityId 超出父任务授权范围".to_string());
+    }
+
+    let step_operation = step
+        .parameters
+        .get("operation")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "capability 原生任务步骤缺少 operation 授权".to_string())?;
+    if step_operation != command.operation {
+        return Err("Runtime 子命令 operation 与父步骤授权不一致".to_string());
+    }
+    let parent_operation = parent_task
+        .payload
+        .get("operation")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "父任务缺少 operation 授权".to_string())?;
+    if parent_operation != command.operation {
+        return Err("Runtime 子命令 operation 超出父任务授权范围".to_string());
+    }
+
+    let parent_trace_id = parent_task
+        .trace_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "父任务缺少可继承的 Trace".to_string())?;
+    if trace_id != parent_trace_id {
+        return Err("Runtime 子命令 Trace 与父任务不一致".to_string());
+    }
+
+    let parent_vault =
+        runtime_scope_vault(&parent_task.payload, "vaultId", "父任务 vaultId")?.flatten();
+    let step_vault = runtime_scope_vault(&step.parameters, "vaultId", "父步骤 vaultId")?;
+    if let Some(child_vault) = command.vault_id.as_deref().map(str::trim) {
+        if child_vault.is_empty()
+            || !runtime_scope_allows_vault(parent_vault.as_deref(), child_vault)
+        {
+            return Err("Runtime 子命令 Vault 超出父任务授权范围".to_string());
+        }
+        if step_vault
+            .as_ref()
+            .is_some_and(|scope| !runtime_scope_allows_vault(scope.as_deref(), child_vault))
+        {
+            return Err("Runtime 子命令 Vault 超出父步骤授权范围".to_string());
+        }
+    }
+
+    let parent_paths = runtime_scope_array(
+        &parent_task.payload,
+        "relativePaths",
+        "父任务 relativePaths",
+    )?;
+    let step_paths =
+        runtime_scope_array(&step.parameters, "relativePaths", "父步骤 relativePaths")?;
+    ensure_runtime_child_scope_subset(
+        &command.relative_paths,
+        parent_paths.as_ref(),
+        step_paths.as_ref(),
+        "相对路径",
+    )?;
+
+    let parent_network = runtime_scope_array(
+        &parent_task.payload,
+        "networkTargets",
+        "父任务 networkTargets",
+    )?;
+    let step_network =
+        runtime_scope_array(&step.parameters, "networkTargets", "父步骤 networkTargets")?;
+    ensure_runtime_child_scope_subset(
+        &command.network_targets,
+        parent_network.as_ref(),
+        step_network.as_ref(),
+        "网络目标",
+    )?;
+
+    let parent_declared_scope = runtime_scope_array(
+        &parent_task.payload,
+        "declaredScope",
+        "父任务 declaredScope",
+    )?;
+    let step_declared_scope =
+        runtime_scope_array(&step.parameters, "declaredScope", "父步骤 declaredScope")?;
+    ensure_runtime_child_scope_subset(
+        &command.declared_scope,
+        parent_declared_scope.as_ref(),
+        step_declared_scope.as_ref(),
+        "声明范围",
+    )
+}
+
+fn latest_runtime_task_plan_revision(
+    connection: &Connection,
+    workspace_scope: &str,
+    task_id: &str,
+    requested_revision: Option<u64>,
+) -> Result<i64, String> {
+    let latest = connection
+        .query_row(
+            "SELECT revision FROM runtime_task_plans
+             WHERE workspace_scope=?1 AND task_id=?2
+             ORDER BY revision DESC LIMIT 1",
+            params![workspace_scope, task_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| format!("无法读取原生任务计划版本：{error}"))?
+        .ok_or_else(|| "原生任务尚未定义可执行计划".to_string())?;
+    if let Some(requested_revision) = requested_revision {
+        let requested = checked_sqlite_i64(requested_revision, "计划版本")?;
+        if requested != latest {
+            return Err("只能领取当前原生任务计划版本的步骤".to_string());
+        }
+    }
+    Ok(latest)
+}
+
+fn load_runtime_task_plan_step_records(
+    connection: &Connection,
+    workspace_scope: &str,
+    task_id: &str,
+    plan_revision: i64,
+) -> Result<Vec<RuntimeTaskPlanStepRecord>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT step_id, position, step_kind, title, depends_on_json, parameters_json
+             FROM runtime_task_plan_steps
+             WHERE workspace_scope=?1 AND task_id=?2 AND plan_revision=?3
+             ORDER BY position ASC",
+        )
+        .map_err(|error| format!("无法读取原生任务计划步骤：{error}"))?;
+    let rows = statement
+        .query_map(params![workspace_scope, task_id, plan_revision], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })
+        .map_err(|error| format!("无法查询原生任务计划步骤：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法解析原生任务计划步骤：{error}"))?;
+    rows.into_iter()
+        .map(
+            |(step_id, _position, kind, title, depends_on_json, parameters_json)| {
+                let step_kind = RuntimeTaskStepKind::parse(&kind)
+                    .ok_or_else(|| format!("原生任务计划步骤类型无效：{kind}"))?;
+                let depends_on = serde_json::from_str::<Vec<String>>(&depends_on_json)
+                    .map_err(|error| format!("原生任务计划步骤依赖损坏：{error}"))?;
+                let parameters = serde_json::from_str::<Value>(&parameters_json)
+                    .map_err(|error| format!("原生任务计划步骤参数损坏：{error}"))?;
+                Ok(RuntimeTaskPlanStepRecord {
+                    step_id,
+                    effect_class: crate::task_runtime::runtime_task_step_effect_class(
+                        &step_kind,
+                        &parameters,
+                    ),
+                    step_kind,
+                    title,
+                    depends_on,
+                    parameters,
+                })
+            },
+        )
+        .collect()
+}
+
+fn latest_runtime_task_step_states(
+    connection: &Connection,
+    workspace_scope: &str,
+    task_id: &str,
+    plan_revision: i64,
+) -> Result<HashMap<String, (String, RuntimeTaskStepEffectClass)>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT run.step_id, run.state, run.effect_class
+             FROM runtime_task_step_runs run
+             JOIN (
+               SELECT step_id, MAX(attempt) AS attempt
+               FROM runtime_task_step_runs
+               WHERE workspace_scope=?1 AND task_id=?2 AND plan_revision=?3
+               GROUP BY step_id
+             ) latest
+               ON latest.step_id=run.step_id AND latest.attempt=run.attempt
+             WHERE run.workspace_scope=?1 AND run.task_id=?2 AND run.plan_revision=?3",
+        )
+        .map_err(|error| format!("无法读取原生任务步骤运行状态：{error}"))?;
+    let rows = statement
+        .query_map(params![workspace_scope, task_id, plan_revision], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| format!("无法查询原生任务步骤运行状态：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法解析原生任务步骤运行状态：{error}"))?;
+    rows.into_iter()
+        .map(|(step_id, state, effect_class)| {
+            Ok((
+                step_id,
+                (
+                    state,
+                    RuntimeTaskStepEffectClass::parse(&effect_class)
+                        .ok_or_else(|| "原生任务步骤效果分类损坏".to_string())?,
+                ),
+            ))
+        })
+        .collect()
+}
+
+fn expire_runtime_task_step_claims(
+    connection: &Connection,
+    workspace_scope: &str,
+    task_id: &str,
+    plan_revision: i64,
+    now: &str,
+) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT claim_id, step_id, reserved_tool_calls, reserved_runtime_seconds,
+                    reserved_tokens, reserved_cost
+             FROM runtime_task_step_runs
+             WHERE workspace_scope=?1 AND task_id=?2 AND plan_revision=?3
+               AND state='claimed' AND lease_expires_at<=?4",
+        )
+        .map_err(|error| format!("无法读取过期原生任务步骤领取：{error}"))?;
+    let expired = statement
+        .query_map(
+            params![workspace_scope, task_id, plan_revision, now],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, f64>(5)?,
+                ))
+            },
+        )
+        .map_err(|error| format!("无法查询过期原生任务步骤领取：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法解析过期原生任务步骤领取：{error}"))?;
+    drop(statement);
+    for (claim_id, step_id, tool_calls, runtime_seconds, tokens, cost) in expired {
+        let changed = connection
+            .execute(
+                "UPDATE runtime_task_step_runs
+                 SET state='expired', finished_at=?4
+                 WHERE workspace_scope=?1 AND claim_id=?2 AND state='claimed'",
+                params![workspace_scope, claim_id, task_id, now],
+            )
+            .map_err(|error| format!("无法标记过期原生任务步骤领取：{error}"))?;
+        if changed != 1 {
+            continue;
+        }
+        connection
+            .execute(
+                "UPDATE runtime_task_execution_budgets
+                 SET reserved_steps=MAX(0, reserved_steps-1),
+                     reserved_tool_calls=MAX(0, reserved_tool_calls-?4),
+                     reserved_runtime_seconds=MAX(0, reserved_runtime_seconds-?5),
+                     reserved_tokens=MAX(0, reserved_tokens-?6),
+                     reserved_cost=MAX(0, reserved_cost-?7), updated_at=?8
+                 WHERE workspace_scope=?1 AND task_id=?2 AND plan_revision=?3",
+                params![
+                    workspace_scope,
+                    task_id,
+                    plan_revision,
+                    tool_calls,
+                    runtime_seconds,
+                    tokens,
+                    cost,
+                    now,
+                ],
+            )
+            .map_err(|error| format!("无法释放过期原生任务步骤预算：{error}"))?;
+        let output = serde_json::json!({"reason": "lease_expired"});
+        let output_json = canonical_runtime_json_string(&output, "过期步骤回执")?;
+        let receipt_id = format!("receipt-expired-{claim_id}");
+        let content_hash = format!(
+            "sha256:{:x}",
+            Sha256::digest(
+                serde_json::to_string(&serde_json::json!({
+                    "state": "expired",
+                    "output": output,
+                    "error": "lease_expired",
+                    "consumedToolCalls": 0,
+                    "consumedRuntimeSeconds": 0,
+                    "consumedTokens": 0,
+                    "consumedCost": 0.0,
+                }))
+                .map_err(|error| format!("无法序列化过期步骤回执：{error}"))?
+                .as_bytes(),
+            )
+        );
+        connection
+            .execute(
+                "INSERT INTO runtime_task_step_receipts
+                 (workspace_scope, receipt_id, claim_id, task_id, plan_revision, step_id, state,
+                  output_json, error, consumed_tool_calls, consumed_runtime_seconds,
+                  consumed_tokens, consumed_cost, content_hash, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'expired', ?7, 'lease_expired',
+                         0, 0, 0, 0, ?8, ?9)",
+                params![
+                    workspace_scope,
+                    receipt_id,
+                    claim_id,
+                    task_id,
+                    plan_revision,
+                    step_id,
+                    output_json,
+                    content_hash,
+                    now,
+                ],
+            )
+            .map_err(|error| format!("无法保存过期原生任务步骤回执：{error}"))?;
+    }
+    Ok(())
+}
+
+fn ensure_runtime_task_running_for_step_claim(
+    connection: &Connection,
+    workspace_scope: &str,
+    task_id: &str,
+    now: &str,
+) -> Result<(), String> {
+    let current = read_native_runtime_task(connection, workspace_scope, task_id)?;
+    match current.state.as_str() {
+        "running" => Ok(()),
+        "queued" => {
+            let mut payload = current.payload;
+            let object = payload
+                .as_object_mut()
+                .ok_or_else(|| "原生任务负载不是 JSON 对象".to_string())?;
+            object.insert("state".to_string(), Value::String("running".to_string()));
+            object.insert("progress".to_string(), Value::from(current.progress.max(1)));
+            object.insert("updatedAt".to_string(), Value::String(now.to_string()));
+            let payload_json = serde_json::to_string(&payload)
+                .map_err(|error| format!("无法序列化原生任务步骤领取状态：{error}"))?;
+            connection
+                .execute(
+                    "UPDATE runtime_tasks SET state='running', payload=?3, updated_at=?4
+                     WHERE workspace_scope=?1 AND id=?2 AND state='queued'",
+                    params![workspace_scope, task_id, payload_json, now],
+                )
+                .map_err(|error| format!("无法启动原生任务步骤领取：{error}"))?;
+            connection
+                .execute(
+                    "UPDATE runtime_task_attempts SET finished_at=?3
+                     WHERE workspace_scope=?1 AND task_id=?2 AND finished_at IS NULL",
+                    params![workspace_scope, task_id, now],
+                )
+                .map_err(|error| format!("无法结束原生任务排队尝试：{error}"))?;
+            connection
+                .execute(
+                    "INSERT INTO runtime_task_attempts
+                     (id, workspace_scope, task_id, state, detail, started_at)
+                     VALUES (?1, ?2, ?3, 'running', '由步骤执行器原子领取', ?4)",
+                    params![Uuid::new_v4().to_string(), workspace_scope, task_id, now],
+                )
+                .map_err(|error| format!("无法记录原生任务步骤领取尝试：{error}"))?;
+            connection
+                .execute(
+                    "INSERT INTO runtime_task_transitions
+                     (id, workspace_scope, task_id, from_state, to_state, detail, checkpoint_json, created_at)
+                     VALUES (?1, ?2, ?3, 'queued', 'running', '由步骤执行器原子领取', '{}', ?4)",
+                    params![Uuid::new_v4().to_string(), workspace_scope, task_id, now],
+                )
+                .map_err(|error| format!("无法记录原生任务步骤领取转换：{error}"))?;
+            Ok(())
+        }
+        "cancelled" => Err("父任务已取消，不能领取任务步骤".to_string()),
+        _ => Err(format!("原生任务状态 {} 不能领取计划步骤", current.state)),
+    }
+}
+
+fn read_runtime_task_step_receipt(
+    connection: &Connection,
+    workspace_scope: &str,
+    receipt_id: &str,
+) -> Result<Option<RuntimeTaskStepReceipt>, String> {
+    let row = connection
+        .query_row(
+            "SELECT receipt_id, claim_id, task_id, plan_revision, step_id, state,
+                    output_json, error, consumed_tool_calls, consumed_runtime_seconds,
+                    consumed_tokens, consumed_cost, content_hash, created_at
+             FROM runtime_task_step_receipts
+             WHERE workspace_scope=?1 AND receipt_id=?2",
+            params![workspace_scope, receipt_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, f64>(11)?,
+                    row.get::<_, String>(12)?,
+                    row.get::<_, String>(13)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("无法读取原生任务步骤回执：{error}"))?;
+    row.map(
+        |(
+            receipt_id,
+            claim_id,
+            task_id,
+            plan_revision,
+            step_id,
+            state,
+            output_json,
+            error,
+            consumed_tool_calls,
+            consumed_runtime_seconds,
+            consumed_tokens,
+            consumed_cost,
+            content_hash,
+            created_at,
+        )| {
+            Ok(RuntimeTaskStepReceipt {
+                receipt_id,
+                step_claim_id: claim_id,
+                runtime_task_id: task_id,
+                plan_revision: u64::try_from(plan_revision).unwrap_or_default(),
+                step_id,
+                state,
+                output: serde_json::from_str(&output_json)
+                    .map_err(|error| format!("原生任务步骤回执输出损坏：{error}"))?,
+                error,
+                consumed_tool_calls: u64::try_from(consumed_tool_calls).unwrap_or_default(),
+                consumed_runtime_seconds: u64::try_from(consumed_runtime_seconds)
+                    .unwrap_or_default(),
+                consumed_tokens: u64::try_from(consumed_tokens).unwrap_or_default(),
+                consumed_cost,
+                content_hash,
+                created_at,
+            })
+        },
+    )
+    .transpose()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_runtime_step_receipt_evidence(
+    transaction: &Transaction<'_>,
+    workspace_scope: &str,
+    task_id: &str,
+    plan_revision: i64,
+    step_id: &str,
+    claim_id: &str,
+    receipt_id: &str,
+    receipt_content_hash: &str,
+    trace_id: &str,
+    created_at: &str,
+) -> Result<Vec<String>, String> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT requirement_id
+             FROM runtime_task_completion_requirements
+             WHERE workspace_scope=?1 AND task_id=?2 AND plan_revision=?3
+               AND step_id=?4 AND evidence_type='runtime.step_receipt'
+             ORDER BY position ASC",
+        )
+        .map_err(|error| format!("无法读取步骤回执完成要求：{error}"))?;
+    let requirement_ids = statement
+        .query_map(
+            params![workspace_scope, task_id, plan_revision, step_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|error| format!("无法查询步骤回执完成要求：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法解析步骤回执完成要求：{error}"))?;
+    drop(statement);
+    if requirement_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let evidence_count: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM runtime_task_evidence
+             WHERE workspace_scope=?1 AND task_id=?2",
+            params![workspace_scope, task_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("无法统计步骤回执证据：{error}"))?;
+    if evidence_count.saturating_add(requirement_ids.len() as i64)
+        > MAX_RUNTIME_TASK_EVIDENCE as i64
+    {
+        return Err("步骤回执证据将超过单任务 2048 条安全上限".to_string());
+    }
+    let mut evidence_ids = Vec::with_capacity(requirement_ids.len());
+    for requirement_id in requirement_ids {
+        let evidence_seed = format!(
+            "{workspace_scope}\0{task_id}\0{plan_revision}\0{step_id}\0{claim_id}\0{requirement_id}"
+        );
+        let evidence_id = format!(
+            "step-receipt-{:x}",
+            Sha256::digest(evidence_seed.as_bytes())
+        );
+        let payload = serde_json::json!({
+            "receiptId": receipt_id,
+            "stepClaimId": claim_id,
+            "receiptContentHash": receipt_content_hash,
+            "state": "succeeded",
+        });
+        let payload_json = canonical_runtime_json_string(&payload, "步骤回执证据")?;
+        let envelope = serde_json::json!({
+            "planRevision": plan_revision,
+            "requirementId": requirement_id,
+            "evidenceType": "runtime.step_receipt",
+            "sourceKind": "runtime",
+            "sourceRef": receipt_id,
+            "payload": canonical_runtime_json(&payload),
+        });
+        let envelope_json = canonical_runtime_json_string(&envelope, "步骤回执证据封套")?;
+        if envelope_json.len() > MAX_RUNTIME_EVIDENCE_BYTES {
+            return Err("步骤回执证据超过 256 KB 安全上限".to_string());
+        }
+        let evidence_content_hash =
+            format!("sha256:{:x}", Sha256::digest(envelope_json.as_bytes()));
+        transaction
+            .execute(
+                "INSERT INTO runtime_task_evidence
+                 (workspace_scope, task_id, evidence_id, plan_revision, requirement_id, step_id,
+                  evidence_type, source_kind, source_ref, payload_json, content_hash, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'runtime.step_receipt', 'runtime', ?7, ?8, ?9, ?10)",
+                params![
+                    workspace_scope,
+                    task_id,
+                    evidence_id,
+                    plan_revision,
+                    requirement_id,
+                    step_id,
+                    receipt_id,
+                    payload_json,
+                    evidence_content_hash,
+                    created_at,
+                ],
+            )
+            .map_err(|error| format!("无法保存可信步骤回执证据：{error}"))?;
+        crate::trace::record_trace_event_in_connection(
+            transaction,
+            workspace_scope,
+            &crate::trace::TraceEventRecord {
+                trace_id,
+                entity_kind: "runtime_task",
+                entity_id: task_id,
+                event_type: "task.evidence_appended",
+                state: "recorded",
+                payload: &serde_json::json!({
+                    "evidenceId": evidence_id,
+                    "planRevision": plan_revision,
+                    "requirementId": requirement_id,
+                    "evidenceType": "runtime.step_receipt",
+                    "sourceKind": "runtime",
+                    "sourceRef": receipt_id,
+                    "receiptContentHash": receipt_content_hash,
+                    "contentHash": evidence_content_hash,
+                }),
+                created_at,
+            },
+        )?;
+        evidence_ids.push(evidence_id);
+    }
+    Ok(evidence_ids)
+}
+
+fn cancel_runtime_task_step_claims(
+    connection: &Transaction<'_>,
+    workspace_scope: &str,
+    task_id: &str,
+    now: &str,
+) -> Result<(), String> {
+    let mut revision_statement = connection
+        .prepare(
+            "SELECT plan_revision FROM runtime_task_execution_budgets
+             WHERE workspace_scope=?1 AND task_id=?2",
+        )
+        .map_err(|error| format!("无法读取父任务步骤取消栅栏：{error}"))?;
+    let revisions = revision_statement
+        .query_map(params![workspace_scope, task_id], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|error| format!("无法查询父任务步骤取消栅栏：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法解析父任务步骤取消栅栏：{error}"))?;
+    drop(revision_statement);
+    for revision in revisions {
+        let mut run_statement = connection
+            .prepare(
+                "SELECT claim_id, step_id, reserved_tool_calls, reserved_runtime_seconds,
+                        reserved_tokens, reserved_cost
+                 FROM runtime_task_step_runs
+                 WHERE workspace_scope=?1 AND task_id=?2 AND plan_revision=?3 AND state='claimed'",
+            )
+            .map_err(|error| format!("无法读取待取消原生任务步骤领取：{error}"))?;
+        let runs = run_statement
+            .query_map(params![workspace_scope, task_id, revision], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, f64>(5)?,
+                ))
+            })
+            .map_err(|error| format!("无法查询待取消原生任务步骤领取：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法解析待取消原生任务步骤领取：{error}"))?;
+        drop(run_statement);
+        let mut released_tool_calls = 0_i64;
+        let mut released_runtime_seconds = 0_i64;
+        let mut released_tokens = 0_i64;
+        let mut released_cost = 0.0_f64;
+        let mut released_steps = 0_i64;
+        for (claim_id, step_id, tool_calls, runtime_seconds, tokens, cost) in runs {
+            let changed = connection
+                .execute(
+                    "UPDATE runtime_task_step_runs
+                     SET state='cancelled', finished_at=?4
+                     WHERE workspace_scope=?1 AND claim_id=?2 AND state='claimed'",
+                    params![workspace_scope, claim_id, task_id, now],
+                )
+                .map_err(|error| format!("无法取消原生任务步骤领取：{error}"))?;
+            if changed != 1 {
+                continue;
+            }
+            released_steps += 1;
+            released_tool_calls += tool_calls;
+            released_runtime_seconds += runtime_seconds;
+            released_tokens += tokens;
+            released_cost += cost;
+            let output = serde_json::json!({"reason": "parent_task_cancelled"});
+            let output_json = canonical_runtime_json_string(&output, "取消步骤回执")?;
+            let receipt_id = format!("receipt-cancelled-{claim_id}");
+            let content_json = canonical_runtime_json_string(
+                &serde_json::json!({
+                    "state": "cancelled",
+                    "output": output,
+                    "error": "parent_task_cancelled",
+                    "consumedToolCalls": 0,
+                    "consumedRuntimeSeconds": 0,
+                    "consumedTokens": 0,
+                    "consumedCost": 0.0,
+                }),
+                "取消步骤回执",
+            )?;
+            let content_hash = format!("sha256:{:x}", Sha256::digest(content_json.as_bytes()));
+            connection
+                .execute(
+                    "INSERT INTO runtime_task_step_receipts
+                     (workspace_scope, receipt_id, claim_id, task_id, plan_revision, step_id, state,
+                      output_json, error, consumed_tool_calls, consumed_runtime_seconds,
+                      consumed_tokens, consumed_cost, content_hash, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'cancelled', ?7,
+                             'parent_task_cancelled', 0, 0, 0, 0, ?8, ?9)",
+                    params![
+                        workspace_scope,
+                        receipt_id,
+                        claim_id,
+                        task_id,
+                        revision,
+                        step_id,
+                        output_json,
+                        content_hash,
+                        now,
+                    ],
+                )
+                .map_err(|error| format!("无法保存取消原生任务步骤回执：{error}"))?;
+        }
+        connection
+            .execute(
+                "UPDATE runtime_task_execution_budgets
+                 SET reserved_steps=MAX(0, reserved_steps-?4),
+                     reserved_tool_calls=MAX(0, reserved_tool_calls-?5),
+                     reserved_runtime_seconds=MAX(0, reserved_runtime_seconds-?6),
+                     reserved_tokens=MAX(0, reserved_tokens-?7),
+                     reserved_cost=MAX(0, reserved_cost-?8),
+                     cancellation_fence=cancellation_fence+1,
+                     cancelled_at=COALESCE(cancelled_at, ?9), updated_at=?9
+                 WHERE workspace_scope=?1 AND task_id=?2 AND plan_revision=?3",
+                params![
+                    workspace_scope,
+                    task_id,
+                    revision,
+                    released_steps,
+                    released_tool_calls,
+                    released_runtime_seconds,
+                    released_tokens,
+                    released_cost,
+                    now,
+                ],
+            )
+            .map_err(|error| format!("无法提交父任务步骤取消栅栏：{error}"))?;
+    }
+    let mut child_statement = connection
+        .prepare(
+            "SELECT DISTINCT binding.child_task_id
+             FROM runtime_task_step_command_bindings binding
+             JOIN runtime_task_step_runs run
+               ON run.workspace_scope=binding.workspace_scope AND run.claim_id=binding.claim_id
+             WHERE run.workspace_scope=?1 AND run.task_id=?2",
+        )
+        .map_err(|error| format!("无法读取原生任务步骤子任务绑定：{error}"))?;
+    let child_task_ids = child_statement
+        .query_map(params![workspace_scope, task_id], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| format!("无法查询原生任务步骤子任务绑定：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法解析原生任务步骤子任务绑定：{error}"))?;
+    drop(child_statement);
+    for child_task_id in child_task_ids {
+        let child = read_native_runtime_task(connection, workspace_scope, &child_task_id)?;
+        if matches!(child.state.as_str(), "succeeded" | "failed" | "cancelled") {
+            continue;
+        }
+        cancel_runtime_task_step_claims(connection, workspace_scope, &child_task_id, now)?;
+        let mut payload = child.payload;
+        let object = payload
+            .as_object_mut()
+            .ok_or_else(|| "原生任务子任务负载不是 JSON 对象".to_string())?;
+        object.insert("state".to_string(), Value::String("cancelled".to_string()));
+        object.insert("updatedAt".to_string(), Value::String(now.to_string()));
+        object.insert(
+            "result".to_string(),
+            Value::String(format!("父任务 {task_id} 已取消")),
+        );
+        let payload_json = serde_json::to_string(&payload)
+            .map_err(|error| format!("无法序列化取消的原生任务子任务：{error}"))?;
+        connection
+            .execute(
+                "UPDATE runtime_tasks
+                 SET state='cancelled', payload=?3, updated_at=?4
+                 WHERE workspace_scope=?1 AND id=?2
+                   AND state IN ('created', 'queued', 'running', 'awaiting_approval', 'paused')",
+                params![workspace_scope, child_task_id, payload_json, now],
+            )
+            .map_err(|error| format!("无法传播父任务取消到原生子任务：{error}"))?;
+        connection
+            .execute(
+                "UPDATE runtime_task_attempts SET finished_at=?3
+                 WHERE workspace_scope=?1 AND task_id=?2 AND finished_at IS NULL",
+                params![workspace_scope, child_task_id, now],
+            )
+            .map_err(|error| format!("无法结束被取消的原生子任务尝试：{error}"))?;
+        connection
+            .execute(
+                "INSERT INTO runtime_task_attempts
+                 (id, workspace_scope, task_id, state, detail, started_at, finished_at)
+                 VALUES (?1, ?2, ?3, 'cancelled', ?4, ?5, ?5)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    workspace_scope,
+                    child_task_id,
+                    format!("父任务 {task_id} 取消传播"),
+                    now,
+                ],
+            )
+            .map_err(|error| format!("无法记录被取消的原生子任务尝试：{error}"))?;
+        connection
+            .execute(
+                "INSERT INTO runtime_task_transitions
+                 (id, workspace_scope, task_id, from_state, to_state, detail, checkpoint_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 'cancelled', ?5, '{}', ?6)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    workspace_scope,
+                    child_task_id,
+                    child.state,
+                    format!("父任务 {task_id} 取消传播"),
+                    now,
+                ],
+            )
+            .map_err(|error| format!("无法记录原生子任务取消转换：{error}"))?;
+        connection
+            .execute(
+                "UPDATE application_commands SET state='cancelled', updated_at=?3
+                 WHERE workspace_scope=?1 AND task_id=?2 AND state='accepted'",
+                params![workspace_scope, child_task_id, now],
+            )
+            .map_err(|error| format!("无法取消原生子任务应用命令：{error}"))?;
+        let trace_id = child
+            .trace_id
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(crate::trace::new_trace_id);
+        let event = OperationEvent {
+            id: Uuid::new_v4().to_string(),
+            task_id: Some(child_task_id.clone()),
+            trace_id: Some(trace_id.clone()),
+            event_type: "task.state_changed".to_string(),
+            state: "cancelled".to_string(),
+            created_at: now.to_string(),
+            vault_id: payload
+                .get("vaultId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            relative_path: None,
+            detail: format!("父任务 {task_id} 取消传播"),
+        };
+        insert_operation_event_in_transaction(connection, &event)
+            .map_err(|error| format!("无法保存原生子任务取消审计事件：{error}"))?;
+        crate::trace::record_trace_event_in_connection(
+            connection,
+            workspace_scope,
+            &crate::trace::TraceEventRecord {
+                trace_id: &trace_id,
+                entity_kind: "runtime_task",
+                entity_id: &child_task_id,
+                event_type: "task.cancelled_by_parent",
+                state: "cancelled",
+                payload: &serde_json::json!({"parentTaskId": task_id}),
+                created_at: now,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_runtime_task_plan_revision(
+    connection: &Connection,
+    workspace_scope: &str,
+    task_id: &str,
+    revision: i64,
+    plan: &RuntimeTaskPlanInput,
+    plan_json: &str,
+    content_hash: &str,
+    created_at: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO runtime_task_plans
+             (workspace_scope, task_id, revision, schema_version, goal, plan_json, content_hash, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                workspace_scope,
+                task_id,
+                revision,
+                plan.schema_version.trim(),
+                plan.goal.trim(),
+                plan_json,
+                content_hash,
+                created_at,
+            ],
+        )
+        .map_err(|error| format!("无法保存原生任务计划：{error}"))?;
+    for (position, step) in plan.steps.iter().enumerate() {
+        let depends_on_json = serde_json::to_string(&step.depends_on)
+            .map_err(|error| format!("无法序列化计划步骤依赖：{error}"))?;
+        let parameters_json = canonical_runtime_json_string(&step.parameters, "计划步骤参数")?;
+        connection
+            .execute(
+                "INSERT INTO runtime_task_plan_steps
+                 (workspace_scope, task_id, plan_revision, step_id, position, step_kind, title,
+                  depends_on_json, parameters_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    workspace_scope,
+                    task_id,
+                    revision,
+                    step.id.trim(),
+                    position as i64,
+                    step.kind.as_str(),
+                    step.title.trim(),
+                    depends_on_json,
+                    parameters_json,
+                ],
+            )
+            .map_err(|error| format!("无法保存原生任务计划步骤：{error}"))?;
+    }
+    for (position, requirement) in plan.completion_contract.requirements.iter().enumerate() {
+        connection
+            .execute(
+                "INSERT INTO runtime_task_completion_requirements
+                 (workspace_scope, task_id, plan_revision, requirement_id, position, step_id,
+                  evidence_type, minimum_count, description)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    workspace_scope,
+                    task_id,
+                    revision,
+                    requirement.id.trim(),
+                    position as i64,
+                    requirement.step_id.as_deref().map(str::trim),
+                    requirement.evidence_type.trim(),
+                    requirement.minimum_count as i64,
+                    requirement.description.trim(),
+                ],
+            )
+            .map_err(|error| format!("无法保存原生任务完成契约：{error}"))?;
+    }
+    Ok(())
+}
+
+fn runtime_task_plan_from_input(plan: RuntimeTaskPlanInput) -> RuntimeTaskPlan {
+    RuntimeTaskPlan {
+        schema_version: plan.schema_version,
+        goal: plan.goal,
+        steps: plan
+            .steps
+            .into_iter()
+            .map(|step| RuntimeTaskPlanStep {
+                id: step.id,
+                kind: step.kind,
+                title: step.title,
+                depends_on: step.depends_on,
+                parameters: step.parameters,
+            })
+            .collect(),
+        completion_contract: RuntimeTaskCompletionContract {
+            mode: plan.completion_contract.mode,
+            requirements: plan
+                .completion_contract
+                .requirements
+                .into_iter()
+                .map(|requirement| RuntimeTaskCompletionRequirement {
+                    id: requirement.id,
+                    step_id: requirement.step_id,
+                    evidence_type: requirement.evidence_type,
+                    minimum_count: requirement.minimum_count,
+                    description: requirement.description,
+                })
+                .collect(),
+        },
+        metadata: plan.metadata,
+    }
+}
+
+fn evaluate_runtime_task_completion(
+    connection: &Connection,
+    workspace_scope: &str,
+    task_id: &str,
+) -> Result<Option<RuntimeTaskCompletionStatus>, String> {
+    let revision = connection
+        .query_row(
+            "SELECT revision FROM runtime_task_plans
+             WHERE workspace_scope=?1 AND task_id=?2 ORDER BY revision DESC LIMIT 1",
+            params![workspace_scope, task_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| format!("无法读取原生任务完成契约版本：{error}"))?;
+    let Some(revision) = revision else {
+        return Ok(None);
+    };
+    let mut statement = connection
+        .prepare(
+            "SELECT requirement.requirement_id, requirement.description,
+                    requirement.evidence_type, requirement.minimum_count,
+                    COUNT(evidence.evidence_id)
+             FROM runtime_task_completion_requirements requirement
+             LEFT JOIN runtime_task_evidence evidence
+               ON evidence.workspace_scope=requirement.workspace_scope
+              AND evidence.task_id=requirement.task_id
+              AND evidence.plan_revision=requirement.plan_revision
+              AND evidence.requirement_id=requirement.requirement_id
+             WHERE requirement.workspace_scope=?1 AND requirement.task_id=?2
+               AND requirement.plan_revision=?3
+             GROUP BY requirement.requirement_id, requirement.description,
+                      requirement.evidence_type, requirement.minimum_count, requirement.position
+             ORDER BY requirement.position",
+        )
+        .map_err(|error| format!("无法准备原生任务完成契约校验：{error}"))?;
+    let requirements = statement
+        .query_map(params![workspace_scope, task_id, revision], |row| {
+            let required_count = row.get::<_, i64>(3)?.max(0) as usize;
+            let observed_count = row.get::<_, i64>(4)?.max(0) as usize;
+            Ok(RuntimeTaskRequirementStatus {
+                id: row.get(0)?,
+                description: row.get(1)?,
+                evidence_type: row.get(2)?,
+                required_count,
+                observed_count,
+                satisfied: observed_count >= required_count,
+            })
+        })
+        .map_err(|error| format!("无法读取原生任务完成契约校验：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法解析原生任务完成契约校验：{error}"))?;
+    let satisfied =
+        !requirements.is_empty() && requirements.iter().all(|requirement| requirement.satisfied);
+    Ok(Some(RuntimeTaskCompletionStatus {
+        plan_revision: revision.max(0) as u64,
+        satisfied,
+        requirements,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn runtime_task_evidence_from_parts(
+    task_id: &str,
+    evidence_id: &str,
+    plan_revision: i64,
+    requirement_id: &str,
+    step_id: Option<String>,
+    evidence_type: &str,
+    source_kind: &str,
+    source_ref: &str,
+    payload_json: &str,
+    content_hash: &str,
+    created_at: &str,
+) -> Result<RuntimeTaskEvidence, String> {
+    let source_kind = RuntimeTaskEvidenceSourceKind::parse(source_kind)
+        .ok_or_else(|| "原生任务证据来源类型损坏".to_string())?;
+    let payload = serde_json::from_str(payload_json)
+        .map_err(|error| format!("原生任务证据 JSON 损坏：{error}"))?;
+    Ok(RuntimeTaskEvidence {
+        task_id: task_id.to_string(),
+        evidence_id: evidence_id.to_string(),
+        plan_revision: u64::try_from(plan_revision)
+            .map_err(|_| "原生任务证据计划版本损坏".to_string())?,
+        requirement_id: requirement_id.to_string(),
+        step_id,
+        evidence_type: evidence_type.to_string(),
+        source_kind,
+        source_ref: source_ref.to_string(),
+        payload,
+        content_hash: content_hash.to_string(),
+        created_at: created_at.to_string(),
+    })
+}
+
+fn read_runtime_task_contract(
+    connection: &Connection,
+    workspace_scope: &str,
+    task_id: &str,
+) -> Result<Option<RuntimeTaskContractSnapshot>, String> {
+    if !valid_runtime_identifier(task_id, 180) {
+        return Err("原生任务契约 taskId 无效".to_string());
+    }
+    read_native_runtime_task(connection, workspace_scope, task_id)?;
+    let stored_plan = connection
+        .query_row(
+            "SELECT revision, plan_json, content_hash, created_at
+             FROM runtime_task_plans
+             WHERE workspace_scope=?1 AND task_id=?2 ORDER BY revision DESC LIMIT 1",
+            params![workspace_scope, task_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("无法读取原生任务计划：{error}"))?;
+    let Some((revision, plan_json, content_hash, created_at)) = stored_plan else {
+        return Ok(None);
+    };
+    let plan_input = serde_json::from_str::<RuntimeTaskPlanInput>(&plan_json)
+        .map_err(|error| format!("原生任务计划 JSON 损坏：{error}"))?;
+    crate::task_runtime::validate_runtime_task_plan(&plan_input)
+        .map_err(|error| format!("原生任务计划校验失败：{error}"))?;
+    let completion = evaluate_runtime_task_completion(connection, workspace_scope, task_id)?
+        .ok_or_else(|| "原生任务完成契约缺失".to_string())?;
+    if completion.plan_revision != revision.max(0) as u64 {
+        return Err("原生任务计划与完成契约版本不一致".to_string());
+    }
+    let raw_evidence = {
+        let mut statement = connection
+            .prepare(
+                "SELECT evidence_id, plan_revision, requirement_id, step_id, evidence_type,
+                        source_kind, source_ref, payload_json, content_hash, created_at
+                 FROM runtime_task_evidence
+                 WHERE workspace_scope=?1 AND task_id=?2 AND plan_revision=?3
+                 ORDER BY created_at, evidence_id",
+            )
+            .map_err(|error| format!("无法准备原生任务证据查询：{error}"))?;
+        let rows = statement
+            .query_map(params![workspace_scope, task_id, revision], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                ))
+            })
+            .map_err(|error| format!("无法读取原生任务证据：{error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法解析原生任务证据：{error}"))?
+    };
+    let evidence = raw_evidence
+        .into_iter()
+        .map(|item| {
+            runtime_task_evidence_from_parts(
+                task_id, &item.0, item.1, &item.2, item.3, &item.4, &item.5, &item.6, &item.7,
+                &item.8, &item.9,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(RuntimeTaskContractSnapshot {
+        task_id: task_id.to_string(),
+        plan: RuntimeTaskPlanSnapshot {
+            task_id: task_id.to_string(),
+            revision: revision.max(0) as u64,
+            plan: runtime_task_plan_from_input(plan_input),
+            content_hash,
+            created_at,
+        },
+        completion,
+        evidence,
+    }))
+}
+
+fn schedule_occurrence_identifier(
+    schedule_id: &str,
+    schedule_kind: &str,
+    scheduled_for: &str,
+) -> String {
+    let digest = Sha256::digest(
+        format!("yunspire:schedule-occurrence:v1\0{schedule_kind}\0{schedule_id}\0{scheduled_for}")
+            .as_bytes(),
+    );
+    format!("schedule-occurrence-{digest:x}")
+}
+
+fn schedule_task_plan(
+    schedule_id: &str,
+    schedule_kind: &str,
+    occurrence_id: &str,
+    scheduled_for: &str,
+) -> RuntimeTaskPlanInput {
+    RuntimeTaskPlanInput {
+        schema_version: "1.0".to_string(),
+        goal: format!("派发到期{schedule_kind}日程 {schedule_id}"),
+        steps: vec![RuntimeTaskPlanStepInput {
+            id: "dispatch".to_string(),
+            kind: RuntimeTaskStepKind::ScheduleDispatch,
+            title: "派发日程到受策略约束的执行路径".to_string(),
+            depends_on: Vec::new(),
+            parameters: serde_json::json!({
+                "scheduleId": schedule_id,
+                "scheduleKind": schedule_kind,
+                "occurrenceId": occurrence_id,
+                "scheduledFor": scheduled_for,
+            }),
+        }],
+        completion_contract: RuntimeTaskCompletionContractInput {
+            mode: RuntimeTaskCompletionMode::AllOf,
+            requirements: vec![RuntimeTaskCompletionRequirementInput {
+                id: "dispatch-ack".to_string(),
+                step_id: Some("dispatch".to_string()),
+                evidence_type: "schedule.dispatch_ack".to_string(),
+                minimum_count: 1,
+                description: "Renderer 已接收稳定 occurrence 并进入原有策略命令路径".to_string(),
+            }],
+        },
+        metadata: serde_json::json!({
+            "origin": "native_scheduler",
+            "scheduleId": schedule_id,
+            "scheduleKind": schedule_kind,
+            "occurrenceId": occurrence_id,
+            "scheduledFor": scheduled_for,
+        }),
+    }
+}
+
+fn ensure_schedule_occurrence_task(
+    connection: &Connection,
+    ScheduleOccurrenceClaim {
+        workspace_scope,
+        schedule_id,
+        schedule_kind,
+        scheduled_for,
+        schedule_revision,
+        schedule_payload,
+        schedule_payload_hash,
+    }: ScheduleOccurrenceClaim<'_>,
+) -> Result<Option<ScheduleOccurrenceTask>, String> {
+    let occurrence_id = schedule_occurrence_identifier(schedule_id, schedule_kind, scheduled_for);
+    let existing = connection
+        .query_row(
+            "SELECT occurrence.runtime_task_id, task.state, occurrence.schedule_revision, task.payload
+             FROM runtime_schedule_occurrences occurrence
+             JOIN runtime_tasks task
+               ON task.workspace_scope=occurrence.workspace_scope
+              AND task.id=occurrence.runtime_task_id
+             WHERE occurrence.workspace_scope=?1 AND occurrence.occurrence_id=?2",
+            params![workspace_scope, occurrence_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("无法读取日程 occurrence：{error}"))?;
+    if let Some((runtime_task_id, state, occurrence_revision, task_payload_json)) = existing {
+        if matches!(state.as_str(), "succeeded" | "failed" | "cancelled") {
+            return Ok(None);
+        }
+        let mut task_payload = serde_json::from_str::<Value>(&task_payload_json)
+            .map_err(|error| format!("日程 wrapper payload 无法解析：{error}"))?;
+        let existing_snapshot = task_payload.as_object().and_then(|object| {
+            let payload = object.get("schedulePayload")?.clone();
+            let payload_hash = object
+                .get("schedulePayloadHash")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())?;
+            Some((payload, payload_hash.to_string()))
+        });
+        let (payload, payload_hash) = if let Some(snapshot) =
+            read_runtime_schedule_revision_snapshot(
+                connection,
+                workspace_scope,
+                schedule_id,
+                schedule_kind,
+                occurrence_revision,
+            )? {
+            snapshot
+        } else if let Some((payload, payload_hash)) = existing_snapshot {
+            verified_schedule_payload_snapshot(payload, &payload_hash, "日程 wrapper 快照")?
+        } else {
+            return Err(format!(
+                "日程 occurrence 缺少不可变历史快照：{schedule_id}/{schedule_kind}/revision-{occurrence_revision}"
+            ));
+        };
+        let object = task_payload
+            .as_object_mut()
+            .ok_or_else(|| "日程 wrapper payload 必须是 JSON 对象".to_string())?;
+        let mut payload_changed = false;
+        for (key, value) in [
+            ("scheduleId", Value::String(schedule_id.to_string())),
+            ("scheduleKind", Value::String(schedule_kind.to_string())),
+            ("scheduleOccurrenceId", Value::String(occurrence_id.clone())),
+            ("scheduledFor", Value::String(scheduled_for.to_string())),
+            (
+                "scheduleRevision",
+                Value::Number(occurrence_revision.into()),
+            ),
+            ("schedulePayload", payload.clone()),
+            ("schedulePayloadHash", Value::String(payload_hash.clone())),
+        ] {
+            if object.get(key) != Some(&value) {
+                object.insert(key.to_string(), value);
+                payload_changed = true;
+            }
+        }
+        if payload_changed {
+            let now = Utc::now().to_rfc3339();
+            connection
+                .execute(
+                    "UPDATE runtime_tasks SET payload=?3, updated_at=?4
+                     WHERE workspace_scope=?1 AND id=?2",
+                    params![
+                        workspace_scope,
+                        runtime_task_id,
+                        serde_json::to_string(&task_payload)
+                            .map_err(|error| format!("无法序列化日程 wrapper 快照：{error}"))?,
+                        now,
+                    ],
+                )
+                .map_err(|error| format!("无法回填日程 wrapper 快照：{error}"))?;
+        }
+        return Ok(Some(ScheduleOccurrenceTask {
+            occurrence_id,
+            runtime_task_id,
+            schedule_revision: u64::try_from(occurrence_revision).unwrap_or(1),
+            payload,
+            payload_hash,
+        }));
+    }
+    let runtime_task_id = format!("task-{occurrence_id}");
+    let now = Utc::now().to_rfc3339();
+    let trace_id = format!("trace-{occurrence_id}");
+    let title = schedule_payload
+        .get("name")
+        .or_else(|| schedule_payload.get("title"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("到期日程")
+        .chars()
+        .take(240)
+        .collect::<String>();
+    let task_payload = serde_json::json!({
+        "id": &runtime_task_id,
+        "kind": "scheduled_dispatch",
+        "state": "queued",
+        "title": title,
+        "traceId": &trace_id,
+        "progress": 0,
+        "scheduleId": schedule_id,
+        "scheduleKind": schedule_kind,
+        "scheduleOccurrenceId": &occurrence_id,
+        "scheduledFor": scheduled_for,
+        "scheduleRevision": schedule_revision,
+        "schedulePayload": schedule_payload,
+        "schedulePayloadHash": schedule_payload_hash,
+        "createdAt": now,
+        "updatedAt": now,
+    });
+    connection
+        .execute(
+            "INSERT INTO runtime_tasks
+             (workspace_scope, id, state, title, trace_id, payload, created_at, updated_at)
+             VALUES (?1, ?2, 'queued', ?3, ?4, ?5, ?6, ?6)",
+            params![
+                workspace_scope,
+                runtime_task_id,
+                title,
+                trace_id,
+                serde_json::to_string(&task_payload)
+                    .map_err(|error| format!("无法序列化日程原生任务：{error}"))?,
+                now,
+            ],
+        )
+        .map_err(|error| format!("无法创建日程原生任务：{error}"))?;
+    connection
+        .execute(
+            "INSERT INTO runtime_task_attempts
+             (id, workspace_scope, task_id, state, detail, started_at)
+             VALUES (?1, ?2, ?3, 'queued', ?4, ?5)",
+            params![
+                Uuid::new_v4().to_string(),
+                workspace_scope,
+                runtime_task_id,
+                "由原生调度 occurrence 创建",
+                now,
+            ],
+        )
+        .map_err(|error| format!("无法记录日程任务首次尝试：{error}"))?;
+    let plan = schedule_task_plan(schedule_id, schedule_kind, &occurrence_id, scheduled_for);
+    crate::task_runtime::validate_runtime_task_plan(&plan)?;
+    let plan_json = canonical_runtime_json_string(
+        &serde_json::to_value(&plan).map_err(|error| format!("无法序列化日程任务计划：{error}"))?,
+        "日程任务计划",
+    )?;
+    let plan_hash = format!("sha256:{:x}", Sha256::digest(plan_json.as_bytes()));
+    insert_runtime_task_plan_revision(
+        connection,
+        workspace_scope,
+        &runtime_task_id,
+        1,
+        &plan,
+        &plan_json,
+        &plan_hash,
+        &now,
+    )?;
+    ensure_runtime_task_execution_budget(
+        connection,
+        workspace_scope,
+        &runtime_task_id,
+        1,
+        &task_payload,
+        None,
+        &now,
+    )?;
+    connection
+        .execute(
+            "INSERT INTO runtime_schedule_occurrences
+             (workspace_scope, occurrence_id, schedule_id, schedule_kind, scheduled_for,
+              schedule_revision, runtime_task_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                workspace_scope,
+                occurrence_id,
+                schedule_id,
+                schedule_kind,
+                scheduled_for,
+                schedule_revision,
+                runtime_task_id,
+                now,
+            ],
+        )
+        .map_err(|error| format!("无法保存日程 occurrence：{error}"))?;
+    crate::trace::record_trace_event_in_connection(
+        connection,
+        workspace_scope,
+        &crate::trace::TraceEventRecord {
+            trace_id: &trace_id,
+            entity_kind: "runtime_task",
+            entity_id: &runtime_task_id,
+            event_type: "schedule.occurrence_claimed",
+            state: "queued",
+            payload: &serde_json::json!({
+                "scheduleId": schedule_id,
+                "scheduleKind": schedule_kind,
+                "occurrenceId": occurrence_id,
+                "scheduledFor": scheduled_for,
+                "scheduleRevision": schedule_revision,
+            }),
+            created_at: &now,
+        },
+    )?;
+    Ok(Some(ScheduleOccurrenceTask {
+        occurrence_id,
+        runtime_task_id,
+        schedule_revision: u64::try_from(schedule_revision).unwrap_or(1),
+        payload: schedule_payload.clone(),
+        payload_hash: canonical_schedule_payload_hash(schedule_payload_hash),
+    }))
 }
 
 fn map_native_runtime_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<NativeRuntimeTask> {
@@ -4386,6 +10998,152 @@ fn read_native_runtime_task(
         .optional()
         .map_err(|error| format!("无法读取原生任务：{error}"))?
         .ok_or_else(|| "未找到原生任务".to_string())
+}
+
+fn backfill_schedule_occurrence_task_snapshots(
+    connection: &Connection,
+    validate_all: bool,
+) -> Result<(), String> {
+    if !migration_source_table_exists(connection, "runtime_schedule_occurrences")?
+        || !migration_source_table_exists(connection, "runtime_schedule_revisions")?
+    {
+        return Ok(());
+    }
+    let occurrence_filter = if validate_all {
+        ""
+    } else {
+        "WHERE CASE
+           WHEN json_valid(task.payload)=0 THEN 1
+           ELSE (
+             json_type(task.payload, '$.scheduleId') IS NOT 'text' OR
+             json_extract(task.payload, '$.scheduleId') IS NOT occurrence.schedule_id OR
+             json_type(task.payload, '$.scheduleKind') IS NOT 'text' OR
+             json_extract(task.payload, '$.scheduleKind') IS NOT occurrence.schedule_kind OR
+             json_type(task.payload, '$.scheduleOccurrenceId') IS NOT 'text' OR
+             json_extract(task.payload, '$.scheduleOccurrenceId') IS NOT occurrence.occurrence_id OR
+             json_type(task.payload, '$.scheduledFor') IS NOT 'text' OR
+             json_extract(task.payload, '$.scheduledFor') IS NOT occurrence.scheduled_for OR
+             json_type(task.payload, '$.scheduleRevision') IS NOT 'integer' OR
+             json_extract(task.payload, '$.scheduleRevision') IS NOT occurrence.schedule_revision OR
+             json_type(task.payload, '$.schedulePayload') IS NOT 'object' OR
+             json_extract(task.payload, '$.schedulePayload')='{}' OR
+             json_type(task.payload, '$.schedulePayloadHash') IS NOT 'text' OR
+             length(json_extract(task.payload, '$.schedulePayloadHash')) != 71 OR
+             substr(json_extract(task.payload, '$.schedulePayloadHash'), 1, 7) != 'sha256:' OR
+             substr(json_extract(task.payload, '$.schedulePayloadHash'), 8) GLOB '*[^0-9a-f]*' OR
+             EXISTS(
+               SELECT 1 FROM runtime_schedule_revisions revision
+               WHERE revision.workspace_scope=occurrence.workspace_scope
+                 AND revision.schedule_id=occurrence.schedule_id
+                 AND revision.schedule_kind=occurrence.schedule_kind
+                 AND revision.revision=occurrence.schedule_revision
+                 AND revision.payload_hash != json_extract(task.payload, '$.schedulePayloadHash')
+             )
+           )
+         END"
+    };
+    let occurrences = {
+        let query = format!(
+            "SELECT occurrence.workspace_scope, occurrence.occurrence_id,
+                    occurrence.schedule_id, occurrence.schedule_kind,
+                    occurrence.scheduled_for, occurrence.schedule_revision,
+                    occurrence.runtime_task_id, task.payload
+             FROM runtime_schedule_occurrences occurrence
+             JOIN runtime_tasks task
+               ON task.workspace_scope=occurrence.workspace_scope
+              AND task.id=occurrence.runtime_task_id
+             {occurrence_filter}"
+        );
+        let mut statement = connection
+            .prepare(&query)
+            .map_err(|error| format!("无法准备日程 wrapper 快照回填：{error}"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            })
+            .map_err(|error| format!("无法读取日程 wrapper 快照回填记录：{error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法解析日程 wrapper 快照回填记录：{error}"))?
+    };
+    for (
+        workspace_scope,
+        occurrence_id,
+        schedule_id,
+        schedule_kind,
+        scheduled_for,
+        schedule_revision,
+        runtime_task_id,
+        task_payload_json,
+    ) in occurrences
+    {
+        let mut task_payload = serde_json::from_str::<Value>(&task_payload_json)
+            .map_err(|error| format!("日程 wrapper {runtime_task_id} payload 无法解析：{error}"))?;
+        let existing_snapshot = task_payload.as_object().and_then(|object| {
+            let payload = object.get("schedulePayload")?.clone();
+            let payload_hash = object
+                .get("schedulePayloadHash")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())?;
+            Some((payload, payload_hash.to_string()))
+        });
+        let (schedule_payload, schedule_payload_hash) = if let Some(snapshot) =
+            read_runtime_schedule_revision_snapshot(
+                connection,
+                &workspace_scope,
+                &schedule_id,
+                &schedule_kind,
+                schedule_revision,
+            )? {
+            snapshot
+        } else if let Some((payload, payload_hash)) = existing_snapshot {
+            verified_schedule_payload_snapshot(payload, &payload_hash, "日程 wrapper 快照")?
+        } else {
+            return Err(format!(
+                "日程 wrapper {runtime_task_id} 缺少不可变历史快照：{schedule_id}/{schedule_kind}/revision-{schedule_revision}"
+            ));
+        };
+        let object = task_payload
+            .as_object_mut()
+            .ok_or_else(|| format!("日程 wrapper {runtime_task_id} payload 必须是 JSON 对象"))?;
+        let mut changed = false;
+        for (key, value) in [
+            ("scheduleId", Value::String(schedule_id)),
+            ("scheduleKind", Value::String(schedule_kind)),
+            ("scheduleOccurrenceId", Value::String(occurrence_id)),
+            ("scheduledFor", Value::String(scheduled_for)),
+            ("scheduleRevision", Value::Number(schedule_revision.into())),
+            ("schedulePayload", schedule_payload),
+            ("schedulePayloadHash", Value::String(schedule_payload_hash)),
+        ] {
+            if object.get(key) != Some(&value) {
+                object.insert(key.to_string(), value);
+                changed = true;
+            }
+        }
+        if changed {
+            connection
+                .execute(
+                    "UPDATE runtime_tasks SET payload=?3 WHERE workspace_scope=?1 AND id=?2",
+                    params![
+                        workspace_scope,
+                        runtime_task_id,
+                        serde_json::to_string(&task_payload)
+                            .map_err(|error| format!("无法序列化日程 wrapper 快照：{error}"))?,
+                    ],
+                )
+                .map_err(|error| format!("无法回填日程 wrapper 快照：{error}"))?;
+        }
+    }
+    Ok(())
 }
 
 fn add_sqlite_column_if_missing(
@@ -5417,6 +12175,1027 @@ fn run_migrations(connection: &Connection) -> Result<(), String> {
             )
             .map_err(|error| format!("SQLite migration 28 失败：{error}"))?;
     }
+    if version < 29 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS neural_embedding_cache (
+                   workspace_scope TEXT NOT NULL,
+                   provider_id TEXT NOT NULL,
+                   model TEXT NOT NULL,
+                   input_hash TEXT NOT NULL,
+                   dimensions INTEGER NOT NULL CHECK(dimensions > 0 AND dimensions <= 65536),
+                   vector_blob BLOB NOT NULL,
+                   created_at TEXT NOT NULL,
+                   last_used_at TEXT NOT NULL,
+                   PRIMARY KEY(workspace_scope, provider_id, model, input_hash),
+                   FOREIGN KEY(workspace_scope, provider_id)
+                     REFERENCES model_providers(workspace_scope, id) ON DELETE CASCADE
+                 );
+                 CREATE TABLE IF NOT EXISTS note_neural_embeddings (
+                   workspace_scope TEXT NOT NULL,
+                   provider_id TEXT NOT NULL,
+                   model TEXT NOT NULL,
+                   vault_id TEXT NOT NULL,
+                   relative_path TEXT NOT NULL,
+                   content_hash TEXT NOT NULL,
+                   input_hash TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   PRIMARY KEY(workspace_scope, provider_id, model, vault_id, relative_path),
+                   FOREIGN KEY(workspace_scope, provider_id)
+                     REFERENCES model_providers(workspace_scope, id) ON DELETE CASCADE,
+                   FOREIGN KEY(vault_id, relative_path)
+                     REFERENCES note_index(vault_id, relative_path) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_note_neural_embedding_lookup
+                   ON note_neural_embeddings(workspace_scope, provider_id, model, vault_id, content_hash);
+                 CREATE TABLE IF NOT EXISTS neural_embedding_index_state (
+                   workspace_scope TEXT NOT NULL,
+                   provider_id TEXT NOT NULL,
+                   model TEXT NOT NULL,
+                   vault_id TEXT NOT NULL,
+                   state TEXT NOT NULL CHECK(state IN ('pending', 'building', 'ready', 'degraded', 'failed')),
+                   total_notes INTEGER NOT NULL DEFAULT 0 CHECK(total_notes >= 0),
+                   indexed_notes INTEGER NOT NULL DEFAULT 0 CHECK(indexed_notes >= 0),
+                   last_error TEXT,
+                   updated_at TEXT NOT NULL,
+                   PRIMARY KEY(workspace_scope, provider_id, model, vault_id),
+                   FOREIGN KEY(workspace_scope, provider_id)
+                     REFERENCES model_providers(workspace_scope, id) ON DELETE CASCADE
+                 );
+                 PRAGMA user_version=29;
+                 COMMIT;",
+            )
+            .map_err(|error| format!("SQLite migration 29 失败：{error}"))?;
+    }
+    if version < 30 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS creation_resources (
+                   workspace_scope TEXT NOT NULL,
+                   resource_type TEXT NOT NULL CHECK(resource_type IN ('theme', 'component', 'template')),
+                   id TEXT NOT NULL,
+                   revision INTEGER NOT NULL CHECK(revision > 0),
+                   state TEXT NOT NULL CHECK(state IN ('active', 'archived')),
+                   schema_version TEXT NOT NULL CHECK(schema_version='1.0'),
+                   version TEXT NOT NULL,
+                   display_name TEXT NOT NULL,
+                   description TEXT NOT NULL,
+                   manifest_json TEXT NOT NULL,
+                   payload_json TEXT NOT NULL,
+                   content_hash TEXT NOT NULL,
+                   source_ref_ids_json TEXT NOT NULL,
+                   model_run_ids_json TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   PRIMARY KEY(workspace_scope, resource_type, id),
+                   FOREIGN KEY(workspace_scope) REFERENCES local_workspace_scopes(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_creation_resources_active
+                   ON creation_resources(workspace_scope, state, resource_type, updated_at DESC);
+                 CREATE TABLE IF NOT EXISTS creation_resource_revisions (
+                   workspace_scope TEXT NOT NULL,
+                   resource_type TEXT NOT NULL CHECK(resource_type IN ('theme', 'component', 'template')),
+                   resource_id TEXT NOT NULL,
+                   revision INTEGER NOT NULL CHECK(revision > 0),
+                   state TEXT NOT NULL CHECK(state IN ('active', 'archived')),
+                   schema_version TEXT NOT NULL CHECK(schema_version='1.0'),
+                   version TEXT NOT NULL,
+                   display_name TEXT NOT NULL,
+                   description TEXT NOT NULL,
+                   manifest_json TEXT NOT NULL,
+                   payload_json TEXT NOT NULL,
+                   content_hash TEXT NOT NULL,
+                   source_ref_ids_json TEXT NOT NULL,
+                   model_run_ids_json TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   PRIMARY KEY(workspace_scope, resource_type, resource_id, revision),
+                   FOREIGN KEY(workspace_scope, resource_type, resource_id)
+                     REFERENCES creation_resources(workspace_scope, resource_type, id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_creation_resource_revisions
+                   ON creation_resource_revisions(workspace_scope, resource_type, resource_id, revision DESC);
+                 PRAGMA user_version=30;
+                 COMMIT;",
+            )
+            .map_err(|error| format!("SQLite migration 30 失败：{error}"))?;
+    }
+    if version < 31 {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("SQLite migration 31 无法开始事务：{error}"))?;
+        crate::durable_asset::migrate_schema(&transaction)?;
+        transaction
+            .execute_batch("PRAGMA user_version=31;")
+            .map_err(|error| format!("SQLite migration 31 无法更新版本：{error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("SQLite migration 31 失败：{error}"))?;
+    }
+    if version < 32 {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("SQLite migration 32 无法开始事务：{error}"))?;
+        crate::creation::runtime::migrate(&transaction)?;
+        transaction
+            .execute_batch("PRAGMA user_version=32;")
+            .map_err(|error| format!("SQLite migration 32 无法更新版本：{error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("SQLite migration 32 失败：{error}"))?;
+    }
+    if version < 33 {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("SQLite migration 33 无法开始事务：{error}"))?;
+        transaction
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS workspace_messages (
+                   workspace_scope TEXT NOT NULL,
+                   id TEXT NOT NULL,
+                   conversation_id TEXT NOT NULL,
+                   ordinal INTEGER NOT NULL DEFAULT 0 CHECK(ordinal >= 0),
+                   payload_json TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   sync_token TEXT NOT NULL DEFAULT '',
+                   PRIMARY KEY(workspace_scope, id),
+                   FOREIGN KEY(workspace_scope)
+                     REFERENCES local_workspace_scopes(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_workspace_messages_page
+                   ON workspace_messages(workspace_scope, created_at, id);
+                 CREATE INDEX IF NOT EXISTS idx_workspace_messages_conversation
+                   ON workspace_messages(workspace_scope, conversation_id, created_at, id);
+                 CREATE TABLE IF NOT EXISTS assistant_request_messages (
+                   workspace_scope TEXT NOT NULL,
+                   request_id TEXT NOT NULL,
+                   ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+                   payload_json TEXT NOT NULL,
+                   PRIMARY KEY(workspace_scope, request_id, ordinal),
+                   FOREIGN KEY(workspace_scope, request_id)
+                     REFERENCES assistant_requests(workspace_scope, id) ON DELETE CASCADE
+                 );",
+            )
+            .map_err(|error| format!("SQLite migration 33 无法创建消息表：{error}"))?;
+        migrate_embedded_workspace_messages(&transaction)?;
+        migrate_embedded_assistant_request_messages(&transaction)?;
+        transaction
+            .execute_batch("PRAGMA user_version=33;")
+            .map_err(|error| format!("SQLite migration 33 无法更新版本：{error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("SQLite migration 33 失败：{error}"))?;
+    }
+    if version < 34 {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("SQLite migration 34 无法开始事务：{error}"))?;
+        add_sqlite_column_if_missing(
+            &transaction,
+            "runtime_task_recoveries",
+            "plan_revision",
+            "INTEGER",
+        )?;
+        add_sqlite_column_if_missing(
+            &transaction,
+            "runtime_task_recoveries",
+            "completion_satisfied",
+            "INTEGER",
+        )?;
+        add_sqlite_column_if_missing(
+            &transaction,
+            "runtime_task_recoveries",
+            "missing_requirement_ids_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
+        transaction
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS runtime_task_plans (
+                   workspace_scope TEXT NOT NULL,
+                   task_id TEXT NOT NULL,
+                   revision INTEGER NOT NULL CHECK(revision > 0),
+                   schema_version TEXT NOT NULL CHECK(schema_version='1.0'),
+                   goal TEXT NOT NULL,
+                   plan_json TEXT NOT NULL,
+                   content_hash TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   PRIMARY KEY(workspace_scope, task_id, revision),
+                   FOREIGN KEY(workspace_scope, task_id)
+                     REFERENCES runtime_tasks(workspace_scope, id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_runtime_task_plans_latest
+                   ON runtime_task_plans(workspace_scope, task_id, revision DESC);
+                 CREATE TABLE IF NOT EXISTS runtime_task_plan_steps (
+                   workspace_scope TEXT NOT NULL,
+                   task_id TEXT NOT NULL,
+                   plan_revision INTEGER NOT NULL,
+                   step_id TEXT NOT NULL,
+                   position INTEGER NOT NULL CHECK(position >= 0),
+                   step_kind TEXT NOT NULL CHECK(step_kind IN (
+                     'model', 'capability', 'approval', 'verification', 'checkpoint', 'schedule_dispatch'
+                   )),
+                   title TEXT NOT NULL,
+                   depends_on_json TEXT NOT NULL,
+                   parameters_json TEXT NOT NULL,
+                   PRIMARY KEY(workspace_scope, task_id, plan_revision, step_id),
+                   UNIQUE(workspace_scope, task_id, plan_revision, position),
+                   FOREIGN KEY(workspace_scope, task_id, plan_revision)
+                     REFERENCES runtime_task_plans(workspace_scope, task_id, revision) ON DELETE CASCADE
+                 );
+                 CREATE TABLE IF NOT EXISTS runtime_task_completion_requirements (
+                   workspace_scope TEXT NOT NULL,
+                   task_id TEXT NOT NULL,
+                   plan_revision INTEGER NOT NULL,
+                   requirement_id TEXT NOT NULL,
+                   position INTEGER NOT NULL CHECK(position >= 0),
+                   step_id TEXT,
+                   evidence_type TEXT NOT NULL,
+                   minimum_count INTEGER NOT NULL CHECK(minimum_count > 0),
+                   description TEXT NOT NULL,
+                   PRIMARY KEY(workspace_scope, task_id, plan_revision, requirement_id),
+                   UNIQUE(workspace_scope, task_id, plan_revision, position),
+                   FOREIGN KEY(workspace_scope, task_id, plan_revision)
+                     REFERENCES runtime_task_plans(workspace_scope, task_id, revision) ON DELETE CASCADE,
+                   FOREIGN KEY(workspace_scope, task_id, plan_revision, step_id)
+                     REFERENCES runtime_task_plan_steps(workspace_scope, task_id, plan_revision, step_id)
+                 );
+                 CREATE TABLE IF NOT EXISTS runtime_task_evidence (
+                   workspace_scope TEXT NOT NULL,
+                   task_id TEXT NOT NULL,
+                   evidence_id TEXT NOT NULL,
+                   plan_revision INTEGER NOT NULL,
+                   requirement_id TEXT NOT NULL,
+                   step_id TEXT,
+                   evidence_type TEXT NOT NULL,
+                   source_kind TEXT NOT NULL CHECK(source_kind IN (
+                     'runtime', 'operation_event', 'inbound_content', 'vault_commit',
+                     'model_receipt', 'user_approval', 'scheduler', 'verification'
+                   )),
+                   source_ref TEXT NOT NULL,
+                   payload_json TEXT NOT NULL,
+                   content_hash TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   PRIMARY KEY(workspace_scope, task_id, evidence_id),
+                   FOREIGN KEY(workspace_scope, task_id, plan_revision, requirement_id)
+                     REFERENCES runtime_task_completion_requirements(
+                       workspace_scope, task_id, plan_revision, requirement_id
+                     ) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_runtime_task_evidence_requirement
+                   ON runtime_task_evidence(
+                     workspace_scope, task_id, plan_revision, requirement_id, created_at
+                   );
+                 CREATE TRIGGER IF NOT EXISTS runtime_task_plans_immutable_update
+                   BEFORE UPDATE ON runtime_task_plans
+                   BEGIN SELECT RAISE(ABORT, 'runtime task plan revisions are immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS runtime_task_plan_steps_immutable_update
+                   BEFORE UPDATE ON runtime_task_plan_steps
+                   BEGIN SELECT RAISE(ABORT, 'runtime task plan steps are immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS runtime_task_requirements_immutable_update
+                   BEFORE UPDATE ON runtime_task_completion_requirements
+                   BEGIN SELECT RAISE(ABORT, 'runtime task completion requirements are immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS runtime_task_evidence_immutable_update
+                   BEFORE UPDATE ON runtime_task_evidence
+                   BEGIN SELECT RAISE(ABORT, 'runtime task evidence is immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS runtime_task_plans_immutable_delete
+                   BEFORE DELETE ON runtime_task_plans
+                   WHEN EXISTS(
+                     SELECT 1 FROM runtime_tasks task
+                     WHERE task.workspace_scope=OLD.workspace_scope AND task.id=OLD.task_id
+                   )
+                   BEGIN SELECT RAISE(ABORT, 'runtime task plan revisions are immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS runtime_task_plan_steps_immutable_delete
+                   BEFORE DELETE ON runtime_task_plan_steps
+                   WHEN EXISTS(
+                     SELECT 1 FROM runtime_tasks task
+                     WHERE task.workspace_scope=OLD.workspace_scope AND task.id=OLD.task_id
+                   )
+                   BEGIN SELECT RAISE(ABORT, 'runtime task plan steps are immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS runtime_task_requirements_immutable_delete
+                   BEFORE DELETE ON runtime_task_completion_requirements
+                   WHEN EXISTS(
+                     SELECT 1 FROM runtime_tasks task
+                     WHERE task.workspace_scope=OLD.workspace_scope AND task.id=OLD.task_id
+                   )
+                   BEGIN SELECT RAISE(ABORT, 'runtime task completion requirements are immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS runtime_task_evidence_immutable_delete
+                   BEFORE DELETE ON runtime_task_evidence
+                   WHEN EXISTS(
+                     SELECT 1 FROM runtime_tasks task
+                     WHERE task.workspace_scope=OLD.workspace_scope AND task.id=OLD.task_id
+                   )
+                   BEGIN SELECT RAISE(ABORT, 'runtime task evidence is immutable'); END;
+                 CREATE TABLE IF NOT EXISTS runtime_schedule_occurrences (
+                   workspace_scope TEXT NOT NULL,
+                   occurrence_id TEXT NOT NULL,
+                   schedule_id TEXT NOT NULL,
+                   schedule_kind TEXT NOT NULL CHECK(schedule_kind IN ('collection', 'report')),
+                   scheduled_for TEXT NOT NULL,
+                   schedule_revision INTEGER NOT NULL CHECK(schedule_revision > 0),
+                   runtime_task_id TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   PRIMARY KEY(workspace_scope, occurrence_id),
+                   UNIQUE(workspace_scope, schedule_id, schedule_kind, scheduled_for),
+                   UNIQUE(workspace_scope, runtime_task_id),
+                   FOREIGN KEY(workspace_scope, runtime_task_id)
+                     REFERENCES runtime_tasks(workspace_scope, id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_runtime_schedule_occurrences_schedule
+                   ON runtime_schedule_occurrences(
+                     workspace_scope, schedule_id, schedule_kind, scheduled_for DESC
+                   );",
+            )
+            .map_err(|error| format!("SQLite migration 34 无法创建任务契约表：{error}"))?;
+        transaction
+            .execute_batch("PRAGMA user_version=34;")
+            .map_err(|error| format!("SQLite migration 34 无法更新版本：{error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("SQLite migration 34 失败：{error}"))?;
+    }
+    if version < 35 {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("SQLite migration 35 无法开始事务：{error}"))?;
+        transaction
+            .execute_batch(
+                "CREATE TRIGGER IF NOT EXISTS runtime_task_plan_steps_immutable_update
+                   BEFORE UPDATE ON runtime_task_plan_steps
+                   BEGIN SELECT RAISE(ABORT, 'runtime task plan steps are immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS runtime_task_requirements_immutable_update
+                   BEFORE UPDATE ON runtime_task_completion_requirements
+                   BEGIN SELECT RAISE(ABORT, 'runtime task completion requirements are immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS runtime_task_plans_immutable_delete
+                   BEFORE DELETE ON runtime_task_plans
+                   WHEN EXISTS(
+                     SELECT 1 FROM runtime_tasks task
+                     WHERE task.workspace_scope=OLD.workspace_scope AND task.id=OLD.task_id
+                   )
+                   BEGIN SELECT RAISE(ABORT, 'runtime task plan revisions are immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS runtime_task_plan_steps_immutable_delete
+                   BEFORE DELETE ON runtime_task_plan_steps
+                   WHEN EXISTS(
+                     SELECT 1 FROM runtime_tasks task
+                     WHERE task.workspace_scope=OLD.workspace_scope AND task.id=OLD.task_id
+                   )
+                   BEGIN SELECT RAISE(ABORT, 'runtime task plan steps are immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS runtime_task_requirements_immutable_delete
+                   BEFORE DELETE ON runtime_task_completion_requirements
+                   WHEN EXISTS(
+                     SELECT 1 FROM runtime_tasks task
+                     WHERE task.workspace_scope=OLD.workspace_scope AND task.id=OLD.task_id
+                   )
+                   BEGIN SELECT RAISE(ABORT, 'runtime task completion requirements are immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS runtime_task_evidence_immutable_delete
+                   BEFORE DELETE ON runtime_task_evidence
+                   WHEN EXISTS(
+                     SELECT 1 FROM runtime_tasks task
+                     WHERE task.workspace_scope=OLD.workspace_scope AND task.id=OLD.task_id
+                   )
+                   BEGIN SELECT RAISE(ABORT, 'runtime task evidence is immutable'); END;
+                 DROP INDEX IF EXISTS idx_runtime_schedule_occurrences_schedule;
+                 ALTER TABLE runtime_schedule_occurrences
+                   RENAME TO runtime_schedule_occurrences_v34;
+                 CREATE TABLE runtime_schedule_occurrences (
+                   workspace_scope TEXT NOT NULL,
+                   occurrence_id TEXT NOT NULL,
+                   schedule_id TEXT NOT NULL,
+                   schedule_kind TEXT NOT NULL CHECK(schedule_kind IN ('collection', 'report')),
+                   scheduled_for TEXT NOT NULL,
+                   schedule_revision INTEGER NOT NULL CHECK(schedule_revision > 0),
+                   runtime_task_id TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   PRIMARY KEY(workspace_scope, occurrence_id),
+                   UNIQUE(workspace_scope, schedule_id, schedule_kind, scheduled_for),
+                   UNIQUE(workspace_scope, runtime_task_id),
+                   FOREIGN KEY(workspace_scope, runtime_task_id)
+                     REFERENCES runtime_tasks(workspace_scope, id) ON DELETE CASCADE
+                 );
+                 INSERT INTO runtime_schedule_occurrences
+                   (workspace_scope, occurrence_id, schedule_id, schedule_kind, scheduled_for,
+                    schedule_revision, runtime_task_id, created_at)
+                 SELECT workspace_scope, occurrence_id, schedule_id, schedule_kind, scheduled_for,
+                        schedule_revision, runtime_task_id, created_at
+                 FROM runtime_schedule_occurrences_v34;
+                 DROP TABLE runtime_schedule_occurrences_v34;
+                 CREATE INDEX idx_runtime_schedule_occurrences_schedule
+                   ON runtime_schedule_occurrences(
+                     workspace_scope, schedule_id, schedule_kind, scheduled_for DESC
+                   );
+                 PRAGMA user_version=35;",
+            )
+            .map_err(|error| format!("SQLite migration 35 无法强化任务契约与 occurrence：{error}"))?;
+        backfill_schedule_occurrence_task_snapshots(&transaction, true)?;
+        transaction
+            .commit()
+            .map_err(|error| format!("SQLite migration 35 失败：{error}"))?;
+    } else {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("无法开始日程 wrapper 快照回填事务：{error}"))?;
+        backfill_schedule_occurrence_task_snapshots(&transaction, false)?;
+        transaction
+            .commit()
+            .map_err(|error| format!("日程 wrapper 快照回填失败：{error}"))?;
+    }
+    if version < 36 {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("SQLite migration 36 无法开始事务：{error}"))?;
+        transaction
+            .execute_batch(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS workspace_message_fts USING fts5(
+                   workspace_scope UNINDEXED,
+                   conversation_id UNINDEXED,
+                   message_id UNINDEXED,
+                   role UNINDEXED,
+                   content,
+                   cjk_terms,
+                   tokenize='unicode61'
+                 );",
+            )
+            .map_err(|error| format!("SQLite migration 36 无法创建消息全文索引：{error}"))?;
+        backfill_workspace_message_fts(&transaction)?;
+        transaction
+            .execute_batch("PRAGMA user_version=36;")
+            .map_err(|error| format!("SQLite migration 36 无法更新版本：{error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("SQLite migration 36 失败：{error}"))?;
+    }
+    if version < 37 {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("SQLite migration 37 无法开始事务：{error}"))?;
+        transaction
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS runtime_task_execution_budgets (
+                   workspace_scope TEXT NOT NULL,
+                   task_id TEXT NOT NULL,
+                   plan_revision INTEGER NOT NULL CHECK(plan_revision > 0),
+                   max_steps INTEGER NOT NULL CHECK(max_steps > 0),
+                   max_tool_calls INTEGER NOT NULL CHECK(max_tool_calls >= 0),
+                   max_runtime_seconds INTEGER NOT NULL CHECK(max_runtime_seconds > 0),
+                   max_tokens INTEGER CHECK(max_tokens IS NULL OR max_tokens >= 0),
+                   max_cost REAL CHECK(max_cost IS NULL OR max_cost >= 0),
+                   reserved_steps INTEGER NOT NULL DEFAULT 0 CHECK(reserved_steps >= 0),
+                   reserved_tool_calls INTEGER NOT NULL DEFAULT 0 CHECK(reserved_tool_calls >= 0),
+                   reserved_runtime_seconds INTEGER NOT NULL DEFAULT 0 CHECK(reserved_runtime_seconds >= 0),
+                   reserved_tokens INTEGER NOT NULL DEFAULT 0 CHECK(reserved_tokens >= 0),
+                   reserved_cost REAL NOT NULL DEFAULT 0 CHECK(reserved_cost >= 0),
+                   consumed_steps INTEGER NOT NULL DEFAULT 0 CHECK(consumed_steps >= 0),
+                   consumed_tool_calls INTEGER NOT NULL DEFAULT 0 CHECK(consumed_tool_calls >= 0),
+                   consumed_runtime_seconds INTEGER NOT NULL DEFAULT 0 CHECK(consumed_runtime_seconds >= 0),
+                   consumed_tokens INTEGER NOT NULL DEFAULT 0 CHECK(consumed_tokens >= 0),
+                   consumed_cost REAL NOT NULL DEFAULT 0 CHECK(consumed_cost >= 0),
+                   cancellation_fence INTEGER NOT NULL DEFAULT 0 CHECK(cancellation_fence >= 0),
+                   cancelled_at TEXT,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   PRIMARY KEY(workspace_scope, task_id, plan_revision),
+                   FOREIGN KEY(workspace_scope, task_id, plan_revision)
+                     REFERENCES runtime_task_plans(workspace_scope, task_id, revision) ON DELETE CASCADE,
+                   CHECK(reserved_steps + consumed_steps <= max_steps),
+                   CHECK(reserved_tool_calls + consumed_tool_calls <= max_tool_calls),
+                   CHECK(reserved_runtime_seconds + consumed_runtime_seconds <= max_runtime_seconds),
+                   CHECK(max_tokens IS NULL OR reserved_tokens + consumed_tokens <= max_tokens),
+                   CHECK(max_cost IS NULL OR reserved_cost + consumed_cost <= max_cost)
+                 );
+                 CREATE TABLE IF NOT EXISTS runtime_task_step_runs (
+                   workspace_scope TEXT NOT NULL,
+                   claim_id TEXT NOT NULL,
+                   task_id TEXT NOT NULL,
+                   plan_revision INTEGER NOT NULL CHECK(plan_revision > 0),
+                   step_id TEXT NOT NULL,
+                   attempt INTEGER NOT NULL CHECK(attempt > 0),
+                   effect_class TEXT NOT NULL CHECK(effect_class IN ('read_only', 'effectful')),
+                   state TEXT NOT NULL CHECK(state IN ('claimed', 'succeeded', 'failed', 'cancelled', 'expired')),
+                   lease_owner TEXT NOT NULL,
+                   lease_expires_at TEXT NOT NULL,
+                   reserved_tool_calls INTEGER NOT NULL CHECK(reserved_tool_calls >= 0),
+                   reserved_runtime_seconds INTEGER NOT NULL CHECK(reserved_runtime_seconds >= 0),
+                   reserved_tokens INTEGER NOT NULL CHECK(reserved_tokens >= 0),
+                   reserved_cost REAL NOT NULL CHECK(reserved_cost >= 0),
+                   cancellation_fence INTEGER NOT NULL CHECK(cancellation_fence >= 0),
+                   claimed_at TEXT NOT NULL,
+                   finished_at TEXT,
+                   PRIMARY KEY(workspace_scope, claim_id),
+                   UNIQUE(workspace_scope, task_id, plan_revision, step_id, attempt),
+                   FOREIGN KEY(workspace_scope, task_id, plan_revision, step_id)
+                     REFERENCES runtime_task_plan_steps(
+                       workspace_scope, task_id, plan_revision, step_id
+                     ) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_runtime_task_step_runs_frontier
+                   ON runtime_task_step_runs(
+                     workspace_scope, task_id, plan_revision, state, lease_expires_at
+                   );
+                 CREATE TRIGGER IF NOT EXISTS runtime_task_step_runs_identity_immutable
+                   BEFORE UPDATE ON runtime_task_step_runs
+                   WHEN OLD.workspace_scope != NEW.workspace_scope
+                     OR OLD.claim_id != NEW.claim_id
+                     OR OLD.task_id != NEW.task_id
+                     OR OLD.plan_revision != NEW.plan_revision
+                     OR OLD.step_id != NEW.step_id
+                     OR OLD.attempt != NEW.attempt
+                     OR OLD.effect_class != NEW.effect_class
+                     OR OLD.cancellation_fence != NEW.cancellation_fence
+                   BEGIN SELECT RAISE(ABORT, 'runtime task step run identity is immutable'); END;
+                 CREATE TABLE IF NOT EXISTS runtime_task_step_receipts (
+                   workspace_scope TEXT NOT NULL,
+                   receipt_id TEXT NOT NULL,
+                   claim_id TEXT NOT NULL,
+                   task_id TEXT NOT NULL,
+                   plan_revision INTEGER NOT NULL CHECK(plan_revision > 0),
+                   step_id TEXT NOT NULL,
+                   state TEXT NOT NULL CHECK(state IN ('succeeded', 'failed', 'cancelled', 'expired')),
+                   output_json TEXT NOT NULL,
+                   error TEXT,
+                   consumed_tool_calls INTEGER NOT NULL CHECK(consumed_tool_calls >= 0),
+                   consumed_runtime_seconds INTEGER NOT NULL CHECK(consumed_runtime_seconds >= 0),
+                   consumed_tokens INTEGER NOT NULL CHECK(consumed_tokens >= 0),
+                   consumed_cost REAL NOT NULL CHECK(consumed_cost >= 0),
+                   content_hash TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   PRIMARY KEY(workspace_scope, receipt_id),
+                   UNIQUE(workspace_scope, claim_id),
+                   FOREIGN KEY(workspace_scope, claim_id)
+                     REFERENCES runtime_task_step_runs(workspace_scope, claim_id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_runtime_task_step_receipts_task
+                   ON runtime_task_step_receipts(
+                     workspace_scope, task_id, plan_revision, step_id, created_at
+                   );
+                 CREATE TRIGGER IF NOT EXISTS runtime_task_step_receipts_immutable_update
+                   BEFORE UPDATE ON runtime_task_step_receipts
+                   BEGIN SELECT RAISE(ABORT, 'runtime task step receipts are immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS runtime_task_step_receipts_immutable_delete
+                   BEFORE DELETE ON runtime_task_step_receipts
+                   WHEN EXISTS(
+                     SELECT 1 FROM runtime_task_step_runs run
+                     WHERE run.workspace_scope=OLD.workspace_scope AND run.claim_id=OLD.claim_id
+                   )
+                   BEGIN SELECT RAISE(ABORT, 'runtime task step receipts are immutable'); END;
+                 CREATE TABLE IF NOT EXISTS runtime_task_step_command_bindings (
+                   workspace_scope TEXT NOT NULL,
+                   claim_id TEXT NOT NULL,
+                   command_id TEXT NOT NULL,
+                   child_task_id TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   PRIMARY KEY(workspace_scope, claim_id),
+                   UNIQUE(workspace_scope, command_id),
+                   FOREIGN KEY(workspace_scope, claim_id)
+                     REFERENCES runtime_task_step_runs(workspace_scope, claim_id) ON DELETE CASCADE,
+                   FOREIGN KEY(workspace_scope, command_id)
+                     REFERENCES application_commands(workspace_scope, id) ON DELETE CASCADE,
+                   FOREIGN KEY(workspace_scope, child_task_id)
+                     REFERENCES runtime_tasks(workspace_scope, id) ON DELETE CASCADE
+                 );
+                 CREATE TRIGGER IF NOT EXISTS runtime_task_step_command_bindings_immutable_update
+                   BEFORE UPDATE ON runtime_task_step_command_bindings
+                   BEGIN SELECT RAISE(ABORT, 'runtime task step command bindings are immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS runtime_task_step_command_bindings_immutable_delete
+                   BEFORE DELETE ON runtime_task_step_command_bindings
+                   WHEN EXISTS(
+                     SELECT 1 FROM runtime_task_step_runs run
+                     WHERE run.workspace_scope=OLD.workspace_scope AND run.claim_id=OLD.claim_id
+                   )
+                   BEGIN SELECT RAISE(ABORT, 'runtime task step command bindings are immutable'); END;
+                 INSERT OR IGNORE INTO runtime_task_execution_budgets
+                   (workspace_scope, task_id, plan_revision, max_steps, max_tool_calls,
+                    max_runtime_seconds, max_tokens, max_cost, created_at, updated_at)
+                 SELECT plan.workspace_scope, plan.task_id, plan.revision,
+                        MAX(
+                          (SELECT COUNT(*) FROM runtime_task_plan_steps step
+                           WHERE step.workspace_scope=plan.workspace_scope
+                             AND step.task_id=plan.task_id
+                             AND step.plan_revision=plan.revision),
+                          CASE WHEN json_type(task.payload, '$.budget.maxSteps')='integer'
+                               THEN json_extract(task.payload, '$.budget.maxSteps') ELSE 1 END
+                        ),
+                        CASE WHEN json_type(task.payload, '$.budget.maxToolCalls')='integer'
+                             THEN json_extract(task.payload, '$.budget.maxToolCalls')
+                             ELSE (SELECT COUNT(*) FROM runtime_task_plan_steps step
+                                   WHERE step.workspace_scope=plan.workspace_scope
+                                     AND step.task_id=plan.task_id
+                                     AND step.plan_revision=plan.revision) END,
+                        CASE WHEN json_type(task.payload, '$.budget.maxRuntimeSeconds')='integer'
+                             THEN json_extract(task.payload, '$.budget.maxRuntimeSeconds') ELSE 3600 END,
+                        CASE WHEN json_type(task.payload, '$.budget.maxTokens')='integer'
+                             THEN json_extract(task.payload, '$.budget.maxTokens') END,
+                        CASE WHEN json_type(task.payload, '$.budget.maxCost') IN ('integer', 'real')
+                             THEN json_extract(task.payload, '$.budget.maxCost') END,
+                        plan.created_at, plan.created_at
+                 FROM runtime_task_plans plan
+                 JOIN runtime_tasks task
+                   ON task.workspace_scope=plan.workspace_scope AND task.id=plan.task_id
+                 WHERE plan.revision=(
+                   SELECT MAX(latest.revision) FROM runtime_task_plans latest
+                   WHERE latest.workspace_scope=plan.workspace_scope AND latest.task_id=plan.task_id
+                 );
+                 PRAGMA user_version=37;",
+            )
+            .map_err(|error| format!("SQLite migration 37 无法创建任务步骤运行表：{error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("SQLite migration 37 失败：{error}"))?;
+    }
+    if version < 38 {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("SQLite migration 38 无法开始事务：{error}"))?;
+        crate::memory::migrate_reflection_schema(&transaction)?;
+        crate::skill_lifecycle::migrate_effect_schema(&transaction)?;
+        transaction
+            .execute_batch("PRAGMA user_version=38;")
+            .map_err(|error| format!("SQLite migration 38 无法更新版本：{error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("SQLite migration 38 失败：{error}"))?;
+    }
+    if version < 39 {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("SQLite migration 39 无法开始事务：{error}"))?;
+        crate::memory::migrate_reflection_optimization_schema(&transaction)?;
+        transaction
+            .execute_batch("PRAGMA user_version=39;")
+            .map_err(|error| format!("SQLite migration 39 无法更新版本：{error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("SQLite migration 39 失败：{error}"))?;
+    }
+    if version < 40 {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("SQLite migration 40 无法开始事务：{error}"))?;
+        add_sqlite_column_if_missing(
+            &transaction,
+            "runtime_task_recoveries",
+            "replacement_key",
+            "TEXT",
+        )?;
+        add_sqlite_column_if_missing(
+            &transaction,
+            "runtime_task_recoveries",
+            "replacement_task_id",
+            "TEXT",
+        )?;
+        transaction
+            .execute_batch(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_task_recoveries_replacement_key
+                   ON runtime_task_recoveries(workspace_scope, replacement_key)
+                   WHERE replacement_key IS NOT NULL;
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_task_recoveries_replacement_task
+                   ON runtime_task_recoveries(workspace_scope, replacement_task_id)
+                   WHERE replacement_task_id IS NOT NULL;
+                 PRAGMA user_version=40;",
+            )
+            .map_err(|error| format!("SQLite migration 40 无法创建恢复替换索引：{error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("SQLite migration 40 失败：{error}"))?;
+    }
+    if version < 41 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS runtime_effect_mutation_results (
+                   workspace_scope TEXT NOT NULL,
+                   command_id TEXT NOT NULL,
+                   handler_kind TEXT NOT NULL,
+                   request_hash TEXT NOT NULL,
+                   result_json TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   PRIMARY KEY(workspace_scope, command_id, handler_kind),
+                   FOREIGN KEY(workspace_scope, command_id)
+                     REFERENCES application_commands(workspace_scope, id) ON DELETE CASCADE
+                 );
+                 CREATE TRIGGER IF NOT EXISTS runtime_effect_mutation_results_immutable_update
+                   BEFORE UPDATE ON runtime_effect_mutation_results
+                   BEGIN SELECT RAISE(ABORT, 'runtime effect mutation results are immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS runtime_effect_mutation_results_immutable_delete
+                   BEFORE DELETE ON runtime_effect_mutation_results
+                   WHEN EXISTS(
+                     SELECT 1 FROM application_commands command
+                     WHERE command.workspace_scope=OLD.workspace_scope
+                       AND command.id=OLD.command_id
+                   )
+                   BEGIN SELECT RAISE(ABORT, 'runtime effect mutation results are immutable'); END;
+                 PRAGMA user_version=41;
+                 COMMIT;",
+            )
+            .map_err(|error| format!("SQLite migration 41 失败：{error}"))?;
+    }
+    Ok(())
+}
+
+fn workspace_message_fields(
+    message: &Value,
+    ordinal: usize,
+    fallback_created_at: &str,
+) -> Result<(String, String, String, String), String> {
+    let id = message
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "消息缺少字段 id".to_string())?
+        .to_string();
+    let conversation_id = message
+        .get("conversationId")
+        .or_else(|| message.get("conversation_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("local-conversation")
+        .to_string();
+    let created_at = message
+        .get("createdAt")
+        .or_else(|| message.get("created_at"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback_created_at)
+        .to_string();
+    let payload_json = serde_json::to_string(message)
+        .map_err(|error| format!("无法序列化消息 {ordinal}：{error}"))?;
+    Ok((id, conversation_id, created_at, payload_json))
+}
+
+fn workspace_message_search_fields(message: &Value) -> (String, String) {
+    let role = message
+        .get("role")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown")
+        .to_string();
+    let content = message
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .nfc()
+        .collect::<String>();
+    (role, content)
+}
+
+fn workspace_message_fts_exists(connection: &Connection) -> Result<bool, String> {
+    migration_source_table_exists(connection, "workspace_message_fts")
+}
+
+fn refresh_workspace_message_fts_row(
+    connection: &Connection,
+    workspace_scope: &str,
+    message_id: &str,
+    conversation_id: &str,
+    message: &Value,
+) -> Result<(), String> {
+    let (role, content) = workspace_message_search_fields(message);
+    let cjk_terms = cjk_lexical_terms(&content);
+    connection
+        .execute(
+            "DELETE FROM workspace_message_fts
+             WHERE workspace_scope=?1 AND message_id=?2",
+            params![workspace_scope, message_id],
+        )
+        .map_err(|error| format!("无法刷新消息全文索引：{error}"))?;
+    connection
+        .execute(
+            "INSERT INTO workspace_message_fts
+             (workspace_scope, conversation_id, message_id, role, content, cjk_terms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                workspace_scope,
+                conversation_id,
+                message_id,
+                role,
+                content,
+                cjk_terms,
+            ],
+        )
+        .map_err(|error| format!("无法写入消息全文索引：{error}"))?;
+    Ok(())
+}
+
+fn backfill_workspace_message_fts(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute("DELETE FROM workspace_message_fts", [])
+        .map_err(|error| format!("无法清空消息全文索引回填：{error}"))?;
+    let records = {
+        let mut statement = connection
+            .prepare(
+                "SELECT workspace_scope, id, conversation_id, payload_json
+                 FROM workspace_messages",
+            )
+            .map_err(|error| format!("无法准备消息全文索引回填：{error}"))?;
+        let records = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|error| format!("无法读取消息全文索引回填：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法解析消息全文索引回填：{error}"))?;
+        records
+    };
+    for (workspace_scope, message_id, conversation_id, payload_json) in records {
+        let message = serde_json::from_str::<Value>(&payload_json)
+            .map_err(|error| format!("独立消息记录已损坏，无法回填全文索引：{error}"))?;
+        refresh_workspace_message_fts_row(
+            connection,
+            &workspace_scope,
+            &message_id,
+            &conversation_id,
+            &message,
+        )?;
+    }
+    Ok(())
+}
+
+fn upsert_workspace_message_rows(
+    connection: &Connection,
+    workspace_scope: &str,
+    messages: &[Value],
+    sync_token: Option<&str>,
+) -> Result<(), String> {
+    let now = Utc::now().to_rfc3339();
+    let fts_available = workspace_message_fts_exists(connection)?;
+    for (ordinal, message) in messages.iter().enumerate() {
+        let (id, conversation_id, created_at, payload_json) =
+            workspace_message_fields(message, ordinal, &now)?;
+        connection
+            .execute(
+                "INSERT INTO workspace_messages
+                 (workspace_scope, id, conversation_id, ordinal, payload_json,
+                  created_at, updated_at, sync_token)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(workspace_scope, id) DO UPDATE SET
+                   conversation_id=excluded.conversation_id,
+                   ordinal=excluded.ordinal,
+                   payload_json=excluded.payload_json,
+                   created_at=CASE
+                     WHEN json_extract(excluded.payload_json, '$.createdAt') IS NULL
+                      AND json_extract(excluded.payload_json, '$.created_at') IS NULL
+                     THEN workspace_messages.created_at
+                     ELSE excluded.created_at
+                   END,
+                   updated_at=excluded.updated_at,
+                   sync_token=CASE WHEN excluded.sync_token=''
+                     THEN workspace_messages.sync_token ELSE excluded.sync_token END",
+                params![
+                    workspace_scope,
+                    id,
+                    conversation_id,
+                    ordinal as i64,
+                    payload_json,
+                    created_at,
+                    now,
+                    sync_token.unwrap_or("")
+                ],
+            )
+            .map_err(|error| format!("无法保存独立消息记录：{error}"))?;
+        if fts_available {
+            refresh_workspace_message_fts_row(
+                connection,
+                workspace_scope,
+                &id,
+                &conversation_id,
+                message,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn migration_source_table_exists(connection: &Connection, table: &str) -> Result<bool, String> {
+    connection
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1
+             )",
+            [table],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|exists| exists != 0)
+        .map_err(|error| format!("无法检查旧运行时数据表 {table}：{error}"))
+}
+
+fn migrate_embedded_workspace_messages(connection: &Connection) -> Result<(), String> {
+    if !migration_source_table_exists(connection, "workspace_snapshots")? {
+        return Ok(());
+    }
+    let snapshots = {
+        let mut statement = connection
+            .prepare("SELECT workspace_scope, payload FROM workspace_snapshots")
+            .map_err(|error| format!("无法准备旧工作区消息迁移：{error}"))?;
+        let snapshots = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| format!("无法读取旧工作区消息：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法解析旧工作区消息：{error}"))?;
+        snapshots
+    };
+    for (workspace_scope, payload_json) in snapshots {
+        let mut payload = serde_json::from_str::<Value>(&payload_json)
+            .map_err(|error| format!("旧工作区快照损坏，无法迁移消息：{error}"))?;
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if messages.is_empty() {
+            continue;
+        }
+        upsert_workspace_message_rows(connection, &workspace_scope, &messages, Some("migration"))?;
+        if let Some(payload) = payload.as_object_mut() {
+            payload.insert("messages".to_string(), Value::Array(Vec::new()));
+        }
+        let compact = serde_json::to_string(&payload)
+            .map_err(|error| format!("无法压缩迁移后的工作区快照：{error}"))?;
+        connection
+            .execute(
+                "UPDATE workspace_snapshots SET payload=?2 WHERE workspace_scope=?1",
+                params![workspace_scope, compact],
+            )
+            .map_err(|error| format!("无法提交旧工作区消息迁移：{error}"))?;
+    }
+    Ok(())
+}
+
+fn migrate_embedded_assistant_request_messages(connection: &Connection) -> Result<(), String> {
+    if !migration_source_table_exists(connection, "assistant_requests")? {
+        return Ok(());
+    }
+    let requests = {
+        let mut statement = connection
+            .prepare("SELECT workspace_scope, id, payload_json FROM assistant_requests")
+            .map_err(|error| format!("无法准备旧 AI助手请求消息迁移：{error}"))?;
+        let requests = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|error| format!("无法读取旧 AI助手请求消息：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法解析旧 AI助手请求消息：{error}"))?;
+        requests
+    };
+    for (workspace_scope, request_id, payload_json) in requests {
+        let mut payload = serde_json::from_str::<Value>(&payload_json)
+            .map_err(|error| format!("旧 AI助手请求恢复信息损坏：{error}"))?;
+        let messages = payload
+            .as_object_mut()
+            .and_then(|payload| {
+                payload
+                    .remove("conversationMessages")
+                    .or_else(|| payload.remove("conversation_messages"))
+            })
+            .and_then(|messages| messages.as_array().cloned())
+            .unwrap_or_default();
+        if messages.is_empty() {
+            continue;
+        }
+        for (ordinal, message) in messages.iter().enumerate() {
+            connection
+                .execute(
+                    "INSERT OR REPLACE INTO assistant_request_messages
+                     (workspace_scope, request_id, ordinal, payload_json)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        workspace_scope,
+                        request_id,
+                        ordinal as i64,
+                        serde_json::to_string(message)
+                            .map_err(|error| format!("无法序列化旧 AI助手请求消息：{error}"))?
+                    ],
+                )
+                .map_err(|error| format!("无法迁移旧 AI助手请求消息：{error}"))?;
+        }
+        connection
+            .execute(
+                "UPDATE assistant_requests SET payload_json=?3
+                 WHERE workspace_scope=?1 AND id=?2",
+                params![
+                    workspace_scope,
+                    request_id,
+                    serde_json::to_string(&payload)
+                        .map_err(|error| format!("无法压缩旧 AI助手请求恢复信息：{error}"))?
+                ],
+            )
+            .map_err(|error| format!("无法提交旧 AI助手请求消息迁移：{error}"))?;
+    }
     Ok(())
 }
 
@@ -5542,6 +13321,495 @@ fn validate_records(records: &[Value], label: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_workspace_messages(records: &[Value]) -> Result<(), String> {
+    for record in records {
+        serde_json::to_vec(record).map_err(|error| format!("无法序列化 消息：{error}"))?;
+        value_string(record, "id")?;
+    }
+    Ok(())
+}
+
+fn validate_workspace_snapshot_value(value: &Value, path: &str) -> Result<(), String> {
+    match value {
+        Value::String(text) => {
+            let lower = text.to_ascii_lowercase();
+            if lower.starts_with("data:") && lower.contains(";base64,") {
+                return Err(format!("工作区快照 `{path}` 不能保存 Base64 数据 URL"));
+            }
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                validate_workspace_snapshot_value(item, &format!("{path}[{index}]"))?;
+            }
+        }
+        Value::Object(object) => {
+            for (key, item) in object {
+                let lower_key = key.to_ascii_lowercase();
+                if matches!(
+                    lower_key.as_str(),
+                    "contentbase64" | "database64" | "base64" | "dataurl"
+                ) && !item.is_null()
+                {
+                    return Err(format!("工作区快照 `{path}.{key}` 不能保存 Base64 数据"));
+                }
+                if matches!(
+                    lower_key.as_str(),
+                    "canonicalmarkdown" | "creationdocument" | "candidatedocument" | "basedocument"
+                ) && !item.is_null()
+                {
+                    return Err(format!(
+                        "工作区快照 `{path}.{key}` 不能保存创作完整正文；请仅保存耐久资产描述符"
+                    ));
+                }
+                validate_workspace_snapshot_value(item, &format!("{path}.{key}"))?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_workspace_snapshot_client_state(client_state: &Value) -> Result<(), String> {
+    if let Some(object) = client_state.as_object() {
+        for key in ["documents", "creationDocuments"] {
+            if object
+                .get(key)
+                .is_some_and(|value| !value.as_object().is_some_and(|object| object.is_empty()))
+            {
+                return Err(format!(
+                    "工作区快照 clientState.{key} 必须为空；正文由耐久资产或 Vault 承载"
+                ));
+            }
+        }
+    }
+    validate_workspace_snapshot_value(client_state, "clientState")
+}
+
+fn validate_creation_resource_type(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if matches!(value, "theme" | "component" | "template") {
+        Ok(value.to_string())
+    } else {
+        Err("创作资源类型只允许 theme、component 或 template".to_string())
+    }
+}
+
+fn validate_creation_resource_id(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    let valid = Regex::new(r"^[a-z][a-z0-9-]{0,79}$").expect("valid creation resource id");
+    if valid.is_match(value) {
+        Ok(value.to_string())
+    } else {
+        Err("创作资源 ID 必须是最多 80 位的小写字母、数字或连字符".to_string())
+    }
+}
+
+fn validate_creation_resource_version(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    let valid = Regex::new(r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$")
+        .expect("valid creation resource version");
+    if value.len() <= 40 && valid.is_match(value) {
+        Ok(value.to_string())
+    } else {
+        Err("创作资源 version 必须是规范的三段语义版本".to_string())
+    }
+}
+
+fn validate_creation_resource_text(
+    value: &str,
+    label: &str,
+    required: bool,
+    maximum: usize,
+) -> Result<String, String> {
+    let value = value.trim();
+    if (required && value.is_empty())
+        || value.chars().count() > maximum
+        || value.chars().any(char::is_control)
+    {
+        return Err(format!("{label}为空、过长或包含控制字符"));
+    }
+    Ok(value.to_string())
+}
+
+fn normalize_creation_resource_ids(values: &[String], label: &str) -> Result<Vec<String>, String> {
+    if values.len() > 100 {
+        return Err(format!("{label}超过 100 项安全上限"));
+    }
+    let mut normalized = values
+        .iter()
+        .map(|value| value.trim())
+        .map(|value| {
+            if valid_runtime_identifier(value, 160) {
+                Ok(value.to_string())
+            } else {
+                Err(format!("{label}包含无效标识符"))
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    normalized.sort();
+    normalized.dedup();
+    Ok(normalized)
+}
+
+fn canonical_creation_json(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(canonical_creation_json).collect()),
+        Value::Object(map) => {
+            let mut keys = map.keys().collect::<Vec<_>>();
+            keys.sort();
+            let mut canonical = serde_json::Map::new();
+            for key in keys {
+                canonical.insert(key.clone(), canonical_creation_json(&map[key]));
+            }
+            Value::Object(canonical)
+        }
+        _ => value.clone(),
+    }
+}
+
+fn canonical_creation_json_string(value: &Value, label: &str) -> Result<String, String> {
+    serde_json::to_string(&canonical_creation_json(value))
+        .map_err(|error| format!("无法序列化创作资源 {label}：{error}"))
+}
+
+fn is_creation_resource_path_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    matches!(
+        key.as_str(),
+        "path" | "relativepath" | "filepath" | "assetpath" | "entrypoint"
+    ) || key.ends_with("_path")
+}
+
+fn validate_creation_resource_path(value: &str) -> Result<(), String> {
+    let value = value.trim();
+    let safe_characters =
+        Regex::new(r"^[A-Za-z0-9._/-]+$").expect("valid creation resource path pattern");
+    let executable_extensions = [
+        ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".wasm", ".sh", ".bash", ".cmd", ".bat",
+        ".ps1", ".exe", ".dll", ".dylib", ".so", ".py", ".rb",
+    ];
+    let lower = value.to_ascii_lowercase();
+    if value.is_empty()
+        || value.len() > 2048
+        || value.starts_with(['/', '\\', '~'])
+        || value.as_bytes().get(1) == Some(&b':')
+        || value.contains('\\')
+        || !safe_characters.is_match(value)
+        || value
+            .split('/')
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+        || executable_extensions
+            .iter()
+            .any(|extension| lower.ends_with(extension))
+    {
+        return Err(format!("创作资源路径不安全：{value}"));
+    }
+    Ok(())
+}
+
+fn creation_resource_string_is_unsafe(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let executable_fragments = [
+        "<script",
+        "</script",
+        "<iframe",
+        "<object",
+        "<embed",
+        "<base",
+        "<link",
+        "javascript:",
+        "vbscript:",
+        "data:text",
+        "data:application",
+        "data:image",
+        "@import",
+        "expression(",
+        "eval(",
+        "new function",
+        "document.cookie",
+        "window.location",
+        "child_process",
+        "process.env",
+        "#!/",
+    ];
+    let event_handler = Regex::new(
+        r"(?i)\bon(?:abort|blur|change|click|error|focus|input|key(?:down|press|up)|load|message|mouse(?:down|enter|leave|move|out|over|up)|reset|resize|scroll|submit|touch(?:end|move|start)|unload)\s*=",
+    )
+    .expect("valid event handler pattern");
+    let protocol_relative = Regex::new(r#"(?i)(?:^|[\s\"'(=])//[a-z0-9]"#)
+        .expect("valid protocol-relative URL pattern");
+    executable_fragments
+        .iter()
+        .any(|fragment| lower.contains(fragment))
+        || lower.contains("://")
+        || lower.contains("mailto:")
+        || lower.contains("tel:")
+        || lower.contains("www.")
+        || lower.contains("../")
+        || lower.contains("..\\")
+        || matches!(
+            lower.trim(),
+            "javascript" | "script" | "executable" | "shell"
+        )
+        || event_handler.is_match(value)
+        || protocol_relative.is_match(value)
+        || contains_sensitive_memory_value(value)
+}
+
+fn creation_resource_key_is_executable(key: &str) -> bool {
+    let key = key.to_ascii_lowercase().replace(['-', '_'], "");
+    matches!(
+        key.as_str(),
+        "script"
+            | "scripts"
+            | "javascript"
+            | "executable"
+            | "command"
+            | "commandline"
+            | "eval"
+            | "functionbody"
+            | "sourcecode"
+    )
+}
+
+fn creation_resource_permission_must_be_false(key: &str) -> bool {
+    let key = key.to_ascii_lowercase().replace(['-', '_'], "");
+    matches!(
+        key.as_str(),
+        "network"
+            | "shell"
+            | "vaultwrite"
+            | "allowtopnavigation"
+            | "allowpopups"
+            | "allowexternalscripts"
+            | "allowscripts"
+            | "allowexternalstyles"
+    )
+}
+
+fn validate_declarative_creation_value(
+    value: &Value,
+    path: &str,
+    depth: usize,
+    nodes: &mut usize,
+) -> Result<(), String> {
+    if depth > MAX_CREATION_RESOURCE_JSON_DEPTH {
+        return Err(format!("创作资源 {path} 超过 JSON 深度安全上限"));
+    }
+    *nodes += 1;
+    if *nodes > MAX_CREATION_RESOURCE_JSON_NODES {
+        return Err("创作资源 JSON 节点数量超过安全上限".to_string());
+    }
+    match value {
+        Value::String(text) => {
+            if text
+                .chars()
+                .any(|character| character == '\0' || character == '\u{7f}')
+                || creation_resource_string_is_unsafe(text)
+            {
+                return Err(format!(
+                    "创作资源 {path} 包含脚本、外链、路径穿越或疑似凭据"
+                ));
+            }
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                validate_declarative_creation_value(
+                    item,
+                    &format!("{path}[{index}]"),
+                    depth + 1,
+                    nodes,
+                )?;
+            }
+        }
+        Value::Object(map) => {
+            for (key, item) in map {
+                if key.is_empty()
+                    || key.len() > 128
+                    || key.chars().any(char::is_control)
+                    || creation_resource_key_is_executable(key)
+                {
+                    return Err(format!("创作资源 {path} 包含不可执行的危险字段 `{key}`"));
+                }
+                if creation_resource_permission_must_be_false(key)
+                    && !matches!(item, Value::Bool(false))
+                {
+                    return Err(format!("创作资源权限字段 `{key}` 必须显式为 false"));
+                }
+                if is_creation_resource_path_key(key) {
+                    let path_value = item
+                        .as_str()
+                        .ok_or_else(|| format!("创作资源路径字段 `{key}` 必须是字符串"))?;
+                    validate_creation_resource_path(path_value)?;
+                }
+                validate_declarative_creation_value(
+                    item,
+                    &format!("{path}.{key}"),
+                    depth + 1,
+                    nodes,
+                )?;
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+    Ok(())
+}
+
+fn creation_manifest_string<'a>(manifest: &'a Value, key: &str) -> Result<&'a str, String> {
+    manifest
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("创作资源 manifest 缺少字符串字段 {key}"))
+}
+
+fn validate_template_creation_resource(manifest: &Value, payload: &Value) -> Result<(), String> {
+    let entrypoint = manifest
+        .get("entrypoint")
+        .or_else(|| payload.get("entrypoint"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "模板资源必须声明 entrypoint".to_string())?;
+    validate_creation_resource_path(entrypoint)?;
+    let files = payload
+        .get("files")
+        .or_else(|| manifest.get("files"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "模板资源必须声明 files 数组".to_string())?;
+    if files.is_empty() || files.len() > 200 {
+        return Err("模板资源 files 必须包含 1 到 200 项".to_string());
+    }
+    let allowed_kinds = [
+        "html", "css", "json", "image", "font", "data", "markdown", "text",
+    ];
+    for (index, file) in files.iter().enumerate() {
+        let file = file
+            .as_object()
+            .ok_or_else(|| format!("模板资源 files[{index}] 必须是对象"))?;
+        let path = file
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("模板资源 files[{index}] 缺少 path"))?;
+        validate_creation_resource_path(path)?;
+        let kind = file
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("模板资源 files[{index}] 缺少 kind"))?;
+        if !allowed_kinds.contains(&kind) {
+            return Err(format!(
+                "模板资源 files[{index}] 使用了不安全的文件类型 `{kind}`"
+            ));
+        }
+    }
+    if !files.iter().any(|file| {
+        file.get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path == entrypoint)
+    }) {
+        return Err("模板资源 entrypoint 必须存在于 files 中".to_string());
+    }
+    Ok(())
+}
+
+fn validate_creation_resource_input(
+    input: &CreationResourceInput,
+) -> Result<ValidatedCreationResource, String> {
+    if input.schema_version.trim() != "1.0" {
+        return Err("创作资源 schemaVersion 必须是 1.0".to_string());
+    }
+    let resource_type = validate_creation_resource_type(&input.resource_type)?;
+    let id = validate_creation_resource_id(&input.id)?;
+    let version = validate_creation_resource_version(&input.version)?;
+    let display_name =
+        validate_creation_resource_text(&input.display_name, "创作资源名称", true, 80)?;
+    let description =
+        validate_creation_resource_text(&input.description, "创作资源描述", false, 1000)?;
+    if !input.manifest.is_object() || !input.payload.is_object() {
+        return Err("创作资源 manifest 和 payload 必须是 JSON 对象".to_string());
+    }
+    if creation_manifest_string(&input.manifest, "schemaVersion")? != "1.0"
+        || creation_manifest_string(&input.manifest, "manifestType")? != resource_type
+        || creation_manifest_string(&input.manifest, "id")? != id
+        || creation_manifest_string(&input.manifest, "version")? != version
+    {
+        return Err("创作资源 manifest 的版本、类型或 ID 与资源封套不一致".to_string());
+    }
+    let mut nodes = 0;
+    validate_declarative_creation_value(&input.manifest, "manifest", 0, &mut nodes)?;
+    validate_declarative_creation_value(&input.payload, "payload", 0, &mut nodes)?;
+    if resource_type == "template" {
+        validate_template_creation_resource(&input.manifest, &input.payload)?;
+    }
+    let manifest = canonical_creation_json(&input.manifest);
+    let payload = canonical_creation_json(&input.payload);
+    let manifest_json = canonical_creation_json_string(&manifest, "manifest")?;
+    let payload_json = canonical_creation_json_string(&payload, "payload")?;
+    if manifest_json.len() > MAX_CREATION_MANIFEST_BYTES {
+        return Err("创作资源 manifest 超过 256 KiB 安全上限".to_string());
+    }
+    let source_ref_ids =
+        normalize_creation_resource_ids(&input.source_ref_ids, "创作资源来源引用")?;
+    let model_run_ids = normalize_creation_resource_ids(&input.model_run_ids, "模型运行引用")?;
+    let source_ref_ids_json = serde_json::to_string(&source_ref_ids)
+        .map_err(|error| format!("无法序列化创作资源来源引用：{error}"))?;
+    let model_run_ids_json = serde_json::to_string(&model_run_ids)
+        .map_err(|error| format!("无法序列化模型运行引用：{error}"))?;
+    let hash_envelope = serde_json::json!({
+        "schemaVersion": "1.0",
+        "resourceType": resource_type.clone(),
+        "id": id.clone(),
+        "version": version.clone(),
+        "displayName": display_name.clone(),
+        "description": description.clone(),
+        "manifest": manifest.clone(),
+        "payload": payload.clone(),
+        "sourceRefIds": source_ref_ids.clone(),
+        "modelRunIds": model_run_ids.clone(),
+    });
+    let canonical_envelope = canonical_creation_json_string(&hash_envelope, "封套")?;
+    let content_hash = format!("sha256:{:x}", Sha256::digest(canonical_envelope.as_bytes()));
+    if let Some(claimed) = input.content_hash.as_deref() {
+        if claimed.trim().to_ascii_lowercase() != content_hash {
+            return Err("客户端声明的创作资源 contentHash 与后端计算结果不一致".to_string());
+        }
+    }
+    Ok(ValidatedCreationResource {
+        schema_version: "1.0".to_string(),
+        resource_type,
+        id,
+        version,
+        display_name,
+        description,
+        manifest,
+        payload,
+        manifest_json,
+        payload_json,
+        content_hash,
+        source_ref_ids,
+        model_run_ids,
+        source_ref_ids_json,
+        model_run_ids_json,
+    })
+}
+
+fn creation_resource_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredCreationResourceRow> {
+    Ok(StoredCreationResourceRow {
+        resource_type: row.get(0)?,
+        id: row.get(1)?,
+        revision: row.get(2)?,
+        state: row.get(3)?,
+        schema_version: row.get(4)?,
+        version: row.get(5)?,
+        display_name: row.get(6)?,
+        description: row.get(7)?,
+        manifest_json: row.get(8)?,
+        payload_json: row.get(9)?,
+        content_hash: row.get(10)?,
+        source_ref_ids_json: row.get(11)?,
+        model_run_ids_json: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
+    })
+}
+
 fn managed_resource_id(payload: &Value, label: &str) -> Result<String, String> {
     let id = payload
         .get("id")
@@ -5553,6 +13821,46 @@ fn managed_resource_id(payload: &Value, label: &str) -> Result<String, String> {
         return Err(format!("{label} id 无效"));
     }
     Ok(id.to_string())
+}
+
+fn validate_report_resource(payload: &Value) -> Result<(), String> {
+    if payload.get("markdown").is_some() {
+        return Err("报告正文必须保存在耐久资产中，不能写入 SQLite 资源记录".to_string());
+    }
+    let state = payload
+        .get("state")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "报告资源缺少 state".to_string())?;
+    if !matches!(
+        state,
+        "preview" | "awaiting_approval" | "writing" | "persisted" | "failed" | "cancelled"
+    ) {
+        return Err("报告资源 state 无效".to_string());
+    }
+    let body_asset = payload
+        .get("bodyAsset")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "报告资源缺少 bodyAsset 耐久正文描述符".to_string())?;
+    let asset_id = body_asset
+        .get("assetId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "报告耐久正文缺少 assetId".to_string())?;
+    if asset_id.chars().count() > 180 || asset_id.chars().any(char::is_control) {
+        return Err("报告耐久正文 assetId 无效".to_string());
+    }
+    if body_asset.get("state").and_then(Value::as_str) != Some("ready") {
+        return Err("报告耐久正文尚未就绪".to_string());
+    }
+    if body_asset
+        .get("byteLength")
+        .and_then(Value::as_u64)
+        .is_none()
+    {
+        return Err("报告耐久正文缺少 byteLength".to_string());
+    }
+    Ok(())
 }
 
 fn upsert_managed_resource(
@@ -5772,11 +14080,11 @@ fn validate_inbound_content_record(record: &InboundContentRecordInput) -> Result
     {
         return Err("正文哈希必须是小写 sha256:<64位十六进制>".to_string());
     }
-    if record.content_characters > 4 * 1024 * 1024 {
-        return Err("内容处理记录的正文字符数超过 4 MB 安全上限".to_string());
-    }
-    if record.attachment_count > 100_000 || record.image_count > record.attachment_count + 100_000 {
-        return Err("内容处理记录的附件统计超过安全上限".to_string());
+    if record.content_characters > i64::MAX as usize
+        || record.attachment_count > i64::MAX as usize
+        || record.image_count > i64::MAX as usize
+    {
+        return Err("内容处理记录的计数字段超出 SQLite 整数表示范围".to_string());
     }
     if !matches!(
         record.state.as_str(),
@@ -5859,6 +14167,9 @@ fn sync_runtime_tasks(
             .get("state")
             .and_then(Value::as_str)
             .unwrap_or("created");
+        if !valid_runtime_task_state(state) {
+            return Err("同步的原生任务状态无效".to_string());
+        }
         let title = task
             .get("title")
             .or_else(|| task.get("label"))
@@ -5881,6 +14192,21 @@ fn sync_runtime_tasks(
             )
             .optional()
             .map_err(|error| format!("无法读取原生任务状态：{error}"))?;
+        if previous_task.is_some()
+            && transaction
+                .query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM runtime_task_plans
+                       WHERE workspace_scope=?1 AND task_id=?2
+                     )",
+                    params![workspace_scope, id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| format!("无法检查同步任务完成契约：{error}"))?
+                != 0
+        {
+            return Err("客户端快照不能覆盖由原生完成契约管理的任务".to_string());
+        }
         let previous_trace_id = previous_task
             .as_ref()
             .and_then(|(_, trace_id)| trace_id.as_deref())
@@ -6172,55 +14498,128 @@ fn sync_runtime_schedule_group(
             .map_err(|error| format!("无法移除已删除原生日程：{error}"))?;
     }
     for schedule in schedules {
-        let id = runtime_value_string(schedule, "id", "原生日程")?;
-        let enabled = schedule
-            .get("enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        let next_run = normalize_runtime_time(schedule.get("nextRun").and_then(Value::as_str));
-        let payload = serde_json::to_string(schedule)
-            .map_err(|error| format!("无法序列化原生日程：{error}"))?;
-        let payload_hash = format!("{:x}", Sha256::digest(payload.as_bytes()));
-        let previous = transaction
-            .query_row(
-                "SELECT payload_hash, revision FROM runtime_schedules
-                 WHERE workspace_scope=?1 AND id=?2 AND schedule_kind=?3",
-                params![workspace_scope, id, schedule_kind],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .optional()
-            .map_err(|error| format!("无法读取原生日程修订：{error}"))?;
-        let payload_changed = previous
-            .as_ref()
-            .map(|(hash, _)| hash.as_str() != payload_hash.as_str())
-            .unwrap_or(true);
-        let revision = previous
-            .as_ref()
-            .map(|(_, value)| if payload_changed { value + 1 } else { *value })
-            .unwrap_or(1);
-        let now = Utc::now().to_rfc3339();
+        upsert_runtime_schedule_record(transaction, workspace_scope, schedule, schedule_kind)?;
+    }
+    Ok(())
+}
+
+fn canonical_schedule_payload_hash(hash: &str) -> String {
+    let trimmed = hash.trim();
+    let digest = trimmed.strip_prefix("sha256:").unwrap_or(trimmed);
+    format!("sha256:{}", digest.to_ascii_lowercase())
+}
+
+fn verified_schedule_payload_snapshot(
+    payload: Value,
+    payload_hash: &str,
+    label: &str,
+) -> Result<(Value, String), String> {
+    if !payload.is_object() || payload.as_object().is_some_and(serde_json::Map::is_empty) {
+        return Err(format!("{label} payload 必须是非空 JSON 对象"));
+    }
+    let supplied_hash = canonical_schedule_payload_hash(payload_hash);
+    let digest = supplied_hash
+        .strip_prefix("sha256:")
+        .ok_or_else(|| format!("{label} payload hash 格式无效"))?;
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("{label} payload hash 格式无效"));
+    }
+    let payload_json = serde_json::to_string(&payload)
+        .map_err(|error| format!("无法序列化{label} payload：{error}"))?;
+    let computed_hash = format!("sha256:{:x}", Sha256::digest(payload_json.as_bytes()));
+    if supplied_hash != computed_hash {
+        return Err(format!("{label} payload 与 hash 不匹配"));
+    }
+    Ok((payload, computed_hash))
+}
+
+fn read_runtime_schedule_revision_snapshot(
+    connection: &Connection,
+    workspace_scope: &str,
+    schedule_id: &str,
+    schedule_kind: &str,
+    schedule_revision: i64,
+) -> Result<Option<(Value, String)>, String> {
+    let snapshot = connection
+        .query_row(
+            "SELECT payload, payload_hash
+             FROM runtime_schedule_revisions
+             WHERE workspace_scope=?1 AND schedule_id=?2 AND schedule_kind=?3 AND revision=?4",
+            params![
+                workspace_scope,
+                schedule_id,
+                schedule_kind,
+                schedule_revision
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("无法读取日程 occurrence 历史快照：{error}"))?;
+    let Some((payload_json, payload_hash)) = snapshot else {
+        return Ok(None);
+    };
+    let payload = serde_json::from_str::<Value>(&payload_json)
+        .map_err(|error| format!("日程 occurrence 历史 payload 无法解析：{error}"))?;
+    verified_schedule_payload_snapshot(payload, &payload_hash, "日程 occurrence 历史快照").map(Some)
+}
+
+fn upsert_runtime_schedule_record(
+    transaction: &Transaction<'_>,
+    workspace_scope: &str,
+    schedule: &Value,
+    schedule_kind: &str,
+) -> Result<(), String> {
+    let id = runtime_value_string(schedule, "id", "原生日程")?;
+    let enabled = schedule
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let next_run = normalize_runtime_time(schedule.get("nextRun").and_then(Value::as_str));
+    let payload =
+        serde_json::to_string(schedule).map_err(|error| format!("无法序列化原生日程：{error}"))?;
+    if payload.len() > MAX_RECORD_BYTES {
+        return Err("单条原生日程超过 2 MB 安全上限".to_string());
+    }
+    let payload_hash = format!("sha256:{:x}", Sha256::digest(payload.as_bytes()));
+    let previous = transaction
+        .query_row(
+            "SELECT payload_hash, revision FROM runtime_schedules
+             WHERE workspace_scope=?1 AND id=?2 AND schedule_kind=?3",
+            params![workspace_scope, id, schedule_kind],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("无法读取原生日程修订：{error}"))?;
+    let payload_changed = previous
+        .as_ref()
+        .map(|(hash, _)| hash.as_str() != payload_hash.as_str())
+        .unwrap_or(true);
+    let revision = previous
+        .as_ref()
+        .map(|(_, value)| if payload_changed { value + 1 } else { *value })
+        .unwrap_or(1);
+    let now = Utc::now().to_rfc3339();
+    transaction
+        .execute(
+            "INSERT INTO runtime_schedules
+             (workspace_scope, id, schedule_kind, enabled, next_run, payload, payload_hash, revision, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(workspace_scope, id, schedule_kind) DO UPDATE SET
+               enabled=excluded.enabled, next_run=excluded.next_run, payload=excluded.payload,
+               payload_hash=excluded.payload_hash, revision=excluded.revision,
+               lease_owner=NULL, lease_expires_at=NULL, updated_at=excluded.updated_at",
+            params![workspace_scope, id, schedule_kind, i64::from(enabled), next_run, payload, payload_hash, revision, now],
+        )
+        .map_err(|error| format!("无法保存原生日程：{error}"))?;
+    if payload_changed {
         transaction
             .execute(
-                "INSERT INTO runtime_schedules
-                 (workspace_scope, id, schedule_kind, enabled, next_run, payload, payload_hash, revision, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                 ON CONFLICT(workspace_scope, id, schedule_kind) DO UPDATE SET
-                   enabled=excluded.enabled, next_run=excluded.next_run, payload=excluded.payload,
-                   payload_hash=excluded.payload_hash, revision=excluded.revision,
-                   lease_owner=NULL, lease_expires_at=NULL, updated_at=excluded.updated_at",
-                params![workspace_scope, id, schedule_kind, i64::from(enabled), next_run, payload, payload_hash, revision, now],
+                "INSERT INTO runtime_schedule_revisions
+                 (id, workspace_scope, schedule_id, schedule_kind, revision, payload, payload_hash, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![Uuid::new_v4().to_string(), workspace_scope, id, schedule_kind, revision, payload, payload_hash, now],
             )
-            .map_err(|error| format!("无法保存原生日程：{error}"))?;
-        if payload_changed {
-            transaction
-                .execute(
-                    "INSERT INTO runtime_schedule_revisions
-                     (id, workspace_scope, schedule_id, schedule_kind, revision, payload, payload_hash, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![Uuid::new_v4().to_string(), workspace_scope, id, schedule_kind, revision, payload, payload_hash, now],
-                )
-                .map_err(|error| format!("无法保存原生日程修订：{error}"))?;
-        }
+            .map_err(|error| format!("无法保存原生日程修订：{error}"))?;
     }
     Ok(())
 }
@@ -6502,6 +14901,78 @@ fn local_vector_similarity(query: &[f32], candidate: &[f32]) -> Option<f64> {
     similarity
         .is_finite()
         .then_some(similarity.clamp(-1.0, 1.0))
+}
+
+fn normalize_neural_embedding(mut vector: Vec<f32>) -> Result<Vec<f32>, String> {
+    if vector.is_empty() || vector.len() > 65_536 || vector.iter().any(|value| !value.is_finite()) {
+        return Err("神经 Embedding 向量为空、过大或包含非有限数值".to_string());
+    }
+    let norm = vector
+        .iter()
+        .map(|value| f64::from(*value) * f64::from(*value))
+        .sum::<f64>()
+        .sqrt();
+    if !norm.is_finite() || norm <= f64::EPSILON {
+        return Err("神经 Embedding 向量不能是零向量".to_string());
+    }
+    for value in &mut vector {
+        *value = (f64::from(*value) / norm) as f32;
+    }
+    Ok(vector)
+}
+
+fn encode_neural_embedding(vector: Vec<f32>) -> Result<(i64, Vec<u8>), String> {
+    let vector = normalize_neural_embedding(vector)?;
+    let dimensions = vector.len() as i64;
+    let blob = vector
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
+    Ok((dimensions, blob))
+}
+
+fn decode_neural_embedding(dimensions: i64, blob: &[u8]) -> Option<Vec<f32>> {
+    let dimensions = usize::try_from(dimensions).ok()?;
+    if dimensions == 0
+        || dimensions > 65_536
+        || blob.len() != dimensions * std::mem::size_of::<f32>()
+    {
+        return None;
+    }
+    let vector = blob
+        .chunks_exact(std::mem::size_of::<f32>())
+        .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        .collect::<Vec<_>>();
+    let norm = vector
+        .iter()
+        .map(|value| f64::from(*value) * f64::from(*value))
+        .sum::<f64>()
+        .sqrt();
+    (vector.iter().all(|value| value.is_finite()) && (0.99..=1.01).contains(&norm))
+        .then_some(vector)
+}
+
+fn neural_embedding_input_hash(input: &str) -> String {
+    format!("sha256:{:x}", Sha256::digest(input.as_bytes()))
+}
+
+fn neural_note_embedding_input(
+    relative_path: &str,
+    title: &str,
+    tags_json: &str,
+    wiki_links_json: &str,
+    content: &str,
+) -> String {
+    let content = content
+        .nfc()
+        .take(MAX_NEURAL_EMBEDDING_INPUT_CHARS)
+        .collect::<String>();
+    format!(
+        "title: {title}\npath: {relative_path}\ntags: {tags_json}\nwiki_links: {wiki_links_json}\ncontent:\n{content}"
+    )
+    .nfc()
+    .take(crate::model_provider::MAX_EMBEDDING_INPUT_CHARS)
+    .collect()
 }
 
 fn lexical_fts_match_query(query: &str) -> Result<String, String> {
@@ -6905,10 +15376,7 @@ fn prepare_note_index(root: &Path, path: &Path) -> Result<Option<PreparedNoteInd
     let canonical_root = canonical_index_root(root)?;
     let metadata =
         fs::symlink_metadata(path).map_err(|error| format!("无法读取索引文件元数据：{error}"))?;
-    if metadata.file_type().is_symlink()
-        || !metadata.file_type().is_file()
-        || metadata.len() > MAX_INDEXED_NOTE_BYTES
-    {
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
         return Ok(None);
     }
     let canonical_path = path
@@ -7044,6 +15512,14 @@ fn upsert_prepared_note_index(
             ],
         )
         .map_err(|error| format!("无法写入本地特征向量：{error}"))?;
+    transaction
+        .execute(
+            "UPDATE neural_embedding_index_state
+             SET state='pending', last_error=NULL, updated_at=?2
+             WHERE vault_id=?1",
+            params![vault_id, Utc::now().to_rfc3339()],
+        )
+        .map_err(|error| format!("无法标记神经向量索引待更新：{error}"))?;
     Ok(())
 }
 
@@ -7072,6 +15548,14 @@ fn delete_note_index_in_transaction(
         .map_err(|error| format!("无法删除本地特征向量：{error}"))?;
     transaction
         .execute(
+            "UPDATE neural_embedding_index_state
+             SET state='pending', last_error=NULL, updated_at=?2
+             WHERE vault_id=?1",
+            params![vault_id, Utc::now().to_rfc3339()],
+        )
+        .map_err(|error| format!("无法标记神经向量索引待更新：{error}"))?;
+    transaction
+        .execute(
             "DELETE FROM note_index WHERE vault_id=?1 AND relative_path=?2",
             params![vault_id, relative_path],
         )
@@ -7079,51 +15563,46 @@ fn delete_note_index_in_transaction(
     Ok(())
 }
 
-#[cfg(test)]
-fn index_note_in_connection(
-    connection: &Connection,
-    vault_id: &str,
-    root: &Path,
-    path: &Path,
-) -> Result<bool, String> {
-    let Some(note) = prepare_note_index(root, path)? else {
-        return Ok(false);
-    };
-    let transaction = connection
-        .unchecked_transaction()
-        .map_err(|error| format!("无法开始增量索引事务：{error}"))?;
-    upsert_prepared_note_index(&transaction, vault_id, &note)?;
-    transaction
-        .commit()
-        .map_err(|error| format!("无法提交增量索引事务：{error}"))?;
-    Ok(true)
-}
-
-#[tauri::command]
-pub fn save_workspace_snapshot(
-    database: State<'_, RuntimeDatabase>,
-    snapshot: WorkspaceSnapshot,
+fn save_workspace_snapshot_in(
+    database: &RuntimeDatabase,
+    mut snapshot: WorkspaceSnapshot,
 ) -> Result<(), String> {
     let workspace_scope = database.local_workspace_scope()?;
     validate_records(&snapshot.tasks, "任务")?;
-    validate_records(&snapshot.messages, "消息")?;
+    // Conversation articles are user content, not control-plane records. They can
+    // exceed the generic 2 MB record guard and remain persistable in SQLite.
+    validate_workspace_messages(&snapshot.messages)?;
     validate_records(&snapshot.approvals, "审批")?;
     validate_records(&snapshot.operation_logs, "操作日志")?;
-    let client_state_bytes = serde_json::to_vec(&snapshot.client_state)
-        .map_err(|error| format!("无法序列化客户端工作区状态：{error}"))?;
-    if client_state_bytes.len() > MAX_RECORD_BYTES {
-        return Err("客户端工作区状态超过 2 MB 安全上限".to_string());
+    for (label, records) in [
+        ("tasks", snapshot.tasks.as_slice()),
+        ("messages", snapshot.messages.as_slice()),
+        ("approvals", snapshot.approvals.as_slice()),
+        ("operationLogs", snapshot.operation_logs.as_slice()),
+    ] {
+        for (index, record) in records.iter().enumerate() {
+            validate_workspace_snapshot_value(record, &format!("{label}[{index}]"))?;
+        }
     }
+    validate_workspace_snapshot_client_state(&snapshot.client_state)?;
+    let messages = std::mem::take(&mut snapshot.messages);
     let payload = serde_json::to_string(&snapshot)
         .map_err(|error| format!("无法序列化本地工作区：{error}"))?;
-    if payload.len() > 32 * 1024 * 1024 {
-        return Err("本地工作区快照超过 32 MB 安全上限".to_string());
-    }
-    let connection = database
+    let mut connection = database
         .connection
         .lock()
         .map_err(|_| "SQLite 连接锁不可用".to_string())?;
-    connection
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("无法开始工作区快照事务：{error}"))?;
+    // The workspace shell is not an authoritative full-message replacement.
+    // Older renderers may still include messages, so accept them as compatible
+    // upserts, but deletion is only performed by the explicit delete commands.
+    // This makes an empty shell save safe while messages are persisted page by page.
+    if !messages.is_empty() {
+        upsert_workspace_message_rows(&transaction, &workspace_scope, &messages, None)?;
+    }
+    transaction
         .execute(
             "INSERT INTO workspace_snapshots (workspace_scope, payload, updated_at)
              VALUES (?1, ?2, ?3)
@@ -7131,24 +15610,377 @@ pub fn save_workspace_snapshot(
             params![workspace_scope, payload, Utc::now().to_rfc3339()],
         )
         .map_err(|error| format!("无法保存本地工作区：{error}"))?;
+    transaction
+        .commit()
+        .map_err(|error| format!("无法提交本地工作区：{error}"))
+}
+
+#[tauri::command]
+pub fn save_workspace_snapshot(
+    database: State<'_, RuntimeDatabase>,
+    snapshot: WorkspaceSnapshot,
+) -> Result<(), String> {
+    save_workspace_snapshot_in(database.inner(), snapshot)
+}
+
+fn upsert_workspace_messages_page_in(
+    database: &RuntimeDatabase,
+    messages: Vec<Value>,
+) -> Result<(), String> {
+    if messages.len() > 512 {
+        return Err("单次消息持久化页最多包含 512 条；完整历史可继续分多页提交".to_string());
+    }
+    validate_workspace_messages(&messages)?;
+    for (index, message) in messages.iter().enumerate() {
+        validate_workspace_snapshot_value(message, &format!("messages[{index}]"))?;
+    }
+    let workspace_scope = database.local_workspace_scope()?;
+    let mut connection = database
+        .connection
+        .lock()
+        .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("无法开始消息页持久化事务：{error}"))?;
+    upsert_workspace_message_rows(&transaction, &workspace_scope, &messages, None)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("无法提交消息页：{error}"))
+}
+
+#[tauri::command]
+pub fn upsert_workspace_messages_page(
+    database: State<'_, RuntimeDatabase>,
+    messages: Vec<Value>,
+) -> Result<(), String> {
+    upsert_workspace_messages_page_in(database.inner(), messages)
+}
+
+fn list_workspace_messages_page_in(
+    database: &RuntimeDatabase,
+    conversation_id: Option<&str>,
+    cursor_created_at: Option<&str>,
+    cursor_id: Option<&str>,
+    limit: Option<usize>,
+) -> Result<WorkspaceMessagePage, String> {
+    if cursor_created_at.is_some() != cursor_id.is_some() {
+        return Err("消息分页游标必须同时包含 cursorCreatedAt 和 cursorId".to_string());
+    }
+    let conversation_id = conversation_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if conversation_id.is_some_and(|value| value.chars().count() > 200) {
+        return Err("消息分页 conversationId 无效".to_string());
+    }
+    let page_size = limit.unwrap_or(256).clamp(1, 512);
+    let workspace_scope = database.local_workspace_scope()?;
+    let connection = database
+        .connection
+        .lock()
+        .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+    let mut statement = connection
+        .prepare(
+            "SELECT payload_json, created_at, id
+             FROM workspace_messages
+             WHERE workspace_scope=?1
+               AND (?2 IS NULL OR conversation_id=?2)
+               AND (?3 IS NULL OR created_at>?3 OR (created_at=?3 AND id>?4))
+             ORDER BY created_at ASC, id ASC
+             LIMIT ?5",
+        )
+        .map_err(|error| format!("无法准备消息分页读取：{error}"))?;
+    let rows = statement
+        .query_map(
+            params![
+                workspace_scope,
+                conversation_id,
+                cursor_created_at,
+                cursor_id,
+                (page_size + 1) as i64
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(|error| format!("无法读取消息页：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法解析消息页：{error}"))?;
+    let has_more = rows.len() > page_size;
+    let visible = rows.into_iter().take(page_size).collect::<Vec<_>>();
+    let next_cursor = has_more.then(|| visible.last().cloned()).flatten();
+    let items = visible
+        .into_iter()
+        .map(|(payload_json, _, _)| {
+            serde_json::from_str::<Value>(&payload_json)
+                .map_err(|error| format!("独立消息记录已经损坏：{error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(WorkspaceMessagePage {
+        items,
+        next_cursor_created_at: next_cursor
+            .as_ref()
+            .map(|(_, created_at, _)| created_at.clone()),
+        next_cursor_id: next_cursor.map(|(_, _, id)| id),
+    })
+}
+
+#[tauri::command]
+pub fn list_workspace_messages_page(
+    database: State<'_, RuntimeDatabase>,
+    conversation_id: Option<String>,
+    cursor_created_at: Option<String>,
+    cursor_id: Option<String>,
+    limit: Option<usize>,
+) -> Result<WorkspaceMessagePage, String> {
+    list_workspace_messages_page_in(
+        database.inner(),
+        conversation_id.as_deref(),
+        cursor_created_at.as_deref(),
+        cursor_id.as_deref(),
+        limit,
+    )
+}
+
+fn search_workspace_messages_in(
+    database: &RuntimeDatabase,
+    query: &str,
+    limit: Option<usize>,
+) -> Result<Vec<WorkspaceMessageSearchResult>, String> {
+    let match_query = lexical_fts_match_query(query)?;
+    let result_limit = limit.unwrap_or(50).clamp(1, 100);
+    let workspace_scope = database.local_workspace_scope()?;
+    let connection = database
+        .connection
+        .lock()
+        .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+    let mut statement = connection
+        .prepare(
+            "SELECT workspace_message_fts.conversation_id,
+                    workspace_message_fts.message_id,
+                    workspace_message_fts.role,
+                    message.created_at,
+                    snippet(workspace_message_fts, 4, '', '', '…', 24),
+                    bm25(workspace_message_fts)
+             FROM workspace_message_fts
+             JOIN workspace_messages message
+               ON message.workspace_scope=workspace_message_fts.workspace_scope
+              AND message.id=workspace_message_fts.message_id
+             WHERE workspace_message_fts MATCH ?1
+               AND workspace_message_fts.workspace_scope=?2
+             ORDER BY bm25(workspace_message_fts), message.created_at DESC,
+                      workspace_message_fts.message_id DESC
+             LIMIT ?3",
+        )
+        .map_err(|error| format!("无法准备会话消息搜索：{error}"))?;
+    let results = statement
+        .query_map(
+            params![match_query, workspace_scope, result_limit as i64],
+            |row| {
+                Ok(WorkspaceMessageSearchResult {
+                    conversation_id: row.get(0)?,
+                    message_id: row.get(1)?,
+                    role: row.get(2)?,
+                    created_at: row.get(3)?,
+                    snippet: row.get(4)?,
+                    score: -row.get::<_, f64>(5)?,
+                })
+            },
+        )
+        .map_err(|error| format!("会话消息搜索失败：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法解析会话消息搜索结果：{error}"))?;
+    Ok(results)
+}
+
+#[tauri::command]
+pub fn search_workspace_messages(
+    database: State<'_, RuntimeDatabase>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<WorkspaceMessageSearchResult>, String> {
+    search_workspace_messages_in(database.inner(), &query, limit)
+}
+
+fn delete_workspace_messages_in(
+    database: &RuntimeDatabase,
+    message_ids: Vec<String>,
+) -> Result<usize, String> {
+    if message_ids.len() > 512 {
+        return Err("单次最多删除 512 条消息；可继续分批删除".to_string());
+    }
+    let workspace_scope = database.local_workspace_scope()?;
+    let mut connection = database
+        .connection
+        .lock()
+        .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("无法开始消息删除事务：{error}"))?;
+    let mut deleted = 0usize;
+    for message_id in message_ids {
+        let message_id = message_id.trim();
+        if !valid_runtime_identifier(message_id, 200) {
+            return Err("待删除消息 ID 无效".to_string());
+        }
+        transaction
+            .execute(
+                "DELETE FROM workspace_message_fts
+                 WHERE workspace_scope=?1 AND message_id=?2",
+                params![workspace_scope, message_id],
+            )
+            .map_err(|error| format!("无法删除消息全文索引：{error}"))?;
+        deleted = deleted.saturating_add(
+            transaction
+                .execute(
+                    "DELETE FROM workspace_messages WHERE workspace_scope=?1 AND id=?2",
+                    params![workspace_scope, message_id],
+                )
+                .map_err(|error| format!("无法删除消息：{error}"))?,
+        );
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("无法提交消息删除：{error}"))?;
+    Ok(deleted)
+}
+
+#[tauri::command]
+pub fn delete_workspace_messages(
+    database: State<'_, RuntimeDatabase>,
+    message_ids: Vec<String>,
+) -> Result<usize, String> {
+    delete_workspace_messages_in(database.inner(), message_ids)
+}
+
+fn delete_workspace_conversation_messages_in(
+    database: &RuntimeDatabase,
+    conversation_id: String,
+) -> Result<usize, String> {
+    let conversation_id = conversation_id.trim();
+    if conversation_id.is_empty() || conversation_id.chars().count() > 200 {
+        return Err("待删除对话 ID 无效".to_string());
+    }
+    let workspace_scope = database.local_workspace_scope()?;
+    let mut connection = database
+        .connection
+        .lock()
+        .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("无法开始对话消息删除事务：{error}"))?;
+    transaction
+        .execute(
+            "DELETE FROM workspace_message_fts
+             WHERE workspace_scope=?1 AND conversation_id=?2",
+            params![workspace_scope, conversation_id],
+        )
+        .map_err(|error| format!("无法删除对话消息全文索引：{error}"))?;
+    let deleted = transaction
+        .execute(
+            "DELETE FROM workspace_messages
+             WHERE workspace_scope=?1 AND conversation_id=?2",
+            params![workspace_scope, conversation_id],
+        )
+        .map_err(|error| format!("无法删除对话消息：{error}"))?;
+    transaction
+        .commit()
+        .map_err(|error| format!("无法提交对话消息删除：{error}"))?;
+    Ok(deleted)
+}
+
+#[tauri::command]
+pub fn delete_workspace_conversation_messages(
+    database: State<'_, RuntimeDatabase>,
+    conversation_id: String,
+) -> Result<usize, String> {
+    delete_workspace_conversation_messages_in(database.inner(), conversation_id)
+}
+
+fn validate_optional_runtime_handler_pair(
+    database: &RuntimeDatabase,
+    ticket_state: &ExecutionTicketState,
+    workspace_scope: &str,
+    operation_context: Option<&OperationContext>,
+    allowed_pairs: &[(&str, &str)],
+) -> Result<Option<(String, String)>, String> {
+    operation_context
+        .map(|context| {
+            database
+                .validate_runtime_effectful_handler_pairs(
+                    ticket_state,
+                    workspace_scope,
+                    context,
+                    allowed_pairs,
+                )
+                .map(|authorization| (authorization.capability_id, authorization.operation))
+        })
+        .transpose()
+}
+
+fn record_runtime_database_handler_completion(
+    database: &RuntimeDatabase,
+    ticket_state: &ExecutionTicketState,
+    workspace_scope: &str,
+    operation_context: Option<&OperationContext>,
+    runtime_identity: Option<&(String, String)>,
+    handler_started: Instant,
+) -> Result<(), String> {
+    if let (Some(context), Some((capability_id, operation))) = (operation_context, runtime_identity)
+    {
+        database.record_runtime_effectful_handler_completion(
+            ticket_state,
+            workspace_scope,
+            context,
+            capability_id,
+            operation,
+            TrustedHandlerUsage {
+                tool_calls: 1,
+                runtime_seconds: handler_started.elapsed().as_secs().max(1),
+                tokens: 0,
+                cost: Some(0.0),
+            },
+        )?;
+    }
     Ok(())
 }
 
 #[tauri::command]
 pub fn sync_runtime_state(
     database: State<'_, RuntimeDatabase>,
+    ticket_state: State<'_, ExecutionTicketState>,
     tasks: Vec<Value>,
     schedules: Vec<Value>,
     report_subscriptions: Vec<Value>,
     scheduler_enabled: bool,
+    operation_context: Option<OperationContext>,
 ) -> Result<(), String> {
+    let handler_started = Instant::now();
     let workspace_scope = database.local_workspace_scope()?;
+    let runtime_identity = validate_optional_runtime_handler_pair(
+        database.inner(),
+        ticket_state.inner(),
+        &workspace_scope,
+        operation_context.as_ref(),
+        SCHEDULE_RUNTIME_HANDLER_PAIRS,
+    )?;
     database.sync_runtime_state(
         &workspace_scope,
         &tasks,
         &schedules,
         &report_subscriptions,
         scheduler_enabled,
+    )?;
+    record_runtime_database_handler_completion(
+        database.inner(),
+        ticket_state.inner(),
+        &workspace_scope,
+        operation_context.as_ref(),
+        runtime_identity.as_ref(),
+        handler_started,
     )
 }
 
@@ -7170,11 +16002,259 @@ pub fn load_managed_resources(
 }
 
 #[tauri::command]
+pub fn upsert_report_record(
+    database: State<'_, RuntimeDatabase>,
+    ticket_state: State<'_, ExecutionTicketState>,
+    report: Value,
+    operation_context: Option<OperationContext>,
+) -> Result<Value, String> {
+    let handler_started = Instant::now();
+    let workspace_scope = database.local_workspace_scope()?;
+    let runtime_identity = validate_optional_runtime_handler_pair(
+        database.inner(),
+        ticket_state.inner(),
+        &workspace_scope,
+        operation_context.as_ref(),
+        REPORT_RECORD_UPSERT_RUNTIME_HANDLER_PAIRS,
+    )?;
+    let result = database.upsert_report_resource(&workspace_scope, "report", &report)?;
+    record_runtime_database_handler_completion(
+        database.inner(),
+        ticket_state.inner(),
+        &workspace_scope,
+        operation_context.as_ref(),
+        runtime_identity.as_ref(),
+        handler_started,
+    )?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn delete_report_record(
+    database: State<'_, RuntimeDatabase>,
+    ticket_state: State<'_, ExecutionTicketState>,
+    report_id: String,
+    operation_context: OperationContext,
+) -> Result<(), String> {
+    let handler_started = Instant::now();
+    let workspace_scope = database.local_workspace_scope()?;
+    let runtime_identity = validate_optional_runtime_handler_pair(
+        database.inner(),
+        ticket_state.inner(),
+        &workspace_scope,
+        Some(&operation_context),
+        REPORT_RESOURCE_DELETE_RUNTIME_HANDLER_PAIRS,
+    )?;
+    database.delete_report_resource(&workspace_scope, "report", &report_id)?;
+    record_runtime_database_handler_completion(
+        database.inner(),
+        ticket_state.inner(),
+        &workspace_scope,
+        Some(&operation_context),
+        runtime_identity.as_ref(),
+        handler_started,
+    )
+}
+
+#[tauri::command]
+pub fn list_report_records_page(
+    database: State<'_, RuntimeDatabase>,
+    cursor_updated_at: Option<String>,
+    cursor_id: Option<String>,
+    limit: Option<usize>,
+) -> Result<ManagedResourcePage, String> {
+    let workspace_scope = database.local_workspace_scope()?;
+    database.list_report_resources_page(
+        &workspace_scope,
+        "report",
+        cursor_updated_at.as_deref(),
+        cursor_id.as_deref(),
+        limit.unwrap_or(128),
+    )
+}
+
+#[tauri::command]
+pub fn upsert_report_subscription(
+    database: State<'_, RuntimeDatabase>,
+    ticket_state: State<'_, ExecutionTicketState>,
+    subscription: Value,
+    operation_context: Option<OperationContext>,
+) -> Result<Value, String> {
+    let handler_started = Instant::now();
+    let workspace_scope = database.local_workspace_scope()?;
+    let runtime_identity = validate_optional_runtime_handler_pair(
+        database.inner(),
+        ticket_state.inner(),
+        &workspace_scope,
+        operation_context.as_ref(),
+        REPORT_SUBSCRIPTION_UPSERT_RUNTIME_HANDLER_PAIRS,
+    )?;
+    let result =
+        database.upsert_report_resource(&workspace_scope, "report_subscription", &subscription)?;
+    record_runtime_database_handler_completion(
+        database.inner(),
+        ticket_state.inner(),
+        &workspace_scope,
+        operation_context.as_ref(),
+        runtime_identity.as_ref(),
+        handler_started,
+    )?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn delete_report_subscription(
+    database: State<'_, RuntimeDatabase>,
+    ticket_state: State<'_, ExecutionTicketState>,
+    subscription_id: String,
+    operation_context: OperationContext,
+) -> Result<(), String> {
+    let handler_started = Instant::now();
+    let workspace_scope = database.local_workspace_scope()?;
+    let runtime_identity = validate_optional_runtime_handler_pair(
+        database.inner(),
+        ticket_state.inner(),
+        &workspace_scope,
+        Some(&operation_context),
+        REPORT_RESOURCE_DELETE_RUNTIME_HANDLER_PAIRS,
+    )?;
+    database.delete_report_resource(&workspace_scope, "report_subscription", &subscription_id)?;
+    record_runtime_database_handler_completion(
+        database.inner(),
+        ticket_state.inner(),
+        &workspace_scope,
+        Some(&operation_context),
+        runtime_identity.as_ref(),
+        handler_started,
+    )
+}
+
+#[tauri::command]
+pub fn list_report_subscriptions_page(
+    database: State<'_, RuntimeDatabase>,
+    cursor_updated_at: Option<String>,
+    cursor_id: Option<String>,
+    limit: Option<usize>,
+) -> Result<ManagedResourcePage, String> {
+    let workspace_scope = database.local_workspace_scope()?;
+    database.list_report_resources_page(
+        &workspace_scope,
+        "report_subscription",
+        cursor_updated_at.as_deref(),
+        cursor_id.as_deref(),
+        limit.unwrap_or(128),
+    )
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn read_report_source_page(
+    database: State<'_, RuntimeDatabase>,
+    source_kind: String,
+    start_at: String,
+    end_at: String,
+    cursor_occurred_at: Option<String>,
+    cursor_id: Option<String>,
+    limit: Option<usize>,
+) -> Result<ReportSourcePage, String> {
+    let workspace_scope = database.local_workspace_scope()?;
+    database.read_report_source_page(
+        &workspace_scope,
+        source_kind.trim(),
+        start_at.trim(),
+        end_at.trim(),
+        cursor_occurred_at.as_deref(),
+        cursor_id.as_deref(),
+        limit.unwrap_or(128),
+    )
+}
+
+#[tauri::command]
+pub fn upsert_creation_resource(
+    database: State<'_, RuntimeDatabase>,
+    resource: CreationResourceInput,
+) -> Result<CreationResource, String> {
+    let workspace_scope = database.local_workspace_scope()?;
+    database.upsert_creation_resource(&workspace_scope, resource)
+}
+
+#[tauri::command]
+pub fn list_creation_resources(
+    database: State<'_, RuntimeDatabase>,
+    include_archived: Option<bool>,
+) -> Result<Vec<CreationResource>, String> {
+    let workspace_scope = database.local_workspace_scope()?;
+    database.list_creation_resources(&workspace_scope, include_archived.unwrap_or(false))
+}
+
+#[tauri::command]
+pub fn list_creation_resource_revisions(
+    database: State<'_, RuntimeDatabase>,
+    resource_type: String,
+    id: String,
+) -> Result<Vec<CreationResource>, String> {
+    let workspace_scope = database.local_workspace_scope()?;
+    database.list_creation_resource_revisions(&workspace_scope, &resource_type, &id)
+}
+
+#[tauri::command]
+pub fn restore_creation_resource_revision(
+    database: State<'_, RuntimeDatabase>,
+    input: CreationResourceRestoreInput,
+) -> Result<CreationResource, String> {
+    let workspace_scope = database.local_workspace_scope()?;
+    database.restore_creation_resource_revision(&workspace_scope, input)
+}
+
+#[tauri::command]
+pub fn archive_creation_resource(
+    database: State<'_, RuntimeDatabase>,
+    resource_type: String,
+    id: String,
+) -> Result<CreationResourceArchiveReceipt, String> {
+    let workspace_scope = database.local_workspace_scope()?;
+    database.archive_creation_resource(&workspace_scope, &resource_type, &id)
+}
+
+#[tauri::command]
 pub fn recover_interrupted_runtime_tasks(
     database: State<'_, RuntimeDatabase>,
 ) -> Result<Vec<RuntimeTaskRecovery>, String> {
     let workspace_scope = database.local_workspace_scope()?;
     database.recover_interrupted_runtime_tasks(&workspace_scope)
+}
+
+#[tauri::command]
+pub fn supersede_runtime_task_for_recovery(
+    database: State<'_, RuntimeDatabase>,
+    ticket_state: State<'_, crate::execution_ticket::ExecutionTicketState>,
+    task_id: String,
+    replacement_key: String,
+) -> Result<RuntimeTaskRecoveryReplacement, String> {
+    let workspace_scope = database.local_workspace_scope()?;
+    let replacement = database.supersede_runtime_task_for_recovery(
+        &workspace_scope,
+        task_id.trim(),
+        replacement_key.trim(),
+    )?;
+    ticket_state.cancel_runtime_task_bindings(task_id.trim())?;
+    Ok(replacement)
+}
+
+#[tauri::command]
+pub fn bind_runtime_task_recovery_replacement(
+    database: State<'_, RuntimeDatabase>,
+    task_id: String,
+    replacement_task_id: String,
+    replacement_key: String,
+) -> Result<RuntimeTaskRecoveryReplacement, String> {
+    let workspace_scope = database.local_workspace_scope()?;
+    database.bind_runtime_task_recovery_replacement(
+        &workspace_scope,
+        task_id.trim(),
+        replacement_task_id.trim(),
+        replacement_key.trim(),
+    )
 }
 
 #[tauri::command]
@@ -7214,9 +16294,13 @@ pub fn load_workspace_snapshot(
         .optional()
         .map_err(|error| format!("无法读取本地工作区：{error}"))?;
     if let Some(payload) = scoped {
-        return serde_json::from_str::<WorkspaceSnapshot>(&payload)
-            .map(Some)
-            .map_err(|error| format!("本地工作区快照损坏：{error}"));
+        let mut snapshot = serde_json::from_str::<WorkspaceSnapshot>(&payload)
+            .map_err(|error| format!("本地工作区快照损坏：{error}"))?;
+        // Conversation messages are loaded through list_workspace_messages_page.
+        // Keeping them out of this shell prevents startup from re-materializing
+        // an unbounded history as one IPC response.
+        snapshot.messages.clear();
+        return Ok(Some(snapshot));
     }
     let legacy_claimed = connection
         .query_row(
@@ -7260,7 +16344,7 @@ pub fn load_workspace_snapshot(
     if selected_task_id.is_none() && has_records == 0 {
         return Ok(None);
     }
-    let legacy = WorkspaceSnapshot {
+    let mut legacy = WorkspaceSnapshot {
         tasks: read_payloads(&connection, "SELECT payload FROM tasks ORDER BY updated_at", None)?,
         messages: read_payloads(
             &connection,
@@ -7280,6 +16364,13 @@ pub fn load_workspace_snapshot(
         selected_task_id: selected_task_id.unwrap_or_default(),
         client_state,
     };
+    let legacy_messages = std::mem::take(&mut legacy.messages);
+    upsert_workspace_message_rows(
+        &connection,
+        &workspace_scope,
+        &legacy_messages,
+        Some("legacy-migration"),
+    )?;
     let payload =
         serde_json::to_string(&legacy).map_err(|error| format!("无法迁移旧工作区：{error}"))?;
     connection
@@ -7404,22 +16495,123 @@ pub fn read_optimization_evidence(
     database.optimization_evidence(&workspace_scope, limit.unwrap_or(240))
 }
 
+pub(crate) fn validate_optimization_runtime_handler(
+    database: &RuntimeDatabase,
+    ticket_state: &ExecutionTicketState,
+    workspace_scope: &str,
+    operation_context: &OperationContext,
+) -> Result<RuntimeEffectfulHandlerAuthorization, String> {
+    database.validate_runtime_effectful_handler(
+        ticket_state,
+        workspace_scope,
+        operation_context,
+        OPTIMIZATION_RUNTIME_CAPABILITY_ID,
+        OPTIMIZATION_RUNTIME_OPERATION,
+    )
+}
+
+pub(crate) fn record_optimization_runtime_handler_completion(
+    database: &RuntimeDatabase,
+    ticket_state: &ExecutionTicketState,
+    workspace_scope: &str,
+    operation_context: &OperationContext,
+    mutation_key: &RuntimeEffectMutationKey,
+    handler_started: Instant,
+) -> Result<(), String> {
+    database
+        .record_runtime_effectful_handler_completion_once(
+            ticket_state,
+            workspace_scope,
+            operation_context,
+            OPTIMIZATION_RUNTIME_CAPABILITY_ID,
+            OPTIMIZATION_RUNTIME_OPERATION,
+            &mutation_key.completion_key(),
+            TrustedHandlerUsage {
+                tool_calls: 1,
+                runtime_seconds: handler_started.elapsed().as_secs().max(1),
+                tokens: 0,
+                cost: Some(0.0),
+            },
+        )
+        .map(|_| ())
+}
+
 #[tauri::command]
 pub fn create_optimization_candidate(
     database: State<'_, RuntimeDatabase>,
+    ticket_state: State<'_, ExecutionTicketState>,
     input: OptimizationCandidateInput,
+    operation_context: OperationContext,
 ) -> Result<OptimizationCandidateResult, String> {
+    let handler_started = Instant::now();
     let workspace_scope = database.local_workspace_scope()?;
-    database.create_optimization_candidate(&workspace_scope, input)
+    let authorization = validate_optimization_runtime_handler(
+        database.inner(),
+        ticket_state.inner(),
+        &workspace_scope,
+        &operation_context,
+    )?;
+    let request =
+        serde_json::to_value(&input).map_err(|error| format!("无法序列化优化候选请求：{error}"))?;
+    let mutation_key =
+        runtime_effect_mutation_key(&authorization, "optimization.create_candidate", &request)?;
+    let result =
+        database.create_optimization_candidate(&workspace_scope, input, Some(&mutation_key))?;
+    record_optimization_runtime_handler_completion(
+        database.inner(),
+        ticket_state.inner(),
+        &workspace_scope,
+        &operation_context,
+        &mutation_key,
+        handler_started,
+    )?;
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn evaluate_optimization_candidate(
     database: State<'_, RuntimeDatabase>,
+    ticket_state: State<'_, ExecutionTicketState>,
     candidate_id: String,
+    operation_context: OperationContext,
 ) -> Result<OptimizationEvaluationResult, String> {
+    let handler_started = Instant::now();
     let workspace_scope = database.local_workspace_scope()?;
-    database.evaluate_optimization_candidate(&workspace_scope, candidate_id.trim())
+    let authorization = validate_optimization_runtime_handler(
+        database.inner(),
+        ticket_state.inner(),
+        &workspace_scope,
+        &operation_context,
+    )?;
+    let candidate_id = candidate_id.trim();
+    let mutation_key = runtime_effect_mutation_key(
+        &authorization,
+        "optimization.evaluate_candidate",
+        &serde_json::json!({ "candidateId": candidate_id }),
+    )?;
+    let result = database.evaluate_optimization_candidate(
+        &workspace_scope,
+        candidate_id,
+        Some(&mutation_key),
+    )?;
+    record_optimization_runtime_handler_completion(
+        database.inner(),
+        ticket_state.inner(),
+        &workspace_scope,
+        &operation_context,
+        &mutation_key,
+        handler_started,
+    )?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn get_optimization_candidate(
+    database: State<'_, RuntimeDatabase>,
+    candidate_id: String,
+) -> Result<Option<OptimizationCandidateResult>, String> {
+    let workspace_scope = database.local_workspace_scope()?;
+    database.optimization_candidate(&workspace_scope, candidate_id.trim())
 }
 
 #[tauri::command]
@@ -7433,19 +16625,74 @@ pub fn load_optimization_profile(
 #[tauri::command]
 pub fn apply_optimization_candidate(
     database: State<'_, RuntimeDatabase>,
+    ticket_state: State<'_, ExecutionTicketState>,
     candidate_id: String,
+    operation_context: OperationContext,
 ) -> Result<OptimizationProfileResult, String> {
+    let handler_started = Instant::now();
     let workspace_scope = database.local_workspace_scope()?;
-    database.apply_optimization_candidate(&workspace_scope, candidate_id.trim())
+    let authorization = validate_optimization_runtime_handler(
+        database.inner(),
+        ticket_state.inner(),
+        &workspace_scope,
+        &operation_context,
+    )?;
+    let candidate_id = candidate_id.trim();
+    let mutation_key = runtime_effect_mutation_key(
+        &authorization,
+        "optimization.apply_candidate",
+        &serde_json::json!({ "candidateId": candidate_id }),
+    )?;
+    let profile = database.apply_optimization_candidate(
+        &workspace_scope,
+        candidate_id,
+        Some(&mutation_key),
+    )?;
+    record_optimization_runtime_handler_completion(
+        database.inner(),
+        ticket_state.inner(),
+        &workspace_scope,
+        &operation_context,
+        &mutation_key,
+        handler_started,
+    )?;
+    Ok(profile)
 }
 
 #[tauri::command]
 pub fn rollback_optimization_profile(
     database: State<'_, RuntimeDatabase>,
+    ticket_state: State<'_, ExecutionTicketState>,
     target_version: Option<i64>,
+    operation_context: OperationContext,
 ) -> Result<OptimizationProfileResult, String> {
+    let handler_started = Instant::now();
     let workspace_scope = database.local_workspace_scope()?;
-    database.rollback_optimization_profile(&workspace_scope, target_version)
+    let authorization = validate_optimization_runtime_handler(
+        database.inner(),
+        ticket_state.inner(),
+        &workspace_scope,
+        &operation_context,
+    )?;
+    let mutation_key = runtime_effect_mutation_key(
+        &authorization,
+        "optimization.rollback_profile",
+        &serde_json::json!({ "targetVersion": target_version }),
+    )?;
+    let profile = database.rollback_optimization_profile(
+        &workspace_scope,
+        target_version,
+        Some(&mutation_key),
+    )?;
+    record_optimization_runtime_handler_completion(
+        database.inner(),
+        ticket_state.inner(),
+        &workspace_scope,
+        &operation_context,
+        &mutation_key,
+        handler_started,
+    )?;
+    Ok(profile)
 }
 
 #[tauri::command]
@@ -7507,6 +16754,1017 @@ fn indexed_search_candidate_signals(
         })
         .unwrap_or(0.0);
     (title_path_bonus, relation_bonus, recency_bonus)
+}
+
+fn cached_neural_embedding_in_connection(
+    connection: &Connection,
+    workspace_scope: &str,
+    provider_id: &str,
+    model: &str,
+    input_hash: &str,
+) -> Result<Option<Vec<f32>>, String> {
+    let cached = connection
+        .query_row(
+            "SELECT dimensions, vector_blob FROM neural_embedding_cache
+             WHERE workspace_scope=?1 AND provider_id=?2 AND model=?3 AND input_hash=?4",
+            params![workspace_scope, provider_id, model, input_hash],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("无法读取神经 Embedding 缓存：{error}"))?;
+    Ok(cached.and_then(|(dimensions, blob)| decode_neural_embedding(dimensions, &blob)))
+}
+
+fn load_cached_neural_embedding(
+    database: &RuntimeDatabase,
+    configured: &crate::model_provider::ConfiguredEmbeddingModel,
+    workspace_scope: &str,
+    input_hash: &str,
+) -> Result<Option<Vec<f32>>, String> {
+    let connection = database
+        .connection
+        .lock()
+        .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+    cached_neural_embedding_in_connection(
+        &connection,
+        workspace_scope,
+        &configured.provider_id,
+        &configured.model,
+        input_hash,
+    )
+}
+
+fn persist_neural_embedding_and_bindings(
+    database: &RuntimeDatabase,
+    configured: &crate::model_provider::ConfiguredEmbeddingModel,
+    workspace_scope: &str,
+    input_hash: &str,
+    vector: Option<Vec<f32>>,
+    notes: &[NeuralEmbeddingNoteInput],
+) -> Result<(), String> {
+    let mut connection = database
+        .connection
+        .lock()
+        .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("无法开始神经 Embedding 缓存事务：{error}"))?;
+    let now = Utc::now().to_rfc3339();
+    if let Some(vector) = vector {
+        let (dimensions, vector_blob) = encode_neural_embedding(vector)?;
+        transaction
+            .execute(
+                "INSERT INTO neural_embedding_cache
+                 (workspace_scope, provider_id, model, input_hash, dimensions, vector_blob,
+                  created_at, last_used_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+                 ON CONFLICT(workspace_scope, provider_id, model, input_hash) DO UPDATE SET
+                   dimensions=excluded.dimensions,
+                   vector_blob=excluded.vector_blob,
+                   last_used_at=excluded.last_used_at",
+                params![
+                    workspace_scope,
+                    configured.provider_id,
+                    configured.model,
+                    input_hash,
+                    dimensions,
+                    vector_blob,
+                    now,
+                ],
+            )
+            .map_err(|error| format!("无法保存神经 Embedding 缓存：{error}"))?;
+    } else {
+        transaction
+            .execute(
+                "UPDATE neural_embedding_cache SET last_used_at=?5
+                 WHERE workspace_scope=?1 AND provider_id=?2 AND model=?3 AND input_hash=?4",
+                params![
+                    workspace_scope,
+                    configured.provider_id,
+                    configured.model,
+                    input_hash,
+                    now,
+                ],
+            )
+            .map_err(|error| format!("无法更新神经 Embedding 缓存访问时间：{error}"))?;
+    }
+    for note in notes {
+        transaction
+            .execute(
+                "INSERT INTO note_neural_embeddings
+                 (workspace_scope, provider_id, model, vault_id, relative_path, content_hash,
+                  input_hash, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(workspace_scope, provider_id, model, vault_id, relative_path)
+                 DO UPDATE SET content_hash=excluded.content_hash,
+                               input_hash=excluded.input_hash,
+                               updated_at=excluded.updated_at",
+                params![
+                    workspace_scope,
+                    configured.provider_id,
+                    configured.model,
+                    note.vault_id,
+                    note.relative_path,
+                    note.content_hash,
+                    input_hash,
+                    now,
+                ],
+            )
+            .map_err(|error| format!("无法绑定笔记神经 Embedding：{error}"))?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("无法提交神经 Embedding 缓存：{error}"))
+}
+
+fn load_missing_neural_embedding_inputs(
+    database: &RuntimeDatabase,
+    configured: &crate::model_provider::ConfiguredEmbeddingModel,
+    workspace_scope: &str,
+    vault_id: Option<&str>,
+    limit: usize,
+) -> Result<Vec<NeuralEmbeddingNoteInput>, String> {
+    let scoped = vault_id.filter(|value| *value != "all");
+    let sql = if scoped.is_some() {
+        "SELECT i.vault_id, i.relative_path, i.title, i.content_hash,
+                i.tags_json, i.wiki_links_json,
+                COALESCE((
+                  SELECT f.content FROM note_fts f
+                  WHERE f.vault_id=i.vault_id AND f.relative_path=i.relative_path LIMIT 1
+                ), '')
+         FROM note_index i
+         LEFT JOIN note_neural_embeddings e
+           ON e.workspace_scope=?1 AND e.provider_id=?2 AND e.model=?3
+          AND e.vault_id=i.vault_id AND e.relative_path=i.relative_path
+          AND e.content_hash=i.content_hash
+         LEFT JOIN neural_embedding_cache c
+           ON c.workspace_scope=e.workspace_scope AND c.provider_id=e.provider_id
+          AND c.model=e.model AND c.input_hash=e.input_hash
+         WHERE i.vault_id=?4 AND (
+           e.relative_path IS NULL OR c.input_hash IS NULL
+           OR c.dimensions <= 0 OR c.dimensions > 65536
+           OR length(c.vector_blob) != c.dimensions * 4
+         )
+         ORDER BY i.modified_at DESC, i.relative_path
+         LIMIT ?5"
+    } else {
+        "SELECT i.vault_id, i.relative_path, i.title, i.content_hash,
+                i.tags_json, i.wiki_links_json,
+                COALESCE((
+                  SELECT f.content FROM note_fts f
+                  WHERE f.vault_id=i.vault_id AND f.relative_path=i.relative_path LIMIT 1
+                ), '')
+         FROM note_index i
+         LEFT JOIN note_neural_embeddings e
+           ON e.workspace_scope=?1 AND e.provider_id=?2 AND e.model=?3
+          AND e.vault_id=i.vault_id AND e.relative_path=i.relative_path
+          AND e.content_hash=i.content_hash
+         LEFT JOIN neural_embedding_cache c
+           ON c.workspace_scope=e.workspace_scope AND c.provider_id=e.provider_id
+          AND c.model=e.model AND c.input_hash=e.input_hash
+         WHERE e.relative_path IS NULL OR c.input_hash IS NULL
+           OR c.dimensions <= 0 OR c.dimensions > 65536
+           OR length(c.vector_blob) != c.dimensions * 4
+         ORDER BY i.modified_at DESC, i.vault_id, i.relative_path
+         LIMIT ?4"
+    };
+    let connection = database
+        .connection
+        .lock()
+        .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+    let mut statement = connection
+        .prepare(sql)
+        .map_err(|error| format!("无法准备神经 Embedding 缺口查询：{error}"))?;
+    let map_row = |row: &rusqlite::Row<'_>| {
+        let vault_id = row.get::<_, String>(0)?;
+        let relative_path = row.get::<_, String>(1)?;
+        let title = row.get::<_, String>(2)?;
+        let content_hash = row.get::<_, String>(3)?;
+        let tags_json = row.get::<_, String>(4)?;
+        let wiki_links_json = row.get::<_, String>(5)?;
+        let content = row.get::<_, String>(6)?;
+        let input = neural_note_embedding_input(
+            &relative_path,
+            &title,
+            &tags_json,
+            &wiki_links_json,
+            &content,
+        );
+        Ok(NeuralEmbeddingNoteInput {
+            vault_id,
+            relative_path,
+            content_hash,
+            input_hash: neural_embedding_input_hash(&input),
+            input,
+        })
+    };
+    let inputs = if let Some(vault_id) = scoped {
+        statement
+            .query_map(
+                params![
+                    workspace_scope,
+                    configured.provider_id,
+                    configured.model,
+                    vault_id,
+                    limit.clamp(1, MAX_NEURAL_EMBEDDING_REFRESH_NOTES) as i64,
+                ],
+                map_row,
+            )
+            .map_err(|error| format!("无法读取神经 Embedding 缺口：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+    } else {
+        statement
+            .query_map(
+                params![
+                    workspace_scope,
+                    configured.provider_id,
+                    configured.model,
+                    limit.clamp(1, MAX_NEURAL_EMBEDDING_REFRESH_NOTES) as i64,
+                ],
+                map_row,
+            )
+            .map_err(|error| format!("无法读取神经 Embedding 缺口：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+    }
+    .map_err(|error| format!("无法解析神经 Embedding 缺口：{error}"))?;
+    Ok(inputs)
+}
+
+fn update_neural_embedding_index_state(
+    database: &RuntimeDatabase,
+    configured: &crate::model_provider::ConfiguredEmbeddingModel,
+    workspace_scope: &str,
+    vault_id: Option<&str>,
+    last_error: Option<&str>,
+) -> Result<String, String> {
+    let scoped = vault_id.filter(|value| *value != "all");
+    let sql = if scoped.is_some() {
+        "SELECT i.vault_id, COUNT(*),
+                SUM(CASE WHEN e.relative_path IS NOT NULL AND c.input_hash IS NOT NULL THEN 1 ELSE 0 END)
+         FROM note_index i
+         LEFT JOIN note_neural_embeddings e
+           ON e.workspace_scope=?1 AND e.provider_id=?2 AND e.model=?3
+          AND e.vault_id=i.vault_id AND e.relative_path=i.relative_path
+          AND e.content_hash=i.content_hash
+         LEFT JOIN neural_embedding_cache c
+           ON c.workspace_scope=e.workspace_scope AND c.provider_id=e.provider_id
+          AND c.model=e.model AND c.input_hash=e.input_hash
+         WHERE i.vault_id=?4
+         GROUP BY i.vault_id"
+    } else {
+        "SELECT i.vault_id, COUNT(*),
+                SUM(CASE WHEN e.relative_path IS NOT NULL AND c.input_hash IS NOT NULL THEN 1 ELSE 0 END)
+         FROM note_index i
+         LEFT JOIN note_neural_embeddings e
+           ON e.workspace_scope=?1 AND e.provider_id=?2 AND e.model=?3
+          AND e.vault_id=i.vault_id AND e.relative_path=i.relative_path
+          AND e.content_hash=i.content_hash
+         LEFT JOIN neural_embedding_cache c
+           ON c.workspace_scope=e.workspace_scope AND c.provider_id=e.provider_id
+          AND c.model=e.model AND c.input_hash=e.input_hash
+         GROUP BY i.vault_id"
+    };
+    let mut connection = database
+        .connection
+        .lock()
+        .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+    let rows = {
+        let mut statement = connection
+            .prepare(sql)
+            .map_err(|error| format!("无法准备神经 Embedding 索引状态查询：{error}"))?;
+        let map_row = |row: &rusqlite::Row<'_>| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        };
+        if let Some(vault_id) = scoped {
+            statement
+                .query_map(
+                    params![
+                        workspace_scope,
+                        configured.provider_id,
+                        configured.model,
+                        vault_id,
+                    ],
+                    map_row,
+                )
+                .map_err(|error| format!("无法读取神经 Embedding 索引状态：{error}"))?
+                .collect::<Result<Vec<_>, _>>()
+        } else {
+            statement
+                .query_map(
+                    params![workspace_scope, configured.provider_id, configured.model],
+                    map_row,
+                )
+                .map_err(|error| format!("无法读取神经 Embedding 索引状态：{error}"))?
+                .collect::<Result<Vec<_>, _>>()
+        }
+        .map_err(|error| format!("无法解析神经 Embedding 索引状态：{error}"))?
+    };
+    let rows = if rows.is_empty() {
+        scoped
+            .map(|vault_id| vec![(vault_id.to_string(), 0_i64, 0_i64)])
+            .unwrap_or_default()
+    } else {
+        rows
+    };
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("无法开始神经 Embedding 索引状态事务：{error}"))?;
+    let now = Utc::now().to_rfc3339();
+    let error = last_error.map(|value| value.chars().take(1_000).collect::<String>());
+    let mut aggregate = "ready".to_string();
+    for (vault_id, total_notes, indexed_notes) in rows {
+        let state = if error.is_some() {
+            if indexed_notes > 0 {
+                "degraded"
+            } else {
+                "failed"
+            }
+        } else if indexed_notes >= total_notes {
+            "ready"
+        } else if indexed_notes > 0 {
+            "building"
+        } else {
+            "pending"
+        };
+        if matches!(state, "failed" | "degraded") || (aggregate == "ready" && state != "ready") {
+            aggregate = state.to_string();
+        }
+        transaction
+            .execute(
+                "INSERT INTO neural_embedding_index_state
+                 (workspace_scope, provider_id, model, vault_id, state, total_notes,
+                  indexed_notes, last_error, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(workspace_scope, provider_id, model, vault_id) DO UPDATE SET
+                   state=excluded.state,
+                   total_notes=excluded.total_notes,
+                   indexed_notes=excluded.indexed_notes,
+                   last_error=excluded.last_error,
+                   updated_at=excluded.updated_at",
+                params![
+                    workspace_scope,
+                    configured.provider_id,
+                    configured.model,
+                    vault_id,
+                    state,
+                    total_notes,
+                    indexed_notes,
+                    error,
+                    now,
+                ],
+            )
+            .map_err(|db_error| format!("无法保存神经 Embedding 索引状态：{db_error}"))?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("无法提交神经 Embedding 索引状态：{error}"))?;
+    Ok(aggregate)
+}
+
+async fn refresh_neural_embedding_notes(
+    database: &RuntimeDatabase,
+    configured: &crate::model_provider::ConfiguredEmbeddingModel,
+    workspace_scope: &str,
+    vault_id: Option<&str>,
+    limit: usize,
+) -> Result<NeuralEmbeddingRefreshOutcome, String> {
+    let missing = load_missing_neural_embedding_inputs(
+        database,
+        configured,
+        workspace_scope,
+        vault_id,
+        limit,
+    )?;
+    let mut outcome = NeuralEmbeddingRefreshOutcome {
+        loaded_notes: missing.len(),
+        ..NeuralEmbeddingRefreshOutcome::default()
+    };
+    let mut pending = HashMap::<String, (String, Vec<NeuralEmbeddingNoteInput>)>::new();
+    for note in missing {
+        if load_cached_neural_embedding(database, configured, workspace_scope, &note.input_hash)?
+            .is_some()
+        {
+            persist_neural_embedding_and_bindings(
+                database,
+                configured,
+                workspace_scope,
+                &note.input_hash,
+                None,
+                std::slice::from_ref(&note),
+            )?;
+            outcome.indexed_notes += 1;
+        } else {
+            let entry = pending
+                .entry(note.input_hash.clone())
+                .or_insert_with(|| (note.input.clone(), Vec::new()));
+            entry.1.push(note);
+        }
+    }
+
+    let mut pending = pending.into_iter().collect::<Vec<_>>();
+    pending.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut batch_start = 0;
+    while batch_start < pending.len() {
+        let mut batch_end = batch_start;
+        let mut batch_characters = 0_usize;
+        while batch_end < pending.len() && batch_end - batch_start < NEURAL_EMBEDDING_BATCH_SIZE {
+            let (_, (input, _)) = &pending[batch_end];
+            let input_characters = input.chars().count();
+            if batch_end > batch_start
+                && batch_characters.saturating_add(input_characters)
+                    > crate::model_provider::MAX_EMBEDDING_TOTAL_CHARS
+            {
+                break;
+            }
+            batch_characters = batch_characters.saturating_add(input_characters);
+            batch_end += 1;
+        }
+        let chunk = &pending[batch_start..batch_end];
+        let inputs = chunk
+            .iter()
+            .map(|(_, (input, _))| input.clone())
+            .collect::<Vec<_>>();
+        let vectors =
+            match request_embeddings_with_usage(database, configured, &inputs, "embedding.index")
+                .await
+            {
+                Ok(vectors) => vectors,
+                Err(error) => {
+                    outcome.error = Some(error);
+                    break;
+                }
+            };
+        for ((input_hash, (_, notes)), vector) in chunk.iter().zip(vectors) {
+            persist_neural_embedding_and_bindings(
+                database,
+                configured,
+                workspace_scope,
+                input_hash,
+                Some(vector),
+                notes,
+            )?;
+            outcome.indexed_notes += notes.len();
+        }
+        batch_start = batch_end;
+    }
+    Ok(outcome)
+}
+
+async fn prepare_neural_search_context(
+    database: &RuntimeDatabase,
+    workspace_scope: &str,
+    vault_id: Option<&str>,
+    query: &str,
+) -> Result<Option<NeuralSearchContext>, String> {
+    let Some(configured) =
+        crate::model_provider::configured_embedding_model(database, workspace_scope)?
+    else {
+        return Ok(None);
+    };
+    let query_input = query.trim().nfc().collect::<String>();
+    let query_hash = neural_embedding_input_hash(&query_input);
+    let query_vector = if let Some(vector) =
+        load_cached_neural_embedding(database, &configured, workspace_scope, &query_hash)?
+    {
+        persist_neural_embedding_and_bindings(
+            database,
+            &configured,
+            workspace_scope,
+            &query_hash,
+            None,
+            &[],
+        )?;
+        vector
+    } else {
+        let vectors = match request_embeddings_with_usage(
+            database,
+            &configured,
+            std::slice::from_ref(&query_input),
+            "embedding.search",
+        )
+        .await
+        {
+            Ok(vectors) => vectors,
+            Err(error) => {
+                let _ = update_neural_embedding_index_state(
+                    database,
+                    &configured,
+                    workspace_scope,
+                    vault_id,
+                    Some(&error),
+                );
+                return Err(error);
+            }
+        };
+        let vector = vectors
+            .into_iter()
+            .next()
+            .ok_or_else(|| "Embedding 查询响应为空".to_string())?;
+        persist_neural_embedding_and_bindings(
+            database,
+            &configured,
+            workspace_scope,
+            &query_hash,
+            Some(vector.clone()),
+            &[],
+        )?;
+        vector
+    };
+
+    let refresh = refresh_neural_embedding_notes(
+        database,
+        &configured,
+        workspace_scope,
+        vault_id,
+        MAX_NEURAL_EMBEDDING_REFRESH_NOTES,
+    )
+    .await?;
+    let refresh_error = refresh.error;
+    let index_state = update_neural_embedding_index_state(
+        database,
+        &configured,
+        workspace_scope,
+        vault_id,
+        refresh_error.as_deref(),
+    )?;
+    if let Some(error) = refresh_error {
+        log::warn!("神经 Embedding 索引补齐失败，继续使用已有向量与本地搜索：{error}");
+    }
+    Ok(Some(NeuralSearchContext {
+        workspace_scope: workspace_scope.to_string(),
+        provider_id: configured.provider_id,
+        provider: configured.provider,
+        model: configured.model,
+        query_vector,
+        index_state,
+    }))
+}
+
+async fn request_embeddings_with_usage(
+    database: &RuntimeDatabase,
+    configured: &crate::model_provider::ConfiguredEmbeddingModel,
+    inputs: &[String],
+    operation: &str,
+) -> Result<Vec<Vec<f32>>, String> {
+    let request_id = format!("embedding-request-{}", Uuid::new_v4());
+    let trace_id = crate::trace::new_trace_id();
+    let prompt_tokens = inputs
+        .iter()
+        .map(|input| input.chars().count().div_ceil(4) as u64)
+        .sum::<u64>();
+    let started_at = Instant::now();
+    let result = crate::model_provider::request_embeddings(configured, inputs).await;
+    let duration_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    let error = result.as_ref().err().map(String::as_str);
+    if let Err(record_error) = database.record_model_usage(&ModelUsageRecord {
+        request_id: &request_id,
+        trace_id: &trace_id,
+        operation,
+        provider: &configured.provider,
+        model: &configured.model,
+        state: if result.is_ok() {
+            "succeeded"
+        } else {
+            "failed"
+        },
+        prompt_tokens,
+        completion_tokens: 0,
+        total_tokens: prompt_tokens,
+        estimated_cost_usd: None,
+        cost_source: "estimated_input_characters",
+        duration_ms,
+        error,
+    }) {
+        log::warn!("无法记录 Embedding 模型用量：{record_error}");
+    }
+    result
+}
+
+fn normalize_neural_embedding_vault_id(vault_id: Option<&str>) -> Result<Option<String>, String> {
+    let Some(vault_id) = vault_id.map(str::trim) else {
+        return Ok(None);
+    };
+    if vault_id.is_empty() || vault_id == "all" {
+        return Ok(None);
+    }
+    if vault_id.chars().count() > 160 || vault_id.contains('\0') {
+        return Err("Vault ID 无效或超过 160 个字符".to_string());
+    }
+    Ok(Some(vault_id.to_string()))
+}
+
+fn neural_embedding_state_priority(state: &str) -> u8 {
+    match state {
+        "failed" => 5,
+        "degraded" => 4,
+        "building" => 3,
+        "pending" => 2,
+        "ready" => 1,
+        _ => 0,
+    }
+}
+
+fn load_neural_embedding_index_status(
+    database: &RuntimeDatabase,
+    workspace_scope: &str,
+    vault_id: Option<&str>,
+    configured: Option<&crate::model_provider::ConfiguredEmbeddingModel>,
+    configuration_error: Option<String>,
+) -> Result<NeuralEmbeddingIndexStatus, String> {
+    let scoped = normalize_neural_embedding_vault_id(vault_id)?;
+    let connection = database
+        .connection
+        .lock()
+        .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+    let mut vault_rows = {
+        let sql = if scoped.is_some() {
+            "SELECT v.id, COUNT(i.relative_path)
+             FROM vault_registry v
+             LEFT JOIN note_index i ON i.vault_id=v.id
+             WHERE v.id=?1
+             GROUP BY v.id ORDER BY v.id"
+        } else {
+            "SELECT v.id, COUNT(i.relative_path)
+             FROM vault_registry v
+             LEFT JOIN note_index i ON i.vault_id=v.id
+             GROUP BY v.id ORDER BY v.id"
+        };
+        let mut statement = connection
+            .prepare(sql)
+            .map_err(|error| format!("无法准备神经 Embedding 状态查询：{error}"))?;
+        if let Some(vault_id) = scoped.as_deref() {
+            statement
+                .query_map([vault_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(|error| format!("无法读取 Vault 神经 Embedding 状态：{error}"))?
+                .collect::<Result<Vec<_>, _>>()
+        } else {
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(|error| format!("无法读取神经 Embedding 状态：{error}"))?
+                .collect::<Result<Vec<_>, _>>()
+        }
+        .map_err(|error| format!("无法解析神经 Embedding 状态：{error}"))?
+    };
+    if vault_rows.is_empty() {
+        if let Some(vault_id) = scoped.as_ref() {
+            vault_rows.push((vault_id.clone(), 0));
+        }
+    }
+
+    let mut vaults = Vec::with_capacity(vault_rows.len());
+    for (vault_id, total_notes) in vault_rows {
+        let (indexed_notes, stored_error, updated_at) = if let Some(configured) = configured {
+            let indexed_notes = connection
+                .query_row(
+                    "SELECT COUNT(*)
+                     FROM note_index i
+                     JOIN note_neural_embeddings e
+                       ON e.vault_id=i.vault_id AND e.relative_path=i.relative_path
+                      AND e.content_hash=i.content_hash
+                     JOIN neural_embedding_cache c
+                       ON c.workspace_scope=e.workspace_scope AND c.provider_id=e.provider_id
+                      AND c.model=e.model AND c.input_hash=e.input_hash
+                     WHERE i.vault_id=?1 AND e.workspace_scope=?2 AND e.provider_id=?3
+                       AND e.model=?4 AND c.dimensions > 0
+                       AND length(c.vector_blob)=c.dimensions * 4",
+                    params![
+                        vault_id,
+                        workspace_scope,
+                        configured.provider_id,
+                        configured.model,
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| format!("无法统计已索引神经 Embedding：{error}"))?;
+            let stored = connection
+                .query_row(
+                    "SELECT last_error, updated_at FROM neural_embedding_index_state
+                     WHERE workspace_scope=?1 AND provider_id=?2 AND model=?3 AND vault_id=?4",
+                    params![
+                        workspace_scope,
+                        configured.provider_id,
+                        configured.model,
+                        vault_id,
+                    ],
+                    |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(|error| format!("无法读取神经 Embedding 索引状态记录：{error}"))?;
+            let (stored_error, updated_at) = stored
+                .map(|(error, updated_at)| (error, Some(updated_at)))
+                .unwrap_or((None, None));
+            (indexed_notes, stored_error, updated_at)
+        } else {
+            (0, configuration_error.clone(), None)
+        };
+        let pending_notes = total_notes.saturating_sub(indexed_notes);
+        let state = if configured.is_none() {
+            "unconfigured"
+        } else if stored_error.is_some() {
+            if indexed_notes > 0 {
+                "degraded"
+            } else {
+                "failed"
+            }
+        } else if pending_notes == 0 {
+            "ready"
+        } else if indexed_notes > 0 {
+            "building"
+        } else {
+            "pending"
+        };
+        vaults.push(NeuralEmbeddingVaultIndexStatus {
+            vault_id,
+            state: state.to_string(),
+            total_notes,
+            indexed_notes,
+            pending_notes,
+            last_error: stored_error,
+            updated_at,
+        });
+    }
+
+    let cache_entries = if let Some(configured) = configured {
+        if let Some(vault_id) = scoped.as_deref() {
+            connection
+                .query_row(
+                    "SELECT COUNT(DISTINCT c.input_hash)
+                     FROM neural_embedding_cache c
+                     JOIN note_neural_embeddings e
+                       ON e.workspace_scope=c.workspace_scope AND e.provider_id=c.provider_id
+                      AND e.model=c.model AND e.input_hash=c.input_hash
+                     WHERE c.workspace_scope=?1 AND c.provider_id=?2 AND c.model=?3
+                       AND e.vault_id=?4",
+                    params![
+                        workspace_scope,
+                        configured.provider_id,
+                        configured.model,
+                        vault_id,
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| format!("无法统计 Vault 神经 Embedding 缓存：{error}"))?
+        } else {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM neural_embedding_cache
+                     WHERE workspace_scope=?1 AND provider_id=?2 AND model=?3",
+                    params![workspace_scope, configured.provider_id, configured.model,],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| format!("无法统计神经 Embedding 缓存：{error}"))?
+        }
+    } else {
+        0
+    };
+    drop(connection);
+
+    let total_notes = vaults.iter().map(|vault| vault.total_notes).sum();
+    let indexed_notes = vaults.iter().map(|vault| vault.indexed_notes).sum();
+    let pending_notes = vaults.iter().map(|vault| vault.pending_notes).sum();
+    let state = if configured.is_none() {
+        "unconfigured".to_string()
+    } else {
+        vaults
+            .iter()
+            .max_by_key(|vault| neural_embedding_state_priority(&vault.state))
+            .map(|vault| vault.state.clone())
+            .unwrap_or_else(|| "ready".to_string())
+    };
+    let last_error = if configured.is_none() {
+        configuration_error
+    } else {
+        vaults
+            .iter()
+            .filter_map(|vault| {
+                vault
+                    .last_error
+                    .as_ref()
+                    .map(|error| (neural_embedding_state_priority(&vault.state), error.clone()))
+            })
+            .max_by_key(|(priority, _)| *priority)
+            .map(|(_, error)| error)
+    };
+    let updated_at = vaults
+        .iter()
+        .filter_map(|vault| vault.updated_at.clone())
+        .max();
+    Ok(NeuralEmbeddingIndexStatus {
+        workspace_scope: workspace_scope.to_string(),
+        vault_id: scoped,
+        configured: configured.is_some(),
+        provider_id: configured.map(|value| value.provider_id.clone()),
+        provider: configured.map(|value| value.provider.clone()),
+        model: configured.map(|value| value.model.clone()),
+        state,
+        total_notes,
+        indexed_notes,
+        pending_notes,
+        cache_entries,
+        last_error,
+        updated_at,
+        vaults,
+    })
+}
+
+fn reset_neural_embedding_index(
+    database: &RuntimeDatabase,
+    configured: &crate::model_provider::ConfiguredEmbeddingModel,
+    workspace_scope: &str,
+    vault_id: Option<&str>,
+) -> Result<(), String> {
+    let scoped = normalize_neural_embedding_vault_id(vault_id)?;
+    let mut connection = database
+        .connection
+        .lock()
+        .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("无法开始神经 Embedding 重建事务：{error}"))?;
+    if let Some(vault_id) = scoped.as_deref() {
+        transaction
+            .execute(
+                "DELETE FROM note_neural_embeddings
+                 WHERE workspace_scope=?1 AND provider_id=?2 AND model=?3 AND vault_id=?4",
+                params![
+                    workspace_scope,
+                    configured.provider_id,
+                    configured.model,
+                    vault_id,
+                ],
+            )
+            .map_err(|error| format!("无法清理 Vault 神经 Embedding 绑定：{error}"))?;
+        transaction
+            .execute(
+                "DELETE FROM neural_embedding_index_state
+                 WHERE workspace_scope=?1 AND provider_id=?2 AND model=?3 AND vault_id=?4",
+                params![
+                    workspace_scope,
+                    configured.provider_id,
+                    configured.model,
+                    vault_id,
+                ],
+            )
+            .map_err(|error| format!("无法清理 Vault 神经 Embedding 状态：{error}"))?;
+        transaction
+            .execute(
+                "DELETE FROM neural_embedding_cache
+                 WHERE workspace_scope=?1 AND provider_id=?2 AND model=?3
+                   AND NOT EXISTS (
+                     SELECT 1 FROM note_neural_embeddings e
+                     WHERE e.workspace_scope=neural_embedding_cache.workspace_scope
+                       AND e.provider_id=neural_embedding_cache.provider_id
+                       AND e.model=neural_embedding_cache.model
+                       AND e.input_hash=neural_embedding_cache.input_hash
+                   )",
+                params![workspace_scope, configured.provider_id, configured.model,],
+            )
+            .map_err(|error| format!("无法回收未引用的神经 Embedding 缓存：{error}"))?;
+    } else {
+        transaction
+            .execute(
+                "DELETE FROM note_neural_embeddings
+                 WHERE workspace_scope=?1 AND provider_id=?2 AND model=?3",
+                params![workspace_scope, configured.provider_id, configured.model,],
+            )
+            .map_err(|error| format!("无法清理神经 Embedding 绑定：{error}"))?;
+        transaction
+            .execute(
+                "DELETE FROM neural_embedding_cache
+                 WHERE workspace_scope=?1 AND provider_id=?2 AND model=?3",
+                params![workspace_scope, configured.provider_id, configured.model,],
+            )
+            .map_err(|error| format!("无法清理神经 Embedding 缓存：{error}"))?;
+        transaction
+            .execute(
+                "DELETE FROM neural_embedding_index_state
+                 WHERE workspace_scope=?1 AND provider_id=?2 AND model=?3",
+                params![workspace_scope, configured.provider_id, configured.model,],
+            )
+            .map_err(|error| format!("无法清理神经 Embedding 状态：{error}"))?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("无法提交神经 Embedding 重建清理：{error}"))?;
+    drop(connection);
+    update_neural_embedding_index_state(
+        database,
+        configured,
+        workspace_scope,
+        scoped.as_deref(),
+        None,
+    )?;
+    Ok(())
+}
+
+fn get_neural_embedding_index_status_inner(
+    database: &RuntimeDatabase,
+    vault_id: Option<&str>,
+) -> Result<NeuralEmbeddingIndexStatus, String> {
+    let workspace_scope = database.local_workspace_scope()?;
+    match crate::model_provider::configured_embedding_model(database, &workspace_scope) {
+        Ok(configured) => load_neural_embedding_index_status(
+            database,
+            &workspace_scope,
+            vault_id,
+            configured.as_ref(),
+            None,
+        ),
+        Err(error) => load_neural_embedding_index_status(
+            database,
+            &workspace_scope,
+            vault_id,
+            None,
+            Some(error),
+        ),
+    }
+}
+
+async fn rebuild_neural_embedding_index_inner(
+    database: &RuntimeDatabase,
+    vault_id: Option<&str>,
+) -> Result<NeuralEmbeddingIndexStatus, String> {
+    let workspace_scope = database.local_workspace_scope()?;
+    let configured =
+        match crate::model_provider::configured_embedding_model(database, &workspace_scope) {
+            Ok(Some(configured)) => configured,
+            Ok(None) => {
+                return load_neural_embedding_index_status(
+                    database,
+                    &workspace_scope,
+                    vault_id,
+                    None,
+                    None,
+                );
+            }
+            Err(error) => {
+                return load_neural_embedding_index_status(
+                    database,
+                    &workspace_scope,
+                    vault_id,
+                    None,
+                    Some(error),
+                );
+            }
+        };
+    let scoped = normalize_neural_embedding_vault_id(vault_id)?;
+    reset_neural_embedding_index(database, &configured, &workspace_scope, scoped.as_deref())?;
+
+    let mut rebuild_error = None;
+    loop {
+        let refresh = refresh_neural_embedding_notes(
+            database,
+            &configured,
+            &workspace_scope,
+            scoped.as_deref(),
+            MAX_NEURAL_EMBEDDING_REFRESH_NOTES,
+        )
+        .await?;
+        if let Some(error) = refresh.error {
+            rebuild_error = Some(error);
+            break;
+        }
+        if refresh.loaded_notes == 0 {
+            break;
+        }
+        if refresh.indexed_notes == 0 {
+            rebuild_error =
+                Some("神经 Embedding 重建未能推进，已停止并保留本地搜索回退".to_string());
+            break;
+        }
+        update_neural_embedding_index_state(
+            database,
+            &configured,
+            &workspace_scope,
+            scoped.as_deref(),
+            None,
+        )?;
+    }
+    update_neural_embedding_index_state(
+        database,
+        &configured,
+        &workspace_scope,
+        scoped.as_deref(),
+        rebuild_error.as_deref(),
+    )?;
+    if let Some(error) = rebuild_error {
+        log::warn!("手动重建神经 Embedding 索引未完整完成，继续使用本地搜索回退：{error}");
+    }
+    load_neural_embedding_index_status(
+        database,
+        &workspace_scope,
+        scoped.as_deref(),
+        Some(&configured),
+        None,
+    )
 }
 
 fn load_lexical_search_candidates(
@@ -7695,11 +17953,166 @@ fn load_vector_search_candidates(
     Ok(candidates)
 }
 
-fn indexed_search_in_connection(
+fn load_neural_search_candidates(
+    connection: &Connection,
+    scoped: Option<&str>,
+    context: &NeuralSearchContext,
+) -> Result<(Vec<IndexedSearchCandidate>, bool), String> {
+    let sql = if scoped.is_some() {
+        "SELECT i.vault_id, i.relative_path, i.title,
+                COALESCE((
+                  SELECT substr(f.content, 1, 320) FROM note_fts f
+                  WHERE f.vault_id=i.vault_id AND f.relative_path=i.relative_path LIMIT 1
+                ), ''),
+                i.modified_at, i.tags_json, i.wiki_links_json,
+                c.dimensions, c.vector_blob, c.input_hash
+         FROM note_neural_embeddings e
+         JOIN neural_embedding_cache c
+           ON c.workspace_scope=e.workspace_scope AND c.provider_id=e.provider_id
+          AND c.model=e.model AND c.input_hash=e.input_hash
+         JOIN note_index i
+           ON i.vault_id=e.vault_id AND i.relative_path=e.relative_path
+          AND i.content_hash=e.content_hash
+         WHERE e.workspace_scope=?1 AND e.provider_id=?2 AND e.model=?3 AND e.vault_id=?4"
+    } else {
+        "SELECT i.vault_id, i.relative_path, i.title,
+                COALESCE((
+                  SELECT substr(f.content, 1, 320) FROM note_fts f
+                  WHERE f.vault_id=i.vault_id AND f.relative_path=i.relative_path LIMIT 1
+                ), ''),
+                i.modified_at, i.tags_json, i.wiki_links_json,
+                c.dimensions, c.vector_blob, c.input_hash
+         FROM note_neural_embeddings e
+         JOIN neural_embedding_cache c
+           ON c.workspace_scope=e.workspace_scope AND c.provider_id=e.provider_id
+          AND c.model=e.model AND c.input_hash=e.input_hash
+         JOIN note_index i
+           ON i.vault_id=e.vault_id AND i.relative_path=e.relative_path
+          AND i.content_hash=e.content_hash
+         WHERE e.workspace_scope=?1 AND e.provider_id=?2 AND e.model=?3"
+    };
+    let mut statement = connection
+        .prepare(sql)
+        .map_err(|error| format!("无法准备神经 Embedding 搜索：{error}"))?;
+    let map_row = |row: &rusqlite::Row<'_>| {
+        let vault_id = row.get::<_, String>(0)?;
+        let relative_path = row.get::<_, String>(1)?;
+        let title = row.get::<_, String>(2)?;
+        let excerpt = row.get::<_, String>(3)?;
+        let modified_at = row.get::<_, String>(4)?;
+        let dimensions = row.get::<_, i64>(7)?;
+        let blob = row.get::<_, Vec<u8>>(8)?;
+        let input_hash = row.get::<_, String>(9)?;
+        let Some(candidate_vector) = decode_neural_embedding(dimensions, &blob) else {
+            return Ok((None, Some(input_hash)));
+        };
+        if candidate_vector.len() != context.query_vector.len() {
+            return Ok((None, Some(input_hash)));
+        }
+        let similarity = local_vector_similarity(&context.query_vector, &candidate_vector);
+        let tags_json = row.get::<_, String>(5)?;
+        let wiki_links_json = row.get::<_, String>(6)?;
+        Ok((
+            similarity
+                .filter(|score| *score >= MIN_NEURAL_EMBEDDING_SIMILARITY)
+                .map(|score| IndexedSearchCandidate {
+                    vault_id,
+                    relative_path,
+                    title,
+                    excerpt,
+                    modified_at,
+                    lexical_score: None,
+                    vector_similarity: Some(score),
+                    tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+                    wiki_links: serde_json::from_str(&wiki_links_json).unwrap_or_default(),
+                }),
+            None,
+        ))
+    };
+    let rows = if let Some(vault_id) = scoped {
+        statement
+            .query_map(
+                params![
+                    context.workspace_scope,
+                    context.provider_id,
+                    context.model,
+                    vault_id,
+                ],
+                map_row,
+            )
+            .map_err(|error| format!("神经 Embedding 搜索失败：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+    } else {
+        statement
+            .query_map(
+                params![context.workspace_scope, context.provider_id, context.model,],
+                map_row,
+            )
+            .map_err(|error| format!("神经 Embedding 搜索失败：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+    }
+    .map_err(|error| format!("无法解析神经 Embedding 搜索结果：{error}"))?;
+    drop(statement);
+
+    let mut candidates = Vec::new();
+    let mut corrupt_hashes = Vec::new();
+    for (candidate, corrupt_hash) in rows {
+        candidates.extend(candidate);
+        corrupt_hashes.extend(corrupt_hash);
+    }
+    corrupt_hashes.sort();
+    corrupt_hashes.dedup();
+    if !corrupt_hashes.is_empty() {
+        for input_hash in &corrupt_hashes {
+            connection
+                .execute(
+                    "DELETE FROM note_neural_embeddings
+                     WHERE workspace_scope=?1 AND provider_id=?2 AND model=?3 AND input_hash=?4",
+                    params![
+                        context.workspace_scope,
+                        context.provider_id,
+                        context.model,
+                        input_hash,
+                    ],
+                )
+                .map_err(|error| format!("无法移除损坏的神经 Embedding 绑定：{error}"))?;
+            connection
+                .execute(
+                    "DELETE FROM neural_embedding_cache
+                     WHERE workspace_scope=?1 AND provider_id=?2 AND model=?3 AND input_hash=?4",
+                    params![
+                        context.workspace_scope,
+                        context.provider_id,
+                        context.model,
+                        input_hash,
+                    ],
+                )
+                .map_err(|error| format!("无法移除损坏的神经 Embedding 缓存：{error}"))?;
+        }
+        connection
+            .execute(
+                "UPDATE neural_embedding_index_state
+                 SET state='degraded', last_error=?4, updated_at=?5
+                 WHERE workspace_scope=?1 AND provider_id=?2 AND model=?3",
+                params![
+                    context.workspace_scope,
+                    context.provider_id,
+                    context.model,
+                    "检测到损坏或维度不兼容的 Embedding 缓存，已移除并等待重建",
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .map_err(|error| format!("无法标记神经 Embedding 索引降级：{error}"))?;
+    }
+    Ok((candidates, !corrupt_hashes.is_empty()))
+}
+
+fn indexed_search_in_connection_with_neural(
     connection: &Connection,
     vault_id: Option<&str>,
     query: &str,
     max_results: usize,
+    neural: Option<&NeuralSearchContext>,
 ) -> Result<Vec<IndexedSearchResult>, String> {
     let query = query.trim();
     if query.is_empty() {
@@ -7732,14 +18145,15 @@ fn indexed_search_in_connection(
     });
     lexical_candidates.truncate(candidate_limit);
 
-    let mut vector_candidates = match load_vector_search_candidates(connection, scoped, query) {
+    let mut local_vector_candidates = match load_vector_search_candidates(connection, scoped, query)
+    {
         Ok(candidates) => candidates,
         Err(error) => {
             log::warn!("本地特征向量不可用，继续使用 FTS：{error}");
             Vec::new()
         }
     };
-    vector_candidates.sort_by(|left, right| {
+    local_vector_candidates.sort_by(|left, right| {
         right
             .vector_similarity
             .unwrap_or_default()
@@ -7755,7 +18169,27 @@ fn indexed_search_in_connection(
             })
             .then_with(|| left.relative_path.cmp(&right.relative_path))
     });
-    vector_candidates.truncate(candidate_limit);
+    local_vector_candidates.truncate(candidate_limit);
+
+    let (mut neural_candidates, neural_cache_degraded) = match neural {
+        Some(context) => match load_neural_search_candidates(connection, scoped, context) {
+            Ok(result) => result,
+            Err(error) => {
+                log::warn!("神经 Embedding 候选不可用，继续使用 FTS 与本地向量：{error}");
+                (Vec::new(), true)
+            }
+        },
+        None => (Vec::new(), false),
+    };
+    neural_candidates.sort_by(|left, right| {
+        right
+            .vector_similarity
+            .unwrap_or_default()
+            .partial_cmp(&left.vector_similarity.unwrap_or_default())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.relative_path.cmp(&right.relative_path))
+    });
+    neural_candidates.truncate(candidate_limit);
 
     let lexical_ranks = lexical_candidates
         .iter()
@@ -7767,7 +18201,7 @@ fn indexed_search_in_connection(
             )
         })
         .collect::<HashMap<_, _>>();
-    let vector_ranks = vector_candidates
+    let local_vector_ranks = local_vector_candidates
         .iter()
         .enumerate()
         .map(|(index, candidate)| {
@@ -7777,6 +18211,39 @@ fn indexed_search_in_connection(
             )
         })
         .collect::<HashMap<_, _>>();
+    let neural_ranks = neural_candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            (
+                (candidate.vault_id.clone(), candidate.relative_path.clone()),
+                index + 1,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let local_vector_similarities = local_vector_candidates
+        .iter()
+        .filter_map(|candidate| {
+            candidate.vector_similarity.map(|similarity| {
+                (
+                    (candidate.vault_id.clone(), candidate.relative_path.clone()),
+                    similarity,
+                )
+            })
+        })
+        .collect::<HashMap<_, _>>();
+    let neural_similarities = neural_candidates
+        .iter()
+        .filter_map(|candidate| {
+            candidate.vector_similarity.map(|similarity| {
+                (
+                    (candidate.vault_id.clone(), candidate.relative_path.clone()),
+                    similarity,
+                )
+            })
+        })
+        .collect::<HashMap<_, _>>();
+    let neural_active = !neural_ranks.is_empty();
     let mut fused = HashMap::new();
     for candidate in lexical_candidates {
         fused.insert(
@@ -7784,12 +18251,22 @@ fn indexed_search_in_connection(
             candidate,
         );
     }
-    for candidate in vector_candidates {
+    for candidate in local_vector_candidates {
         let key = (candidate.vault_id.clone(), candidate.relative_path.clone());
         fused
             .entry(key)
             .and_modify(|existing: &mut IndexedSearchCandidate| {
-                existing.vector_similarity = candidate.vector_similarity;
+                if existing.excerpt.is_empty() {
+                    existing.excerpt.clone_from(&candidate.excerpt);
+                }
+            })
+            .or_insert(candidate);
+    }
+    for candidate in neural_candidates {
+        let key = (candidate.vault_id.clone(), candidate.relative_path.clone());
+        fused
+            .entry(key)
+            .and_modify(|existing: &mut IndexedSearchCandidate| {
                 if existing.excerpt.is_empty() {
                     existing.excerpt.clone_from(&candidate.excerpt);
                 }
@@ -7801,13 +18278,33 @@ fn indexed_search_in_connection(
         .into_iter()
         .map(|(key, candidate)| {
             let lexical_rank = lexical_ranks.get(&key).copied();
-            let vector_rank = vector_ranks.get(&key).copied();
+            let neural_rank = neural_ranks.get(&key).copied();
+            let local_vector_rank = local_vector_ranks.get(&key).copied();
             let lexical_rrf = lexical_rank
                 .map(|rank| 1.0 / (RRF_K + rank as f64))
                 .unwrap_or(0.0);
-            let vector_rrf = vector_rank
-                .map(|rank| 1.0 / (RRF_K + rank as f64))
+            let neural_rrf = neural_rank
+                .map(|rank| NEURAL_RRF_WEIGHT / (RRF_K + rank as f64))
                 .unwrap_or(0.0);
+            let local_vector_rrf = local_vector_rank
+                .map(|rank| {
+                    let weight = if neural_active {
+                        LOCAL_VECTOR_RRF_WEIGHT_WITH_NEURAL
+                    } else {
+                        1.0
+                    };
+                    weight / (RRF_K + rank as f64)
+                })
+                .unwrap_or(0.0);
+            let vector_rank = neural_rank.or(local_vector_rank);
+            let vector_rrf = if neural_rank.is_some() {
+                neural_rrf
+            } else {
+                local_vector_rrf
+            };
+            let neural_similarity = neural_similarities.get(&key).copied();
+            let local_vector_similarity = local_vector_similarities.get(&key).copied();
+            let vector_similarity = neural_similarity.or(local_vector_similarity);
             let (title_path_bonus, relation_bonus, recency_bonus) =
                 indexed_search_candidate_signals(&candidate, &normalized_query, &now);
             IndexedSearchResult {
@@ -7816,20 +18313,39 @@ fn indexed_search_in_connection(
                 title: candidate.title,
                 excerpt: candidate.excerpt,
                 modified_at: candidate.modified_at,
-                score: lexical_rrf + vector_rrf,
+                score: lexical_rrf + neural_rrf + local_vector_rrf,
                 tags: candidate.tags,
                 wiki_links: candidate.wiki_links,
                 source_kind: "obsidian_markdown".to_string(),
                 ranking_signals: IndexedSearchSignals {
                     lexical_rank,
                     vector_rank,
+                    neural_rank,
+                    local_vector_rank,
                     lexical_rrf,
                     vector_rrf,
-                    vector_similarity: candidate.vector_similarity,
+                    neural_rrf,
+                    local_vector_rrf,
+                    vector_similarity,
+                    neural_similarity,
+                    local_vector_similarity,
                     title_path_bonus,
                     relation_bonus,
                     recency_bonus,
-                    vector_kind: "local_feature_hash_v1",
+                    vector_kind: if neural_rank.is_some() {
+                        "neural_embedding_v1".to_string()
+                    } else {
+                        "local_feature_hash_v1".to_string()
+                    },
+                    embedding_provider: neural.map(|context| context.provider.clone()),
+                    embedding_model: neural.map(|context| context.model.clone()),
+                    embedding_index_state: neural.map(|context| {
+                        if neural_cache_degraded {
+                            "degraded".to_string()
+                        } else {
+                            context.index_state.clone()
+                        }
+                    }),
                 },
             }
         })
@@ -7839,6 +18355,25 @@ fn indexed_search_in_connection(
             .score
             .partial_cmp(&left.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                left.ranking_signals
+                    .neural_rank
+                    .unwrap_or(usize::MAX)
+                    .cmp(&right.ranking_signals.neural_rank.unwrap_or(usize::MAX))
+            })
+            .then_with(|| {
+                right
+                    .ranking_signals
+                    .neural_similarity
+                    .unwrap_or(f64::NEG_INFINITY)
+                    .partial_cmp(
+                        &left
+                            .ranking_signals
+                            .neural_similarity
+                            .unwrap_or(f64::NEG_INFINITY),
+                    )
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| {
                 let left_signals = &left.ranking_signals;
                 let right_signals = &right.ranking_signals;
@@ -7860,2130 +18395,103 @@ fn indexed_search_in_connection(
 }
 
 #[tauri::command]
-pub fn indexed_search(
+pub fn get_neural_embedding_index_status(
+    database: State<'_, RuntimeDatabase>,
+    vault_id: Option<String>,
+) -> Result<NeuralEmbeddingIndexStatus, String> {
+    get_neural_embedding_index_status_inner(&database, vault_id.as_deref())
+}
+
+#[tauri::command]
+pub async fn rebuild_neural_embedding_index(
+    database: State<'_, RuntimeDatabase>,
+    vault_id: Option<String>,
+    consent: Option<bool>,
+) -> Result<NeuralEmbeddingIndexStatus, String> {
+    if consent != Some(true) {
+        return Err("重建神经 Embedding 前必须明确确认会向已配置供应商发送 Vault 内容".to_string());
+    }
+    let workspace_scope = database.local_workspace_scope()?;
+    if let Some(vault_id) = normalize_neural_embedding_vault_id(vault_id.as_deref())? {
+        database.ensure_vault_read_allowed(&workspace_scope, &vault_id)?;
+        return rebuild_neural_embedding_index_inner(&database, Some(&vault_id)).await;
+    }
+    for readable_vault_id in database.readable_indexed_vault_ids(&workspace_scope)? {
+        rebuild_neural_embedding_index_inner(&database, Some(&readable_vault_id)).await?;
+    }
+    get_neural_embedding_index_status_inner(&database, None)
+}
+
+#[tauri::command]
+pub async fn indexed_search(
     database: State<'_, RuntimeDatabase>,
     vault_id: Option<String>,
     query: String,
     limit: Option<usize>,
+    allow_neural_embedding: Option<bool>,
 ) -> Result<Vec<IndexedSearchResult>, String> {
-    let connection = database
-        .connection
-        .lock()
-        .map_err(|_| "SQLite 连接锁不可用".to_string())?;
-    indexed_search_in_connection(
-        &connection,
-        vault_id.as_deref(),
-        &query,
-        limit.unwrap_or(50).clamp(1, 200),
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::policy::{CommandBudget, CommandOrigin};
-    use serde_json::json;
-
-    fn test_database(path: &Path) -> RuntimeDatabase {
-        let connection = Connection::open(path).expect("open temporary sqlite");
-        connection
-            .execute_batch("PRAGMA foreign_keys=ON;")
-            .expect("enable foreign keys");
-        run_migrations(&connection).expect("run migrations");
-        RuntimeDatabase {
-            connection: Mutex::new(connection),
-            path: path.to_path_buf(),
-        }
+    let normalized_query = query.trim();
+    if normalized_query.is_empty() {
+        return Err("搜索词不能为空".to_string());
     }
-
-    fn test_vault(id: &str, root: &Path) -> VaultDescriptor {
-        let canonical = root.canonicalize().expect("canonicalize test vault");
-        VaultDescriptor {
-            id: id.to_string(),
-            name: id.to_string(),
-            path: canonical
-                .to_str()
-                .expect("test vault path is utf8")
-                .to_string(),
-            note_count: 0,
-            attachment_count: 0,
-            connection_state: "connected".to_string(),
-            is_open: false,
-            last_indexed_at: Utc::now().to_rfc3339(),
-            last_error: None,
-        }
+    if normalized_query.chars().count() > MAX_SEARCH_QUERY_CHARS {
+        return Err("搜索词超过 512 个字符的安全上限".to_string());
     }
-
-    fn register_test_vault(database: &RuntimeDatabase, id: &str, root: &Path) -> VaultDescriptor {
-        let vault = test_vault(id, root);
-        database
-            .sync_vault_registry(std::slice::from_ref(&vault))
-            .expect("register test vault");
-        vault
-    }
-
-    fn force_vault_index_queue_due(database: &RuntimeDatabase) {
-        database
-            .connection
-            .lock()
-            .expect("lock test database")
-            .execute(
-                "UPDATE vault_index_changes SET available_at_ms=0 WHERE state='pending'",
-                [],
+    let workspace_scope = database.local_workspace_scope()?;
+    let scoped_vault_id = normalize_neural_embedding_vault_id(vault_id.as_deref())?;
+    let readable_vault_ids = if let Some(vault_id) = scoped_vault_id {
+        database.ensure_vault_read_allowed(&workspace_scope, &vault_id)?;
+        vec![vault_id]
+    } else {
+        database.readable_indexed_vault_ids(&workspace_scope)?
+    };
+    let max_results = limit.unwrap_or(50).clamp(1, 200);
+    let mut results = Vec::new();
+    for readable_vault_id in readable_vault_ids {
+        let neural = if allow_neural_embedding == Some(true) {
+            match prepare_neural_search_context(
+                &database,
+                &workspace_scope,
+                Some(&readable_vault_id),
+                normalized_query,
             )
-            .expect("make queue due");
-    }
-
-    fn snapshot(skills: Vec<Value>) -> ManagedResourceSnapshotInput {
-        ManagedResourceSnapshotInput {
-            custom_skills: skills,
-            schedules: Vec::new(),
-            report_subscriptions: Vec::new(),
-            reports: Vec::new(),
-            assistant_profile: json!({"name": "AI助手"}),
-            optimization_profile: json!({}),
-            optimization_draft: json!({}),
-        }
-    }
-
-    #[test]
-    fn unicode_metadata_and_paths_are_normalized_without_replacement_characters() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let root = directory.path();
-        let filename = "知识-Cafe\u{301}-🧭.md";
-        let path = root.join(filename);
-        fs::write(
-            &path,
-            "# 知识 Cafe\u{301} 🧭\n\n#标签 [[关联 Cafe\u{301} 🧩]]",
-        )
-        .expect("write unicode note");
-        let connection = Connection::open_in_memory().expect("open sqlite");
-        run_migrations(&connection).expect("run migrations");
-        assert!(
-            index_note_in_connection(&connection, "vault-unicode", root, &path)
-                .expect("index unicode note")
-        );
-        let (relative_path, title, links): (String, String, String) = connection
-            .query_row(
-                "SELECT relative_path, title, wiki_links_json FROM note_index WHERE vault_id='vault-unicode'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .expect("read unicode index");
-        assert_eq!(relative_path, "知识-Café-🧭.md");
-        assert_eq!(title, "知识 Café 🧭");
-        assert!(links.contains("关联 Café 🧩"));
-        assert!(!format!("{relative_path}{title}{links}").contains('\u{fffd}'));
-        assert_eq!(
-            normalize_queued_relative_path("目录\\Cafe\u{301}\\笔记.md")
-                .expect("normalize windows separators"),
-            "目录/Café/笔记.md"
-        );
-    }
-
-    #[test]
-    fn latest_migrations_are_incremental_and_preserve_version_21_data() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let path = directory.path().join("runtime.sqlite");
-        let database = test_database(&path);
-        let connection = database.connection.lock().expect("lock sqlite");
-        connection
-            .execute_batch(
-                "PRAGMA foreign_keys=OFF;
-                 DROP TABLE assistant_requests;
-                 DROP TABLE assistant_conversations;
-                 DROP TABLE note_feature_vectors;
-                 DROP TABLE memory_reflection_jobs;
-                 DROP TABLE memory_record_revisions;
-                 DROP TABLE memory_fts;
-                 DROP TABLE memory_records;
-                 DROP TABLE note_lexical_fts;
-                 DROP TABLE vault_index_changes;
-                 DROP TABLE skill_lifecycle_audit;
-                 DROP TABLE skill_approvals;
-                 DROP TABLE skill_evaluations;
-                 DROP TABLE skill_versions;
-                 DROP TABLE skill_registry;
-                 DROP TABLE runtime_trace_events;
-                 DROP TABLE runtime_trace_bindings;
-                 DROP TABLE runtime_traces;
-                 CREATE TABLE migration_sentinel (value TEXT NOT NULL);
-                 INSERT INTO migration_sentinel (value) VALUES ('keep-me');
-                 PRAGMA user_version=21;
-                 PRAGMA foreign_keys=ON;",
-            )
-            .expect("prepare version 21 database");
-        run_migrations(&connection).expect("migrate to latest version");
-        let version = connection
-            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-            .expect("read schema version");
-        let sentinel = connection
-            .query_row("SELECT value FROM migration_sentinel", [], |row| {
-                row.get::<_, String>(0)
-            })
-            .expect("read sentinel");
-        let new_tables = connection
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type='table' AND name IN (
-                   'vault_index_changes', 'note_lexical_fts', 'memory_records',
-                   'memory_record_revisions', 'memory_fts', 'memory_reflection_jobs',
-                   'note_feature_vectors', 'assistant_conversations', 'assistant_requests'
-                 )",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("read Memory V2 and lexical search schema");
-        assert_eq!(version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(sentinel, "keep-me");
-        assert_eq!(new_tables, 9);
-    }
-
-    #[test]
-    fn version_27_upgrade_converts_failed_index_rows_to_dead_letter() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let connection = Connection::open(directory.path().join("runtime.sqlite"))
-            .expect("open sqlite database");
-        connection
-            .execute_batch(
-                "CREATE TABLE vault_index_changes (
-                   id INTEGER PRIMARY KEY AUTOINCREMENT,
-                   vault_id TEXT NOT NULL,
-                   canonical_root TEXT NOT NULL,
-                   relative_path TEXT NOT NULL,
-                   generation INTEGER NOT NULL DEFAULT 1 CHECK(generation > 0),
-                   change_kind TEXT NOT NULL CHECK(change_kind IN ('upsert', 'delete')),
-                   state TEXT NOT NULL CHECK(state IN ('pending', 'processing', 'failed')),
-                   attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
-                   available_at_ms INTEGER NOT NULL,
-                   claimed_at_ms INTEGER,
-                   last_error TEXT,
-                   trace_id TEXT,
-                   created_at TEXT NOT NULL,
-                   updated_at TEXT NOT NULL,
-                   UNIQUE(vault_id, relative_path)
-                 );
-                 CREATE INDEX idx_vault_index_changes_ready
-                   ON vault_index_changes(state, available_at_ms, updated_at);
-                 INSERT INTO vault_index_changes
-                   (vault_id, canonical_root, relative_path, generation, change_kind, state,
-                    attempt_count, available_at_ms, claimed_at_ms, last_error, trace_id,
-                    created_at, updated_at)
-                 VALUES
-                   ('vault-migration', '/tmp/vault', 'dead.md', 1, 'upsert', 'failed',
-                    5, 0, NULL, 'exhausted', 'trace-index-migration',
-                    '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
-                 PRAGMA user_version=27;",
-            )
-            .expect("prepare version 27 database");
-
-        run_migrations(&connection).expect("migrate version 27 database");
-        let (version, state, trace_id) = connection
-            .query_row(
-                "SELECT (SELECT user_version FROM pragma_user_version), state, trace_id
-                 FROM vault_index_changes WHERE vault_id='vault-migration'",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .expect("read migrated dead-letter row");
-        assert_eq!(version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(state, "dead_letter");
-        assert_eq!(trace_id, "trace-index-migration");
-    }
-
-    #[test]
-    fn vault_index_queue_coalesces_rapid_file_changes() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let root = directory.path().join("vault");
-        fs::create_dir(&root).expect("create vault");
-        let note = root.join("变化.md");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        register_test_vault(&database, "vault-coalesce", &root);
-
-        fs::write(&note, "# 第一版").expect("write first note");
-        database
-            .enqueue_vault_index_path("vault-coalesce", &root, &note)
-            .expect("enqueue create");
-        fs::write(&note, "# 第二版").expect("write second note");
-        database
-            .enqueue_vault_index_path("vault-coalesce", &root, &note)
-            .expect("enqueue modify");
-        fs::remove_file(&note).expect("delete note");
-        database
-            .enqueue_vault_index_path("vault-coalesce", &root, &note)
-            .expect("enqueue delete");
-        fs::write(&note, "# 最终版").expect("recreate note");
-        database
-            .enqueue_vault_index_path("vault-coalesce", &root, &note)
-            .expect("enqueue recreate");
-
-        let row = database
-            .connection
-            .lock()
-            .expect("lock database")
-            .query_row(
-                "SELECT generation, change_kind, state, attempt_count
-                 FROM vault_index_changes WHERE vault_id='vault-coalesce'",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
-            )
-            .expect("read coalesced queue row");
-        assert_eq!(row, (4, "upsert".to_string(), "pending".to_string(), 0));
-    }
-
-    #[test]
-    fn vault_index_queue_preserves_known_trace_across_watcher_events() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let root = directory.path().join("vault");
-        fs::create_dir(&root).expect("create vault");
-        let note = root.join("追踪.md");
-        fs::write(&note, "# Trace").expect("write note");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        register_test_vault(&database, "vault-trace", &root);
-
-        database
-            .enqueue_vault_index_path("vault-trace", &root, &note)
-            .expect("enqueue watcher fallback");
-        let fallback_trace = database
-            .connection
-            .lock()
-            .expect("lock database")
-            .query_row(
-                "SELECT trace_id FROM vault_index_changes WHERE vault_id='vault-trace'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .expect("read fallback trace");
-
-        database
-            .enqueue_vault_index_path_with_trace("vault-trace", &root, &note, "trace-known-a")
-            .expect("known trace replaces fallback");
-        database
-            .enqueue_vault_index_path("vault-trace", &root, &note)
-            .expect("watcher preserves known trace");
-        database
-            .enqueue_vault_index_path_with_trace("vault-trace", &root, &note, "trace-known-b")
-            .expect("new known trace replaces old known trace");
-        database
-            .enqueue_vault_index_path("vault-trace", &root, &note)
-            .expect("later watcher preserves newest known trace");
-
-        let (trace_id, generation) = database
-            .connection
-            .lock()
-            .expect("lock database")
-            .query_row(
-                "SELECT trace_id, generation FROM vault_index_changes WHERE vault_id='vault-trace'",
-                [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .expect("read persisted trace");
-        assert_ne!(fallback_trace, "trace-known-a");
-        assert_eq!(trace_id, "trace-known-b");
-        assert_eq!(generation, 5);
-    }
-
-    #[test]
-    fn repeated_watcher_events_keep_the_first_fallback_trace() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let root = directory.path().join("vault");
-        fs::create_dir(&root).expect("create vault");
-        let note = root.join("外部变化.md");
-        fs::write(&note, "# First").expect("write note");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        register_test_vault(&database, "vault-fallback-trace", &root);
-        database
-            .enqueue_vault_index_path("vault-fallback-trace", &root, &note)
-            .expect("enqueue first watcher event");
-        let first_trace = database
-            .connection
-            .lock()
-            .expect("lock database")
-            .query_row(
-                "SELECT trace_id FROM vault_index_changes WHERE vault_id='vault-fallback-trace'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .expect("read first trace");
-        database
-            .enqueue_vault_index_path("vault-fallback-trace", &root, &note)
-            .expect("enqueue second watcher event");
-        let second_trace = database
-            .connection
-            .lock()
-            .expect("lock database")
-            .query_row(
-                "SELECT trace_id FROM vault_index_changes WHERE vault_id='vault-fallback-trace'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .expect("read second trace");
-        assert_eq!(second_trace, first_trace);
-    }
-
-    #[test]
-    fn newer_generation_supersedes_a_claimed_change() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let root = directory.path().join("vault");
-        fs::create_dir(&root).expect("create vault");
-        let note = root.join("并发.md");
-        fs::write(&note, "# 第一版").expect("write note");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        register_test_vault(&database, "vault-generation", &root);
-        database
-            .enqueue_vault_index_path("vault-generation", &root, &note)
-            .expect("enqueue first generation");
-        force_vault_index_queue_due(&database);
-        let claimed = database
-            .claim_vault_index_changes(1)
-            .expect("claim first generation")
-            .pop()
-            .expect("claimed row");
-
-        fs::write(&note, "# 第二版").expect("update note");
-        database
-            .enqueue_vault_index_path("vault-generation", &root, &note)
-            .expect("enqueue second generation");
-        assert!(database
-            .apply_claimed_vault_index_change(&claimed, &root)
-            .expect("old apply returns cleanly")
-            .is_none());
-        let failure = database
-            .fail_claimed_vault_index_change(&claimed, "旧任务失败")
-            .expect("old failure returns cleanly");
-        assert!(!failure.updated);
-
-        let row = database
-            .connection
-            .lock()
-            .expect("lock database")
-            .query_row(
-                "SELECT generation, state, attempt_count FROM vault_index_changes",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
-            )
-            .expect("read current generation");
-        assert_eq!(row, (2, "pending".to_string(), 0));
-    }
-
-    #[test]
-    fn interrupted_vault_index_claim_is_recovered_after_reopen() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let root = directory.path().join("vault");
-        fs::create_dir(&root).expect("create vault");
-        let note = root.join("恢复.md");
-        fs::write(&note, "# 恢复").expect("write note");
-        let database_path = directory.path().join("runtime.sqlite");
-        {
-            let database = test_database(&database_path);
-            register_test_vault(&database, "vault-recovery", &root);
-            database
-                .enqueue_vault_index_path("vault-recovery", &root, &note)
-                .expect("enqueue note");
-            force_vault_index_queue_due(&database);
-            assert_eq!(
-                database
-                    .claim_vault_index_changes(1)
-                    .expect("claim note")
-                    .len(),
-                1
-            );
-        }
-
-        let reopened = RuntimeDatabase::open_test(&database_path).expect("reopen database");
-        assert_eq!(
-            reopened
-                .recover_vault_index_changes()
-                .expect("recover queue"),
-            1
-        );
-        let state = reopened
-            .connection
-            .lock()
-            .expect("lock database")
-            .query_row(
-                "SELECT state, attempt_count FROM vault_index_changes",
-                [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .expect("read recovered row");
-        assert_eq!(state, ("pending".to_string(), 1));
-    }
-
-    #[test]
-    fn exhausted_interrupted_index_claim_is_dead_lettered_with_trace_and_audit() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let root = directory.path().join("vault");
-        fs::create_dir(&root).expect("create vault");
-        let note = root.join("恢复死信.md");
-        fs::write(&note, "# 恢复死信").expect("write note");
-        let database_path = directory.path().join("runtime.sqlite");
-        {
-            let database = test_database(&database_path);
-            register_test_vault(&database, "vault-recovery-dead-letter", &root);
-            database
-                .enqueue_vault_index_path("vault-recovery-dead-letter", &root, &note)
-                .expect("enqueue note");
-            database
+            .await
+            {
+                Ok(context) => context,
+                Err(error) => {
+                    log::warn!(
+                        "Vault {readable_vault_id} 的神经 Embedding 搜索不可用，回退到本地混合搜索：{error}"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let mut vault_results = {
+            let connection = database
                 .connection
                 .lock()
-                .expect("lock database")
-                .execute(
-                    "UPDATE vault_index_changes
-                     SET state='processing', attempt_count=?1, claimed_at_ms=1",
-                    [VAULT_INDEX_MAX_ATTEMPTS],
-                )
-                .expect("simulate exhausted interrupted claim");
-        }
-
-        let reopened = RuntimeDatabase::open_test(&database_path).expect("reopen database");
-        assert_eq!(
-            reopened
-                .recover_vault_index_changes()
-                .expect("recover exhausted queue"),
-            1
-        );
-        let connection = reopened.connection.lock().expect("lock reopened database");
-        let (state, last_error) = connection
-            .query_row(
-                "SELECT state, last_error FROM vault_index_changes",
-                [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .expect("read recovered dead-letter row");
-        let dead_letter_traces = connection
-            .query_row(
-                "SELECT COUNT(*) FROM runtime_trace_events
-                 WHERE entity_kind='index_change' AND event_type='index.dead_lettered'
-                   AND state='dead_letter'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("count dead-letter traces");
-        let failure_events = connection
-            .query_row(
-                "SELECT COUNT(*) FROM operation_events
-                 WHERE event_type='vault.note.index' AND state='failed'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("count dead-letter operation events");
-        assert_eq!(state, "dead_letter");
-        assert_eq!(last_error, "应用退出前索引任务未完成");
-        assert_eq!(dead_letter_traces, 1);
-        assert_eq!(failure_events, 1);
-    }
-
-    #[test]
-    fn claim_sweep_dead_letters_exhausted_pending_rows_with_trace_and_audit() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let root = directory.path().join("vault");
-        fs::create_dir(&root).expect("create vault");
-        let note = root.join("认领死信.md");
-        fs::write(&note, "# 认领死信").expect("write note");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        register_test_vault(&database, "vault-claim-dead-letter", &root);
-        database
-            .enqueue_vault_index_path("vault-claim-dead-letter", &root, &note)
-            .expect("enqueue note");
-        database
-            .connection
-            .lock()
-            .expect("lock database")
-            .execute(
-                "UPDATE vault_index_changes SET attempt_count=?1, available_at_ms=0",
-                [VAULT_INDEX_MAX_ATTEMPTS],
-            )
-            .expect("simulate exhausted pending row");
-
-        assert!(database
-            .claim_vault_index_changes(1)
-            .expect("sweep exhausted pending row")
-            .is_empty());
-        let connection = database.connection.lock().expect("lock database");
-        let (state, last_error) = connection
-            .query_row(
-                "SELECT state, last_error FROM vault_index_changes",
-                [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .expect("read claim-swept dead-letter row");
-        let dead_letter_traces = connection
-            .query_row(
-                "SELECT COUNT(*) FROM runtime_trace_events
-                 WHERE entity_kind='index_change' AND event_type='index.dead_lettered'
-                   AND state='dead_letter'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("count dead-letter traces");
-        let failure_events = connection
-            .query_row(
-                "SELECT COUNT(*) FROM operation_events
-                 WHERE event_type='vault.note.index' AND state='failed'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("count dead-letter operation events");
-        assert_eq!(state, "dead_letter");
-        assert_eq!(last_error, "Vault 索引任务超过最大重试次数");
-        assert_eq!(dead_letter_traces, 1);
-        assert_eq!(failure_events, 1);
-    }
-
-    #[test]
-    fn vault_index_retry_limit_transitions_to_dead_letter() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let root = directory.path().join("vault");
-        fs::create_dir(&root).expect("create vault");
-        let note = root.join("失败.md");
-        fs::write(&note, "# 失败").expect("write note");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        register_test_vault(&database, "vault-retry", &root);
-        database
-            .enqueue_vault_index_path("vault-retry", &root, &note)
-            .expect("enqueue note");
-
-        for attempt in 1..=VAULT_INDEX_MAX_ATTEMPTS {
-            force_vault_index_queue_due(&database);
-            let claimed = database
-                .claim_vault_index_changes(1)
-                .expect("claim retry")
-                .pop()
-                .expect("claimed retry");
-            assert_eq!(claimed.attempt_count, attempt);
-            let outcome = database
-                .fail_claimed_vault_index_change(&claimed, "测试失败")
-                .expect("record retry failure");
-            assert!(outcome.updated);
-            assert_eq!(outcome.terminal, attempt == VAULT_INDEX_MAX_ATTEMPTS);
-        }
-        let connection = database.connection.lock().expect("lock database");
-        let state = connection
-            .query_row("SELECT state FROM vault_index_changes", [], |row| {
-                row.get::<_, String>(0)
-            })
-            .expect("read failed state");
-        let failed_events = connection
-            .query_row(
-                "SELECT COUNT(*) FROM operation_events
-                 WHERE event_type='vault.note.index' AND state='failed'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("count failure events");
-        let dead_letter_traces = connection
-            .query_row(
-                "SELECT COUNT(*) FROM runtime_trace_events
-                 WHERE entity_kind='index_change' AND event_type='index.dead_lettered'
-                   AND state='dead_letter'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("count dead-letter traces");
-        assert_eq!(state, "dead_letter");
-        assert_eq!(failed_events, 1);
-        assert_eq!(dead_letter_traces, 1);
-    }
-
-    #[test]
-    fn vault_index_apply_is_atomic_with_fts_audit_and_queue_completion() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let root = directory.path().join("vault");
-        fs::create_dir(&root).expect("create vault");
-        let note = root.join("事务.md");
-        fs::write(&note, "# 事务\n\n必须一起提交").expect("write note");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        register_test_vault(&database, "vault-atomic", &root);
-        database
-            .enqueue_vault_index_path("vault-atomic", &root, &note)
-            .expect("enqueue note");
-        force_vault_index_queue_due(&database);
-        let claimed = database
-            .claim_vault_index_changes(1)
-            .expect("claim note")
-            .pop()
-            .expect("claimed note");
-        database
-            .connection
-            .lock()
-            .expect("lock database")
-            .execute_batch(
-                "CREATE TRIGGER reject_vault_index_audit
-                 BEFORE INSERT ON operation_events
-                 WHEN NEW.event_type='vault.note.index'
-                 BEGIN SELECT RAISE(ABORT, 'reject audit'); END;",
-            )
-            .expect("install rollback trigger");
-        assert!(database
-            .apply_claimed_vault_index_change(&claimed, &root)
-            .is_err());
-        let connection = database.connection.lock().expect("lock database");
-        let note_count = connection
-            .query_row("SELECT COUNT(*) FROM note_index", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("count note index");
-        let fts_count = connection
-            .query_row("SELECT COUNT(*) FROM note_fts", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("count fts");
-        let lexical_count = connection
-            .query_row("SELECT COUNT(*) FROM note_lexical_fts", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("count lexical fts");
-        let vector_count = connection
-            .query_row("SELECT COUNT(*) FROM note_feature_vectors", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("count feature vectors");
-        let queue_state = connection
-            .query_row("SELECT state FROM vault_index_changes", [], |row| {
-                row.get::<_, String>(0)
-            })
-            .expect("read queue state");
-        assert_eq!(note_count, 0);
-        assert_eq!(fts_count, 0);
-        assert_eq!(lexical_count, 0);
-        assert_eq!(vector_count, 0);
-        assert_eq!(queue_state, "processing");
-    }
-
-    #[test]
-    fn vault_index_queue_upsert_completes_with_searchable_fts_and_success_audit() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let root = directory.path().join("vault");
-        fs::create_dir(&root).expect("create vault");
-        let note = root.join("可搜索.md");
-        fs::write(&note, "# 可搜索\n\n独立检索词 yunspirequeue").expect("write note");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        register_test_vault(&database, "vault-upsert", &root);
-        database
-            .enqueue_vault_index_path("vault-upsert", &root, &note)
-            .expect("enqueue note");
-        force_vault_index_queue_due(&database);
-        let claimed = database
-            .claim_vault_index_changes(1)
-            .expect("claim note")
-            .pop()
-            .expect("claimed note");
-        let applied = database
-            .apply_claimed_vault_index_change(&claimed, &root)
-            .expect("apply note")
-            .expect("owned queue generation");
-        assert_eq!(applied.vault_id, "vault-upsert");
-        assert_eq!(applied.relative_path, "可搜索.md");
-        assert_eq!(applied.change_kind, "upsert");
-
-        let connection = database.connection.lock().expect("lock database");
-        let queue_count = connection
-            .query_row("SELECT COUNT(*) FROM vault_index_changes", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("count queue");
-        let fts_count = connection
-            .query_row(
-                "SELECT COUNT(*) FROM note_fts
-                 WHERE note_fts MATCH ?1 AND vault_id=?2",
-                params!["\"yunspirequeue\"", "vault-upsert"],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("search fts");
-        let vector_count = connection
-            .query_row(
-                "SELECT COUNT(*) FROM note_feature_vectors
-                 WHERE vault_id=?1 AND relative_path=?2",
-                params!["vault-upsert", "可搜索.md"],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("count feature vector");
-        let payload = connection
-            .query_row(
-                "SELECT payload FROM operation_events
-                 WHERE event_type='vault.note.index' AND state='success'
-                 ORDER BY rowid DESC LIMIT 1",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .expect("read success audit");
-        let event: OperationEvent =
-            serde_json::from_str(&payload).expect("parse success audit payload");
-        assert_eq!(queue_count, 0);
-        assert_eq!(fts_count, 1);
-        assert_eq!(vector_count, 1);
-        assert_eq!(event.vault_id.as_deref(), Some("vault-upsert"));
-        assert_eq!(event.relative_path.as_deref(), Some("可搜索.md"));
-    }
-
-    #[test]
-    fn chinese_lexical_index_matches_subphrases_tags_and_wiki_links() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let root = directory.path().join("vault");
-        fs::create_dir(&root).expect("create vault");
-        let note = root.join("知识系统.md");
-        fs::write(
-            &note,
-            "# 个人知识系统\n\n关联 [[知识图谱]] 与 #知识管理，支持中文局部检索。",
-        )
-        .expect("write note");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        register_test_vault(&database, "vault-chinese", &root);
-        database
-            .enqueue_vault_index_path("vault-chinese", &root, &note)
-            .expect("enqueue note");
-        force_vault_index_queue_due(&database);
-        let claimed = database
-            .claim_vault_index_changes(1)
-            .expect("claim note")
-            .pop()
-            .expect("claimed note");
-        database
-            .apply_claimed_vault_index_change(&claimed, &root)
-            .expect("apply note")
-            .expect("owned queue generation");
-
-        let query = lexical_fts_match_query("知识图谱").expect("build chinese query");
-        let connection = database.connection.lock().expect("lock database");
-        let matched = connection
-            .query_row(
-                "SELECT COUNT(*) FROM note_lexical_fts
-                 WHERE note_lexical_fts MATCH ?1 AND vault_id=?2",
-                params![query, "vault-chinese"],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("search chinese lexical index");
-        let (tags, links) = connection
-            .query_row(
-                "SELECT tags_json, wiki_links_json FROM note_index
-                 WHERE vault_id=?1 AND relative_path=?2",
-                params!["vault-chinese", "知识系统.md"],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .expect("read relation metadata");
-        assert_eq!(matched, 1);
-        assert!(tags.contains("知识管理"));
-        assert!(links.contains("知识图谱"));
-    }
-
-    #[test]
-    fn local_vector_adds_chinese_feature_hit_and_rrf_is_explainable() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let root = directory.path().join("vault");
-        fs::create_dir(&root).expect("create vault");
-        let related = root.join("智能方法.md");
-        let unrelated = root.join("厨房记录.md");
-        fs::write(
-            &related,
-            "# 智能方法\n\n机器智能用于预测，学习方法用于归纳规律。#算法",
-        )
-        .expect("write related note");
-        fs::write(&unrelated, "# 厨房记录\n\n记录烘焙温度和食材比例。")
-            .expect("write unrelated note");
-        let connection = Connection::open_in_memory().expect("open sqlite");
-        run_migrations(&connection).expect("run migrations");
-        assert!(
-            index_note_in_connection(&connection, "vault-vector", &root, &related)
-                .expect("index related note")
-        );
-        assert!(
-            index_note_in_connection(&connection, "vault-vector", &root, &unrelated)
-                .expect("index unrelated note")
-        );
-        let related_vector = connection
-            .query_row(
-                "SELECT representation_version, dimensions, vector_blob
-                 FROM note_feature_vectors
-                 WHERE vault_id=?1 AND relative_path=?2",
-                params!["vault-vector", "智能方法.md"],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                    ))
-                },
-            )
-            .expect("read related vector");
-        let related_similarity = local_vector_similarity(
-            &query_local_feature_vector("机器学习").expect("query vector"),
-            &decode_local_feature_vector(related_vector.0, related_vector.1, &related_vector.2)
-                .expect("decode related vector"),
-        )
-        .expect("calculate related similarity");
-        assert!(
-            related_similarity >= MIN_LOCAL_VECTOR_SIMILARITY,
-            "related similarity {related_similarity}"
-        );
-
-        let vector_only =
-            indexed_search_in_connection(&connection, Some("vault-vector"), "机器学习", 10)
-                .expect("run vector search");
-        let related_result = vector_only
-            .iter()
-            .find(|result| result.relative_path == "智能方法.md")
-            .expect("find vector-only related result");
-        assert_eq!(related_result.ranking_signals.lexical_rank, None);
-        assert!(related_result.ranking_signals.vector_rank.is_some());
-        assert!(related_result
-            .ranking_signals
-            .vector_similarity
-            .is_some_and(|score| score >= MIN_LOCAL_VECTOR_SIMILARITY));
-        assert!((related_result.score - related_result.ranking_signals.vector_rrf).abs() < 1e-12);
-
-        let fused = indexed_search_in_connection(&connection, Some("vault-vector"), "机器智能", 10)
-            .expect("run fused search");
-        let fused_result = fused
-            .iter()
-            .find(|result| result.relative_path == "智能方法.md")
-            .expect("find fused result");
-        let lexical_rank = fused_result
-            .ranking_signals
-            .lexical_rank
-            .expect("lexical rank");
-        let vector_rank = fused_result
-            .ranking_signals
-            .vector_rank
-            .expect("vector rank");
-        assert!(
-            (fused_result.ranking_signals.lexical_rrf - 1.0 / (RRF_K + lexical_rank as f64)).abs()
-                < 1e-12
-        );
-        assert!(
-            (fused_result.ranking_signals.vector_rrf - 1.0 / (RRF_K + vector_rank as f64)).abs()
-                < 1e-12
-        );
-        assert!(
-            (fused_result.score
-                - fused_result.ranking_signals.lexical_rrf
-                - fused_result.ranking_signals.vector_rrf)
-                .abs()
-                < 1e-12
-        );
-    }
-
-    #[test]
-    fn empty_missing_or_corrupt_vectors_keep_fts_available() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let root = directory.path().join("vault");
-        fs::create_dir(&root).expect("create vault");
-        let note = root.join("回退.md");
-        fs::write(&note, "# 回退\n\nlexicalfallbacktoken").expect("write note");
-        let connection = Connection::open_in_memory().expect("open sqlite");
-        run_migrations(&connection).expect("run migrations");
-        assert!(
-            indexed_search_in_connection(&connection, None, "空索引", 10)
-                .expect("search empty index")
-                .is_empty()
-        );
-        assert!(
-            index_note_in_connection(&connection, "vault-fallback", &root, &note)
-                .expect("index fallback note")
-        );
-        connection
-            .execute(
-                "UPDATE note_feature_vectors SET vector_blob=X'00'
-                 WHERE vault_id=?1 AND relative_path=?2",
-                params!["vault-fallback", "回退.md"],
-            )
-            .expect("corrupt feature vector");
-        let corrupted = indexed_search_in_connection(
-            &connection,
-            Some("vault-fallback"),
-            "lexicalfallbacktoken",
-            10,
-        )
-        .expect("search with corrupt vector");
-        assert_eq!(corrupted.len(), 1);
-        assert!(corrupted[0].ranking_signals.lexical_rank.is_some());
-        assert_eq!(corrupted[0].ranking_signals.vector_rank, None);
-
-        connection
-            .execute(
-                "DELETE FROM note_feature_vectors WHERE vault_id=?1 AND relative_path=?2",
-                params!["vault-fallback", "回退.md"],
-            )
-            .expect("remove feature vector");
-        let missing = indexed_search_in_connection(
-            &connection,
-            Some("vault-fallback"),
-            "lexicalfallbacktoken",
-            10,
-        )
-        .expect("search with missing vector");
-        assert_eq!(missing.len(), 1);
-        assert!(missing[0].ranking_signals.lexical_rank.is_some());
-        assert_eq!(missing[0].ranking_signals.vector_rank, None);
-    }
-
-    #[test]
-    fn feature_vectors_persist_after_database_reopen() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let root = directory.path().join("vault");
-        fs::create_dir(&root).expect("create vault");
-        let note = root.join("持久向量.md");
-        fs::write(&note, "# 持久向量\n\n本地特征表示会写入 SQLite。").expect("write note");
-        let database_path = directory.path().join("runtime.sqlite");
-        {
-            let database = RuntimeDatabase::open_test(&database_path).expect("open database");
-            let connection = database.connection.lock().expect("lock database");
-            assert!(
-                index_note_in_connection(&connection, "vault-persist", &root, &note)
-                    .expect("index note")
-            );
-        }
-        let reopened = RuntimeDatabase::open_test(&database_path).expect("reopen database");
-        let connection = reopened.connection.lock().expect("lock reopened database");
-        let stored = connection
-            .query_row(
-                "SELECT representation_version, dimensions, length(vector_blob)
-                 FROM note_feature_vectors
-                 WHERE vault_id=?1 AND relative_path=?2",
-                params!["vault-persist", "持久向量.md"],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
-            )
-            .expect("read persisted vector");
-        assert_eq!(
-            stored,
-            (
-                LOCAL_FEATURE_VECTOR_VERSION,
-                LOCAL_FEATURE_VECTOR_DIMENSIONS as i64,
-                (LOCAL_FEATURE_VECTOR_DIMENSIONS * std::mem::size_of::<f32>()) as i64
-            )
-        );
-        assert!(
-            !indexed_search_in_connection(&connection, Some("vault-persist"), "本地特征", 10,)
-                .expect("search reopened database")
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn version_24_upgrade_queues_and_rebuilds_missing_vectors() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let root = directory.path().join("vault");
-        fs::create_dir(&root).expect("create vault");
-        let note = root.join("升级.md");
-        fs::write(&note, "# 升级\n\n旧索引升级后重建本地特征向量。").expect("write note");
-        let database_path = directory.path().join("runtime.sqlite");
-        {
-            let database = RuntimeDatabase::open_test(&database_path).expect("open database");
-            register_test_vault(&database, "vault-upgrade", &root);
-            let connection = database.connection.lock().expect("lock database");
-            assert!(
-                index_note_in_connection(&connection, "vault-upgrade", &root, &note)
-                    .expect("index old note")
-            );
-            connection
-                .execute_batch(
-                    "DROP TABLE note_feature_vectors;
-                     DELETE FROM vault_index_changes;
-                     PRAGMA user_version=24;",
-                )
-                .expect("simulate version 24 database");
-        }
-
-        let reopened = RuntimeDatabase::open_test(&database_path).expect("upgrade database");
-        let (version, queued) = {
-            let connection = reopened.connection.lock().expect("lock upgraded database");
-            let version = connection
-                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-                .expect("read upgraded version");
-            let queued = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM vault_index_changes
-                     WHERE vault_id=?1 AND relative_path=?2 AND state='pending'",
-                    params!["vault-upgrade", "升级.md"],
-                    |row| row.get::<_, i64>(0),
-                )
-                .expect("count queued rebuild");
-            (version, queued)
+                .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+            indexed_search_in_connection_with_neural(
+                &connection,
+                Some(&readable_vault_id),
+                normalized_query,
+                max_results,
+                neural.as_ref(),
+            )?
         };
-        assert_eq!((version, queued), (CURRENT_SCHEMA_VERSION, 1));
-        let claimed = reopened
-            .claim_vault_index_changes(1)
-            .expect("claim upgrade rebuild")
-            .pop()
-            .expect("queued upgrade rebuild");
-        reopened
-            .apply_claimed_vault_index_change(&claimed, &root)
-            .expect("apply upgrade rebuild")
-            .expect("owned upgrade generation");
-        let vector_count = reopened
-            .connection
-            .lock()
-            .expect("lock rebuilt database")
-            .query_row(
-                "SELECT COUNT(*) FROM note_feature_vectors
-                 WHERE vault_id=?1 AND relative_path=?2",
-                params!["vault-upgrade", "升级.md"],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("count rebuilt vector");
-        assert_eq!(vector_count, 1);
+        results.append(&mut vault_results);
     }
-
-    #[test]
-    fn vault_index_queue_delete_removes_note_and_fts_together() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let root = directory.path().join("vault");
-        fs::create_dir(&root).expect("create vault");
-        let note = root.join("待删除.md");
-        fs::write(&note, "# 待删除\n\ndeletequeue").expect("write note");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        register_test_vault(&database, "vault-delete", &root);
-
-        database
-            .enqueue_vault_index_path("vault-delete", &root, &note)
-            .expect("enqueue initial note");
-        force_vault_index_queue_due(&database);
-        let initial = database
-            .claim_vault_index_changes(1)
-            .expect("claim initial note")
-            .pop()
-            .expect("claimed initial note");
-        database
-            .apply_claimed_vault_index_change(&initial, &root)
-            .expect("apply initial note")
-            .expect("owned initial generation");
-
-        fs::remove_file(&note).expect("delete note");
-        database
-            .enqueue_vault_index_path("vault-delete", &root, &note)
-            .expect("enqueue deletion");
-        force_vault_index_queue_due(&database);
-        let deletion = database
-            .claim_vault_index_changes(1)
-            .expect("claim deletion")
-            .pop()
-            .expect("claimed deletion");
-        let applied = database
-            .apply_claimed_vault_index_change(&deletion, &root)
-            .expect("apply deletion")
-            .expect("owned deletion generation");
-        assert_eq!(applied.vault_id, "vault-delete");
-        assert_eq!(applied.relative_path, "待删除.md");
-        assert_eq!(applied.change_kind, "delete");
-
-        let connection = database.connection.lock().expect("lock database");
-        let note_count = connection
-            .query_row(
-                "SELECT COUNT(*) FROM note_index WHERE vault_id=?1 AND relative_path=?2",
-                params!["vault-delete", "待删除.md"],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("count note index");
-        let fts_count = connection
-            .query_row(
-                "SELECT COUNT(*) FROM note_fts WHERE vault_id=?1 AND relative_path=?2",
-                params!["vault-delete", "待删除.md"],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("count fts index");
-        let lexical_count = connection
-            .query_row(
-                "SELECT COUNT(*) FROM note_lexical_fts WHERE vault_id=?1 AND relative_path=?2",
-                params!["vault-delete", "待删除.md"],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("count lexical index");
-        let vector_count = connection
-            .query_row(
-                "SELECT COUNT(*) FROM note_feature_vectors WHERE vault_id=?1 AND relative_path=?2",
-                params!["vault-delete", "待删除.md"],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("count feature vector");
-        let queue_count = connection
-            .query_row("SELECT COUNT(*) FROM vault_index_changes", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("count queue");
-        assert_eq!(
-            (
-                note_count,
-                fts_count,
-                lexical_count,
-                vector_count,
-                queue_count
-            ),
-            (0, 0, 0, 0, 0)
-        );
-    }
-
-    #[test]
-    fn vault_reconciliation_queues_new_and_deleted_notes() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let root = directory.path().join("vault");
-        fs::create_dir(&root).expect("create vault");
-        let deleted = root.join("旧笔记.md");
-        let created = root.join("新笔记.md");
-        fs::write(&deleted, "# 旧笔记").expect("write old note");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        let vault = register_test_vault(&database, "vault-reconcile", &root);
-        {
-            let connection = database.connection.lock().expect("lock database");
-            assert!(
-                index_note_in_connection(&connection, "vault-reconcile", &root, &deleted)
-                    .expect("index old note")
-            );
-        }
-        fs::remove_file(&deleted).expect("delete old note");
-        fs::write(&created, "# 新笔记").expect("write new note");
-        let result = database
-            .reconcile_vault_index(&vault)
-            .expect("reconcile vault");
-        assert_eq!(result.queued_upserts, 1);
-        assert_eq!(result.queued_deletes, 1);
-        let connection = database.connection.lock().expect("lock database");
-        let changes = connection
-            .prepare(
-                "SELECT relative_path, change_kind FROM vault_index_changes
-                 ORDER BY relative_path",
-            )
-            .expect("prepare queue query")
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .expect("query queue")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("collect queue");
-        assert_eq!(
-            changes,
-            vec![
-                ("新笔记.md".to_string(), "upsert".to_string()),
-                ("旧笔记.md".to_string(), "delete".to_string())
-            ]
-        );
-    }
-
-    #[test]
-    fn claimed_change_is_rejected_after_vault_root_changes() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let first_root = directory.path().join("first");
-        let second_root = directory.path().join("second");
-        fs::create_dir(&first_root).expect("create first vault");
-        fs::create_dir(&second_root).expect("create second vault");
-        let note = first_root.join("路径.md");
-        fs::write(&note, "# 原路径").expect("write note");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        register_test_vault(&database, "vault-root", &first_root);
-        database
-            .enqueue_vault_index_path("vault-root", &first_root, &note)
-            .expect("enqueue note");
-        force_vault_index_queue_due(&database);
-        let claimed = database
-            .claim_vault_index_changes(1)
-            .expect("claim note")
-            .pop()
-            .expect("claimed note");
-        register_test_vault(&database, "vault-root", &second_root);
-        let error = database
-            .apply_claimed_vault_index_change(&claimed, &second_root)
-            .expect_err("old root must be rejected");
-        assert!(error.contains("根目录已变化"));
-        let indexed = database
-            .connection
-            .lock()
-            .expect("lock database")
-            .query_row("SELECT COUNT(*) FROM note_index", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("count index");
-        assert_eq!(indexed, 0);
-    }
-
-    #[test]
-    fn managed_resources_version_delete_and_reopen_without_legacy_skill_bypass() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let path = directory.path().join("runtime.sqlite");
-        {
-            let database = test_database(&path);
-            let mut first_snapshot =
-                snapshot(vec![json!({"id": "skill-1", "name": "旧入口不得写入"})]);
-            first_snapshot.schedules = vec![json!({"id": "schedule-1", "name": "第一版"})];
-            let first = database
-                .sync_managed_resources(DEFAULT_LOCAL_WORKSPACE_SCOPE, &first_snapshot)
-                .expect("save first revision");
-            assert!(first.custom_skills.is_empty());
-            assert_eq!(first.schedules.len(), 1);
-            let mut second_snapshot = snapshot(Vec::new());
-            second_snapshot.schedules = vec![json!({"id": "schedule-1", "name": "第二版"})];
-            database
-                .sync_managed_resources(DEFAULT_LOCAL_WORKSPACE_SCOPE, &second_snapshot)
-                .expect("save second revision");
-            let connection = database.connection.lock().expect("lock sqlite");
-            let legacy_skills: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM managed_resources
-                     WHERE workspace_scope=?1 AND resource_type='user_skill'",
-                    [DEFAULT_LOCAL_WORKSPACE_SCOPE],
-                    |row| row.get(0),
-                )
-                .expect("count legacy skills");
-            assert_eq!(legacy_skills, 0);
-            let revisions: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM managed_resource_revisions
-                     WHERE workspace_scope=?1 AND resource_type='schedule' AND resource_id='schedule-1'",
-                    [DEFAULT_LOCAL_WORKSPACE_SCOPE],
-                    |row| row.get(0),
-                )
-                .expect("count revisions");
-            assert_eq!(revisions, 2);
-        }
-        {
-            let database = test_database(&path);
-            let restored = database
-                .load_managed_resources(DEFAULT_LOCAL_WORKSPACE_SCOPE)
-                .expect("reload managed resources");
-            assert!(restored.custom_skills.is_empty());
-            assert_eq!(restored.schedules[0]["name"], "第二版");
-            let deleted = database
-                .sync_managed_resources(DEFAULT_LOCAL_WORKSPACE_SCOPE, &snapshot(Vec::new()))
-                .expect("sync empty resource group");
-            assert!(deleted.schedules.is_empty());
-            let connection = database.connection.lock().expect("lock sqlite");
-            let state: String = connection
-                .query_row(
-                    "SELECT state FROM managed_resources
-                     WHERE workspace_scope=?1 AND resource_type='schedule' AND id='schedule-1'",
-                    [DEFAULT_LOCAL_WORKSPACE_SCOPE],
-                    |row| row.get(0),
-                )
-                .expect("read tombstone");
-            assert_eq!(state, "deleted");
-            let revisions: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM managed_resource_revisions
-                     WHERE workspace_scope=?1 AND resource_type='schedule' AND resource_id='schedule-1'",
-                    [DEFAULT_LOCAL_WORKSPACE_SCOPE],
-                    |row| row.get(0),
-                )
-                .expect("count revisions after delete");
-            assert_eq!(revisions, 3);
-        }
-    }
-
-    fn inbound_record(id: &str, state: &str, hash: &str) -> InboundContentRecordInput {
-        InboundContentRecordInput {
-            id: id.to_string(),
-            state: state.to_string(),
-            source_type: "file".to_string(),
-            source_ref: format!("本地文件/{id}.md"),
-            title: format!("内容 {id}"),
-            content_hash: hash.to_string(),
-            content_characters: 12,
-            attachment_count: 0,
-            image_count: 0,
-            extraction: json!({"warnings": []}),
-            analysis: json!({"summaryCharacters": 8}),
-            quality: json!({"status": "passed"}),
-            target: json!({"vaultId": "vault-test"}),
-            task_id: Some(format!("task-{id}")),
-            failure_reason: None,
-        }
-    }
-
-    #[test]
-    fn inbound_content_hash_deduplicates_across_task_ids() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        let hash = format!("sha256:{}", "a".repeat(64));
-        let first = inbound_record("capture-first", "extracted", &hash);
-        database
-            .upsert_inbound_content_record(DEFAULT_LOCAL_WORKSPACE_SCOPE, &first)
-            .expect("save first extraction");
-        for state in ["analyzing", "ready_to_write", "writing", "committed"] {
-            let mut update = inbound_record("capture-first", state, &hash);
-            update.task_id = first.task_id.clone();
-            database
-                .upsert_inbound_content_record(DEFAULT_LOCAL_WORKSPACE_SCOPE, &update)
-                .expect("advance first capture");
-        }
-
-        let duplicate = inbound_record("capture-second", "extracted", &hash);
-        let receipt = database
-            .upsert_inbound_content_record(DEFAULT_LOCAL_WORKSPACE_SCOPE, &duplicate)
-            .expect("record duplicate extraction");
-        assert_eq!(receipt.state, "quality_rejected");
-        assert_eq!(receipt.duplicate_of.as_deref(), Some("capture-first"));
-        let connection = database.connection.lock().expect("lock sqlite");
-        let (state, failure): (String, String) = connection
-            .query_row(
-                "SELECT state, failure_reason FROM inbound_content_records
-                 WHERE workspace_scope=?1 AND id='capture-second'",
-                [DEFAULT_LOCAL_WORKSPACE_SCOPE],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("read duplicate ledger entry");
-        assert_eq!(state, "quality_rejected");
-        assert!(failure.contains("capture-first"));
-    }
-
-    #[test]
-    fn application_command_idempotency_does_not_duplicate_task_or_audit_event() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        let command = ApplicationCommand {
-            id: "command-idempotent".to_string(),
-            command_type: "assistant.operation".to_string(),
-            origin: CommandOrigin::Assistant,
-            intent: "delete".to_string(),
-            capability_id: "system:delete".to_string(),
-            operation: "delete".to_string(),
-            parameters: json!({"relative_path": "资料/笔记.md"}),
-            vault_id: Some("vault-test".to_string()),
-            relative_paths: vec!["资料/笔记.md".to_string()],
-            network_targets: Vec::new(),
-            declared_scope: vec!["capability:system:delete".to_string()],
-            budget: CommandBudget {
-                max_steps: 8,
-                max_runtime_seconds: 300,
-                max_tool_calls: 16,
-                max_tokens: Some(100_000),
-                max_cost: None,
-            },
-            idempotency_key: "delete-idempotency-key".to_string(),
-            trace_id: Some("trace-idempotent".to_string()),
-            model_decision_receipt: Some("receipt-idempotent".to_string()),
-        };
-        let decision = crate::policy::evaluate(&command);
-        let first = database
-            .persist_application_command(
-                DEFAULT_LOCAL_WORKSPACE_SCOPE,
-                &command,
-                &decision,
-                "trace-idempotent",
-                "2026-07-21T00:00:00Z",
-            )
-            .expect("persist first application command");
-        let second = database
-            .persist_application_command(
-                DEFAULT_LOCAL_WORKSPACE_SCOPE,
-                &command,
-                &decision,
-                "trace-idempotent",
-                "2026-07-21T00:00:01Z",
-            )
-            .expect("persist duplicate application command");
-        assert!(!first.1);
-        assert!(second.1);
-        assert_eq!(first.0, second.0);
-        let mut substituted = command.clone();
-        substituted.vault_id = Some("vault-substituted".to_string());
-        substituted.relative_paths = vec!["其他库/替换.md".to_string()];
-        let substituted_decision = crate::policy::evaluate(&substituted);
-        let error = database
-            .persist_application_command(
-                DEFAULT_LOCAL_WORKSPACE_SCOPE,
-                &substituted,
-                &substituted_decision,
-                "trace-substituted",
-                "2026-07-21T00:00:02Z",
-            )
-            .expect_err("idempotency key must not authorize substituted scope");
-        assert!(error.contains("不同的能力或参数范围"));
-        let connection = database.connection.lock().expect("lock sqlite");
-        for (table, expected) in [
-            ("application_commands", 1_i64),
-            ("policy_decisions", 1_i64),
-            ("runtime_tasks", 1_i64),
-            ("operation_events", 1_i64),
-        ] {
-            let count: i64 = connection
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                    row.get(0)
-                })
-                .expect("count idempotent records");
-            assert_eq!(count, expected, "unexpected count in {table}");
-        }
-    }
-
-    #[test]
-    fn task_transition_and_audit_event_commit_or_rollback_together() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        let command = ApplicationCommand {
-            id: "command-transition".to_string(),
-            command_type: "assistant.operation".to_string(),
-            origin: CommandOrigin::Assistant,
-            intent: "search".to_string(),
-            capability_id: "system:search".to_string(),
-            operation: "query".to_string(),
-            parameters: json!({"query": "事务测试"}),
-            vault_id: Some("vault-test".to_string()),
-            relative_paths: Vec::new(),
-            network_targets: Vec::new(),
-            declared_scope: vec!["capability:system:search".to_string()],
-            budget: CommandBudget {
-                max_steps: 8,
-                max_runtime_seconds: 300,
-                max_tool_calls: 16,
-                max_tokens: Some(100_000),
-                max_cost: None,
-            },
-            idempotency_key: "transition-idempotency-key".to_string(),
-            trace_id: Some("trace-transition".to_string()),
-            model_decision_receipt: Some("receipt-transition".to_string()),
-        };
-        let decision = crate::policy::evaluate(&command);
-        let task_id = database
-            .persist_application_command(
-                DEFAULT_LOCAL_WORKSPACE_SCOPE,
-                &command,
-                &decision,
-                "trace-transition",
-                "2026-07-21T00:00:00Z",
-            )
-            .expect("persist transition command")
-            .0
-            .expect("native task id");
-        {
-            let connection = database.connection.lock().expect("lock sqlite");
-            connection
-                .execute_batch(
-                    "CREATE TRIGGER reject_task_state_audit
-                     BEFORE INSERT ON operation_events
-                     WHEN NEW.event_type='task.state_changed'
-                     BEGIN
-                       SELECT RAISE(ABORT, 'forced audit failure');
-                     END;",
-                )
-                .expect("install audit failure trigger");
-        }
-        let checkpoint = json!({"id": "checkpoint-transition", "phase": "execution"});
-        let error = database
-            .transition_native_runtime_task(
-                DEFAULT_LOCAL_WORKSPACE_SCOPE,
-                &task_id,
-                "running",
-                25,
-                "启动事务测试",
-                Some(&checkpoint),
-            )
-            .expect_err("audit failure must abort the full transition");
-        assert!(error.contains("无法保存任务状态审计事件"));
-        {
-            let connection = database.connection.lock().expect("lock sqlite");
-            let state: String = connection
-                .query_row(
-                    "SELECT state FROM runtime_tasks WHERE workspace_scope=?1 AND id=?2",
-                    params![DEFAULT_LOCAL_WORKSPACE_SCOPE, task_id],
-                    |row| row.get(0),
-                )
-                .expect("read rolled back task state");
-            assert_eq!(state, "queued");
-            for (table, expected) in [
-                ("runtime_task_attempts", 1_i64),
-                ("runtime_task_transitions", 0_i64),
-                ("runtime_task_checkpoints", 0_i64),
-                ("operation_events", 1_i64),
-            ] {
-                let count: i64 = connection
-                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                        row.get(0)
-                    })
-                    .expect("count rolled back task records");
-                assert_eq!(count, expected, "unexpected rollback count in {table}");
-            }
-            connection
-                .execute_batch("DROP TRIGGER reject_task_state_audit;")
-                .expect("remove audit failure trigger");
-        }
-        let task = database
-            .transition_native_runtime_task(
-                DEFAULT_LOCAL_WORKSPACE_SCOPE,
-                &task_id,
-                "running",
-                25,
-                "启动事务测试",
-                Some(&checkpoint),
-            )
-            .expect("commit task transition with audit");
-        assert_eq!(task.state, "running");
-        assert_eq!(task.progress, 25);
-        let connection = database.connection.lock().expect("lock sqlite");
-        for (table, expected) in [
-            ("runtime_task_attempts", 2_i64),
-            ("runtime_task_transitions", 1_i64),
-            ("runtime_task_checkpoints", 1_i64),
-            ("operation_events", 2_i64),
-        ] {
-            let count: i64 = connection
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                    row.get(0)
-                })
-                .expect("count committed task records");
-            assert_eq!(count, expected, "unexpected committed count in {table}");
-        }
-        let event_type: String = connection
-            .query_row(
-                "SELECT event_type FROM operation_events ORDER BY rowid DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .expect("read committed task state event");
-        assert_eq!(event_type, "task.state_changed");
-    }
-
-    #[test]
-    fn database_restore_preflight_and_restore_are_transactionally_recoverable() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        {
-            let connection = database.connection.lock().expect("lock sqlite");
-            connection
-                .execute(
-                    "INSERT INTO workspace_state (key, value, updated_at) VALUES ('restore-test', 'before', ?1)",
-                    [Utc::now().to_rfc3339()],
-                )
-                .expect("seed restore state");
-        }
-        let backup = database.backup().expect("create database backup");
-        let preflight = database
-            .preflight_restore(&backup.path)
-            .expect("preflight database backup");
-        assert!(preflight.compatible);
-        assert_eq!(preflight.integrity, "ok");
-        {
-            let connection = database.connection.lock().expect("lock sqlite");
-            connection
-                .execute(
-                    "UPDATE workspace_state SET value='after' WHERE key='restore-test'",
-                    [],
-                )
-                .expect("mutate live database");
-        }
-        let result = database
-            .restore(&backup.path)
-            .expect("restore database backup");
-        assert_eq!(result.integrity, "ok");
-        let connection = database.connection.lock().expect("lock sqlite");
-        restore_database_runtime_configuration(&connection)
-            .expect("reapply runtime configuration in WAL mode");
-        let journal_mode: String = connection
-            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
-            .expect("read restored journal mode");
-        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
-        let value: String = connection
-            .query_row(
-                "SELECT value FROM workspace_state WHERE key='restore-test'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("read restored value");
-        assert_eq!(value, "before");
-    }
-
-    #[test]
-    fn long_term_memory_query_governance_and_metrics_preserve_history() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        let event_id = "memory-governance-test";
-        database
-            .stage_long_term_memory_event(
-                DEFAULT_LOCAL_WORKSPACE_SCOPE,
-                event_id,
-                "conversation.message",
-                "2026-07-21T00:00:00Z",
-                &json!({"actor": "user", "content": "需要长期保留的偏好"}),
-            )
-            .expect("stage memory event");
-        let active = database
-            .query_long_term_memory(DEFAULT_LOCAL_WORKSPACE_SCOPE, "偏好", false, 10)
-            .expect("query active memory");
-        assert_eq!(active.len(), 1);
-        database
-            .govern_long_term_memory(
-                DEFAULT_LOCAL_WORKSPACE_SCOPE,
-                &LongTermMemoryGovernanceInput {
-                    id: event_id.to_string(),
-                    action: "expire".to_string(),
-                    replacement_id: None,
-                    note: Some("用户确认该偏好已经过期".to_string()),
-                },
-            )
-            .expect("expire memory");
-        assert!(database
-            .query_long_term_memory(DEFAULT_LOCAL_WORKSPACE_SCOPE, "偏好", false, 10)
-            .expect("query active memory after expiry")
-            .is_empty());
-        let history = database
-            .query_long_term_memory(DEFAULT_LOCAL_WORKSPACE_SCOPE, "偏好", true, 10)
-            .expect("query memory history");
-        assert_eq!(history[0].governance_state, "expired");
-        let metrics = database
-            .long_term_memory_metrics(DEFAULT_LOCAL_WORKSPACE_SCOPE)
-            .expect("read memory metrics");
-        assert_eq!(metrics.total, 1);
-        assert_eq!(metrics.expired, 1);
-        assert_eq!(metrics.active, 0);
-    }
-
-    fn seed_optimization_evidence(
-        database: &RuntimeDatabase,
-        id: &str,
-        occurred_at: &str,
-        content: &str,
-    ) {
-        database
-            .stage_long_term_memory_event(
-                DEFAULT_LOCAL_WORKSPACE_SCOPE,
-                id,
-                "conversation.message",
-                occurred_at,
-                &json!({
-                    "actor": "user",
-                    "content": content,
-                    "metadata": {"conversationId": "optimization-test"}
-                }),
-            )
-            .expect("stage optimization evidence");
-        let connection = database.connection.lock().expect("lock sqlite");
-        connection
-            .execute(
-                "UPDATE long_term_memory_events
-                 SET state='committed', committed_at=?2, updated_at=?2
-                 WHERE id=?1",
-                params![id, occurred_at],
-            )
-            .expect("commit optimization evidence");
-    }
-
-    fn optimization_candidate(
-        id: &str,
-        batch: &OptimizationEvidenceBatch,
-        rules: Vec<&str>,
-    ) -> OptimizationCandidateInput {
-        OptimizationCandidateInput {
-            id: id.to_string(),
-            expected_cursor_revision: batch.cursor_revision,
-            summary: format!("候选 {id} 将减少重复确认并改善 Skill 路由。"),
-            rules: rules.into_iter().map(str::to_string).collect(),
-            skill_hints: json!({"web-content-analysis": "仅在链接采集时使用"}),
-            metrics: json!({"messageCount": batch.events.len(), "correctionCount": 1}),
-            evidence_count: batch.events.len(),
-            evidence_cursor_occurred_at: batch.next_occurred_at.clone(),
-            evidence_cursor_event_id: batch.next_event_id.clone(),
-            expires_at: Some((Utc::now() + chrono::Duration::days(30)).to_rfc3339()),
-        }
-    }
-
-    #[test]
-    fn optimization_cursor_advances_only_with_committed_candidate() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        seed_optimization_evidence(
-            &database,
-            "optimization-evidence-1",
-            "2026-07-21T01:00:00Z",
-            "第一次纠正",
-        );
-        seed_optimization_evidence(
-            &database,
-            "optimization-evidence-2",
-            "2026-07-21T01:01:00Z",
-            "第二次纠正",
-        );
-        let batch = database
-            .optimization_evidence(DEFAULT_LOCAL_WORKSPACE_SCOPE, 10)
-            .expect("read optimization evidence");
-        assert_eq!(batch.cursor_revision, 0);
-        assert_eq!(batch.events.len(), 2);
-
-        let mut invalid =
-            optimization_candidate("optimization-invalid", &batch, vec!["保持原有权限边界"]);
-        invalid.evidence_count = 1;
-        database
-            .create_optimization_candidate(DEFAULT_LOCAL_WORKSPACE_SCOPE, invalid)
-            .expect_err("candidate with insufficient evidence must fail");
-        let unchanged = database
-            .optimization_evidence(DEFAULT_LOCAL_WORKSPACE_SCOPE, 10)
-            .expect("read unchanged cursor");
-        assert_eq!(unchanged.cursor_revision, 0);
-        assert_eq!(unchanged.events.len(), 2);
-
-        let candidate = optimization_candidate(
-            "optimization-candidate-1",
-            &batch,
-            vec!["回答前先识别是否需要调用本地搜索能力"],
-        );
-        database
-            .create_optimization_candidate(DEFAULT_LOCAL_WORKSPACE_SCOPE, candidate.clone())
-            .expect("commit optimization candidate");
-        let advanced = database
-            .optimization_evidence(DEFAULT_LOCAL_WORKSPACE_SCOPE, 10)
-            .expect("read advanced cursor");
-        assert_eq!(advanced.cursor_revision, 1);
-        assert!(advanced.events.is_empty());
-
-        database
-            .create_optimization_candidate(DEFAULT_LOCAL_WORKSPACE_SCOPE, candidate)
-            .expect_err("stale cursor revision must be rejected");
-    }
-
-    #[test]
-    fn optimization_evaluation_rejects_permission_expansion() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        seed_optimization_evidence(
-            &database,
-            "optimization-forbidden-1",
-            "2026-07-21T02:00:00Z",
-            "用户纠正了意图判断",
-        );
-        seed_optimization_evidence(
-            &database,
-            "optimization-forbidden-2",
-            "2026-07-21T02:01:00Z",
-            "用户要求保持权限边界",
-        );
-        let batch = database
-            .optimization_evidence(DEFAULT_LOCAL_WORKSPACE_SCOPE, 10)
-            .expect("read optimization evidence");
-        database
-            .create_optimization_candidate(
-                DEFAULT_LOCAL_WORKSPACE_SCOPE,
-                optimization_candidate(
-                    "optimization-forbidden",
-                    &batch,
-                    vec!["扩大权限并绕过审批以提高执行速度"],
-                ),
-            )
-            .expect("store candidate before independent evaluation");
-        database
-            .apply_optimization_candidate(DEFAULT_LOCAL_WORKSPACE_SCOPE, "optimization-forbidden")
-            .expect_err("unevaluated candidate must not be applied");
-        let evaluation = database
-            .evaluate_optimization_candidate(
-                DEFAULT_LOCAL_WORKSPACE_SCOPE,
-                "optimization-forbidden",
-            )
-            .expect("evaluate forbidden candidate");
-        assert!(!evaluation.passed);
-        assert_eq!(evaluation.state, "rejected");
-        assert!(evaluation
-            .checks
-            .iter()
-            .any(|check| check.contains("权限、设置或访问控制")));
-        database
-            .apply_optimization_candidate(DEFAULT_LOCAL_WORKSPACE_SCOPE, "optimization-forbidden")
-            .expect_err("rejected candidate must not be applied");
-    }
-
-    #[test]
-    fn optimization_apply_and_rollback_append_immutable_versions() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        for (id, occurred_at, content) in [
-            ("optimization-version-1", "2026-07-21T03:00:00Z", "证据一"),
-            ("optimization-version-2", "2026-07-21T03:01:00Z", "证据二"),
-            ("optimization-version-3", "2026-07-21T03:02:00Z", "证据三"),
-            ("optimization-version-4", "2026-07-21T03:03:00Z", "证据四"),
-        ] {
-            seed_optimization_evidence(&database, id, occurred_at, content);
-        }
-
-        let first_batch = database
-            .optimization_evidence(DEFAULT_LOCAL_WORKSPACE_SCOPE, 2)
-            .expect("read first evidence batch");
-        database
-            .create_optimization_candidate(
-                DEFAULT_LOCAL_WORKSPACE_SCOPE,
-                optimization_candidate(
-                    "optimization-version-a",
-                    &first_batch,
-                    vec!["优先复用已经验证的 Skill"],
-                ),
-            )
-            .expect("create first candidate");
-        let second_batch = database
-            .optimization_evidence(DEFAULT_LOCAL_WORKSPACE_SCOPE, 2)
-            .expect("read second evidence batch");
-        database
-            .create_optimization_candidate(
-                DEFAULT_LOCAL_WORKSPACE_SCOPE,
-                optimization_candidate(
-                    "optimization-version-b",
-                    &second_batch,
-                    vec!["搜索请求优先执行本地索引查询"],
-                ),
-            )
-            .expect("create concurrent baseline candidate");
-        for candidate_id in ["optimization-version-a", "optimization-version-b"] {
-            let evaluation = database
-                .evaluate_optimization_candidate(DEFAULT_LOCAL_WORKSPACE_SCOPE, candidate_id)
-                .expect("evaluate candidate");
-            assert!(evaluation.passed);
-            assert_eq!(evaluation.state, "pending_review");
-        }
-
-        let applied = database
-            .apply_optimization_candidate(DEFAULT_LOCAL_WORKSPACE_SCOPE, "optimization-version-a")
-            .expect("apply first candidate");
-        assert_eq!(applied.version, 1);
-        database
-            .apply_optimization_candidate(DEFAULT_LOCAL_WORKSPACE_SCOPE, "optimization-version-b")
-            .expect_err("candidate from an old baseline must not overwrite current profile");
-
-        let rolled_back = database
-            .rollback_optimization_profile(DEFAULT_LOCAL_WORKSPACE_SCOPE, Some(0))
-            .expect("append rollback version");
-        assert_eq!(rolled_back.version, 2);
-        assert!(rolled_back.guidance.is_empty());
-        let versions = database
-            .list_optimization_versions(DEFAULT_LOCAL_WORKSPACE_SCOPE, 10)
-            .expect("list immutable optimization versions");
-        assert_eq!(versions.len(), 3);
-        assert_eq!(versions[0].version, 2);
-        assert_eq!(versions[0].state, "rollback");
-        assert_eq!(versions[0].rollback_target, Some(0));
-        assert_eq!(versions[1].version, 1);
-        assert_eq!(versions[1].state, "active");
-        assert_eq!(versions[2].version, 0);
-        assert_eq!(versions[2].state, "initial");
-    }
-
-    #[test]
-    fn model_usage_records_are_idempotent_and_keep_cost_source() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        database
-            .record_model_usage(&ModelUsageRecord {
-                request_id: "model-request-test",
-                trace_id: "trace-model-request-test",
-                operation: "assistant.chat",
-                provider: "openai",
-                model: "gpt-test",
-                state: "started",
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: 0,
-                estimated_cost_usd: None,
-                cost_source: "pending",
-                duration_ms: 0,
-                error: None,
-            })
-            .expect("record started model usage");
-        database
-            .record_model_usage(&ModelUsageRecord {
-                request_id: "model-request-test",
-                trace_id: "trace-model-request-test",
-                operation: "assistant.chat",
-                provider: "openai",
-                model: "gpt-test",
-                state: "succeeded",
-                prompt_tokens: 120,
-                completion_tokens: 45,
-                total_tokens: 165,
-                estimated_cost_usd: Some(0.0042),
-                cost_source: "provider_usage_and_cost",
-                duration_ms: 850,
-                error: None,
-            })
-            .expect("update model usage");
-        let connection = database.connection.lock().expect("lock sqlite");
-        let row = connection
-            .query_row(
-                "SELECT state, prompt_tokens, completion_tokens, total_tokens,
-                        estimated_cost_usd, cost_source, duration_ms
-                 FROM model_usage_events WHERE request_id='model-request-test'",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, f64>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, i64>(6)?,
-                    ))
-                },
-            )
-            .expect("read model usage");
-        assert_eq!(row.0, "succeeded");
-        assert_eq!((row.1, row.2, row.3), (120, 45, 165));
-        assert!((row.4 - 0.0042).abs() < f64::EPSILON);
-        assert_eq!(row.5, "provider_usage_and_cost");
-        assert_eq!(row.6, 850);
-        let count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM model_usage_events WHERE request_id='model-request-test'",
-                [],
-                |value| value.get(0),
-            )
-            .expect("count idempotent model usage");
-        assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn application_authorization_is_explicit_and_persists_without_accounts() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let path = directory.path().join("runtime.sqlite");
-        {
-            let database = test_database(&path);
-            let pending = database
-                .application_authorization()
-                .expect("read initial authorization");
-            assert_eq!(pending.status, "pending");
-            assert!(!pending.is_granted());
-            assert_eq!(
-                pending.authorization_version,
-                APPLICATION_AUTHORIZATION_VERSION
-            );
-            assert!(pending.decided_at.is_none());
-
-            let denied = database
-                .set_application_authorization(false)
-                .expect("persist denial");
-            assert_eq!(denied.status, "denied");
-            assert!(!denied.is_granted());
-            assert!(denied.decided_at.is_some());
-        }
-        {
-            let database = test_database(&path);
-            let denied = database
-                .application_authorization()
-                .expect("restore denied authorization");
-            assert_eq!(denied.status, "denied");
-
-            let granted = database
-                .set_application_authorization(true)
-                .expect("grant from settings");
-            assert!(granted.is_granted());
-        }
-        {
-            let database = test_database(&path);
-            let granted = database
-                .application_authorization()
-                .expect("restore granted authorization");
-            assert_eq!(granted.status, "granted");
-            assert!(granted.is_granted());
-
-            let revoked = database
-                .set_application_authorization(false)
-                .expect("revoke from settings");
-            assert_eq!(revoked.status, "denied");
-        }
-        {
-            let database = test_database(&path);
-            assert_eq!(
-                database
-                    .application_authorization()
-                    .expect("restore revoked authorization")
-                    .status,
-                "denied"
-            );
-            assert!(database
-                .set_application_authorization(true)
-                .expect("reauthorize from settings")
-                .is_granted());
-        }
-    }
-
-    #[test]
-    fn cancelled_index_transaction_rolls_back_before_commit() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let mut connection = Connection::open_in_memory().expect("open memory database");
-        connection
-            .execute("CREATE TABLE indexed_notes (id INTEGER PRIMARY KEY)", [])
-            .expect("create index test table");
-        let transaction = connection.transaction().expect("start index transaction");
-        transaction
-            .execute("INSERT INTO indexed_notes (id) VALUES (1)", [])
-            .expect("stage index row");
-        let cancelled = AtomicBool::new(true);
-        assert!(ensure_index_not_cancelled(&|| cancelled.load(Ordering::Acquire)).is_err());
-        drop(transaction);
-
-        let count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM indexed_notes", [], |row| row.get(0))
-            .expect("count committed index rows");
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn outdated_application_authorization_requires_confirmation_again() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let database = test_database(&directory.path().join("runtime.sqlite"));
-        database
-            .set_application_authorization(true)
-            .expect("persist current grant");
-        database
-            .connection
-            .lock()
-            .expect("lock sqlite")
-            .execute(
-                "UPDATE application_authorization SET authorization_version=0 WHERE id=1",
-                [],
-            )
-            .expect("downgrade stored authorization version");
-
-        let authorization = database
-            .application_authorization()
-            .expect("read outdated authorization");
-        assert_eq!(authorization.status, "pending");
-        assert!(!authorization.is_granted());
-        assert_eq!(
-            authorization.authorization_version,
-            APPLICATION_AUTHORIZATION_VERSION
-        );
-    }
-
-    #[test]
-    fn first_grant_is_restored_without_returning_to_pending() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let path = directory.path().join("runtime.sqlite");
-        {
-            let database = test_database(&path);
-            assert_eq!(
-                database
-                    .application_authorization()
-                    .expect("read pending state")
-                    .status,
-                "pending"
-            );
-            assert!(database
-                .set_application_authorization(true)
-                .expect("grant on first launch")
-                .is_granted());
-        }
-        {
-            let database = test_database(&path);
-            let restored = database
-                .application_authorization()
-                .expect("restore first-launch grant");
-            assert_eq!(restored.status, "granted");
-            assert!(restored.decided_at.is_some());
-        }
-    }
+    results.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right.modified_at.cmp(&left.modified_at))
+            .then_with(|| left.vault_id.cmp(&right.vault_id))
+            .then_with(|| left.relative_path.cmp(&right.relative_path))
+    });
+    results.truncate(max_results);
+    Ok(results)
 }

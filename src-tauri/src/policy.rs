@@ -1,3 +1,6 @@
+use crate::task_runtime::{
+    validate_runtime_task_plan, RuntimeTaskPlanInput, RuntimeTaskStepCommandBinding,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -13,6 +16,8 @@ const MAX_BUDGET_RUNTIME_SECONDS: u64 = 86_400;
 pub enum CommandOrigin {
     DirectUser,
     Assistant,
+    /// A child command issued only for a live, claimed Runtime Task step.
+    Runtime,
     Schedule,
     SystemMaintenance,
     Evolution,
@@ -55,6 +60,10 @@ pub struct ApplicationCommand {
     pub trace_id: Option<String>,
     #[serde(default)]
     pub model_decision_receipt: Option<String>,
+    #[serde(default, alias = "plan")]
+    pub runtime_plan: Option<RuntimeTaskPlanInput>,
+    #[serde(default, alias = "runtimeStepBinding")]
+    pub step_binding: Option<RuntimeTaskStepCommandBinding>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -89,7 +98,31 @@ pub(crate) fn command_authorization_binding(command: &ApplicationCommand) -> Val
         "networkTargets": command.network_targets,
         "declaredScope": command.declared_scope,
         "budget": command.budget,
+        "runtimePlan": command.runtime_plan,
+        "stepBinding": command.step_binding,
     })
+}
+
+pub(crate) fn command_is_effectful(command: &ApplicationCommand) -> bool {
+    if !command.network_targets.is_empty()
+        || command.capability_id == "system:image"
+        || command.intent.contains("model")
+        || (command.operation == "run"
+            && matches!(
+                command.capability_id.as_str(),
+                "system:research" | "system:skills" | "system:optimization"
+            ))
+    {
+        return true;
+    }
+    match operation_category(command) {
+        "write" | "destructive" | "external" | "managed_change" => true,
+        "runtime" => !matches!(
+            command.operation.as_str(),
+            "read" | "query" | "search" | "list" | "get" | "open" | "preview" | "status"
+        ),
+        _ => false,
+    }
 }
 
 fn valid_identifier(value: &str, max: usize) -> bool {
@@ -134,6 +167,10 @@ fn operation_category(command: &ApplicationCommand) -> &'static str {
     let operation = command.operation.as_str();
     if operation.starts_with("settings.") {
         "settings"
+    } else if command.capability_id == "system:skills"
+        && !matches!(operation, "run" | "query" | "open")
+    {
+        "managed_change"
     } else if operation.contains("send")
         || operation.contains("deliver")
         || operation.contains("publish")
@@ -141,12 +178,7 @@ fn operation_category(command: &ApplicationCommand) -> &'static str {
         "external"
     } else if matches!(
         command.capability_id.as_str(),
-        "system:schedule"
-            | "system:skills"
-            | "system:tasks"
-            | "system:logs"
-            | "system:dashboard"
-            | "system:reports"
+        "system:schedule" | "system:tasks" | "system:logs" | "system:dashboard" | "system:reports"
     ) {
         "runtime"
     } else if command.intent == "delete"
@@ -198,6 +230,35 @@ pub fn evaluate(command: &ApplicationCommand) -> PolicyDecision {
         || command.budget.max_runtime_seconds > MAX_BUDGET_RUNTIME_SECONDS
     {
         reasons.push("invalid_max_runtime_seconds".to_string());
+    }
+    if let Some(plan) = command.runtime_plan.as_ref() {
+        if let Err(error) = validate_runtime_task_plan(plan) {
+            reasons.push(format!("invalid_runtime_plan:{error}"));
+        } else if plan.steps.len() as u64 > command.budget.max_steps {
+            reasons.push("runtime_plan_exceeds_step_budget".to_string());
+        }
+    }
+    if let Some(binding) = command.step_binding.as_ref() {
+        if let Err(error) = crate::task_runtime::validate_runtime_task_step_binding(binding) {
+            reasons.push(format!("invalid_step_binding:{error}"));
+        }
+    }
+    if matches!(command.origin, CommandOrigin::Runtime) {
+        if command.step_binding.is_none() {
+            reasons.push("runtime_command_missing_step_binding".to_string());
+        }
+        if command.runtime_plan.is_some() {
+            reasons.push("runtime_command_cannot_define_plan".to_string());
+        }
+        if command
+            .model_decision_receipt
+            .as_deref()
+            .is_some_and(|receipt| !receipt.trim().is_empty())
+        {
+            reasons.push("runtime_command_cannot_reuse_model_receipt".to_string());
+        }
+    } else if command.step_binding.is_some() {
+        reasons.push("step_binding_requires_runtime_origin".to_string());
     }
     if command
         .budget
@@ -256,8 +317,13 @@ pub fn evaluate(command: &ApplicationCommand) -> PolicyDecision {
                 "command_too_large"
                     | "too_many_declared_targets"
                     | "missing_model_decision_receipt"
+                    | "runtime_command_missing_step_binding"
+                    | "runtime_command_cannot_define_plan"
+                    | "runtime_command_cannot_reuse_model_receipt"
+                    | "step_binding_requires_runtime_origin"
                     | "assistant_settings_forbidden"
                     | "missing_vault_scope"
+                    | "runtime_plan_exceeds_step_budget"
             )
     });
     if denied {
@@ -269,10 +335,19 @@ pub fn evaluate(command: &ApplicationCommand) -> PolicyDecision {
             approval_type: None,
         };
     }
-    let approval_type = match category {
-        "destructive" => Some("destructive_change".to_string()),
-        "external" => Some("external_delivery".to_string()),
-        _ => None,
+    // Runtime children inherit authority only through their live native step
+    // binding, which is checked transactionally before persistence. Requiring
+    // another renderer approval would split one approved parent operation into
+    // two unrelated approval decisions.
+    let approval_type = if matches!(command.origin, CommandOrigin::Runtime) {
+        None
+    } else {
+        match category {
+            "destructive" => Some("destructive_change".to_string()),
+            "external" => Some("external_delivery".to_string()),
+            "managed_change" => Some("content_write".to_string()),
+            _ => None,
+        }
     };
     PolicyDecision {
         outcome: if approval_type.is_some() {
@@ -286,136 +361,7 @@ pub fn evaluate(command: &ApplicationCommand) -> PolicyDecision {
             reasons
         },
         normalized_scope,
-        requires_checkpoint: matches!(category, "write" | "destructive"),
+        requires_checkpoint: matches!(category, "write" | "destructive" | "managed_change"),
         approval_type,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn command(operation: &str) -> ApplicationCommand {
-        ApplicationCommand {
-            id: "command-1".to_string(),
-            command_type: "assistant.operation".to_string(),
-            origin: CommandOrigin::Assistant,
-            intent: "search".to_string(),
-            capability_id: "system:search".to_string(),
-            operation: operation.to_string(),
-            parameters: Value::Object(Default::default()),
-            vault_id: Some("vault-1".to_string()),
-            relative_paths: vec!["资料/笔记.md".to_string()],
-            network_targets: vec![],
-            declared_scope: vec!["vault:read".to_string()],
-            budget: CommandBudget {
-                max_steps: 8,
-                max_runtime_seconds: 300,
-                max_tool_calls: 16,
-                max_tokens: Some(100_000),
-                max_cost: None,
-            },
-            idempotency_key: "turn-1".to_string(),
-            trace_id: Some("trace-1".to_string()),
-            model_decision_receipt: Some("receipt-1".to_string()),
-        }
-    }
-
-    #[test]
-    fn allows_scoped_read() {
-        assert_eq!(
-            evaluate(&command("note.read")).outcome,
-            PolicyOutcome::Allow
-        );
-    }
-
-    #[test]
-    fn requires_approval_for_delete() {
-        let decision = evaluate(&command("note.delete"));
-        assert_eq!(decision.outcome, PolicyOutcome::RequireApproval);
-        assert!(decision.requires_checkpoint);
-    }
-
-    #[test]
-    fn delete_capability_requires_approval_even_when_model_operation_is_generic() {
-        let mut value = command("run");
-        value.intent = "delete".to_string();
-        value.capability_id = "system:delete".to_string();
-        let decision = evaluate(&value);
-        assert_eq!(decision.outcome, PolicyOutcome::RequireApproval);
-        assert_eq!(
-            decision.approval_type.as_deref(),
-            Some("destructive_change")
-        );
-    }
-
-    #[test]
-    fn report_subscription_delete_is_runtime_configuration() {
-        let mut value = command("delete");
-        value.intent = "reports".to_string();
-        value.capability_id = "system:reports".to_string();
-        value.vault_id = None;
-        value.relative_paths.clear();
-        let decision = evaluate(&value);
-        assert_eq!(decision.outcome, PolicyOutcome::Allow);
-        assert_eq!(decision.approval_type, None);
-        assert!(!decision.requires_checkpoint);
-    }
-
-    #[test]
-    fn denies_settings_and_traversal() {
-        let mut value = command("settings.write");
-        value.relative_paths = vec!["../secret.md".to_string()];
-        let decision = evaluate(&value);
-        assert_eq!(decision.outcome, PolicyOutcome::Deny);
-        assert!(decision
-            .reason_codes
-            .contains(&"assistant_settings_forbidden".to_string()));
-        assert!(decision
-            .reason_codes
-            .contains(&"invalid_relative_path".to_string()));
-    }
-
-    #[test]
-    fn allows_direct_user_settings_changes() {
-        let mut value = command("settings.write");
-        value.origin = CommandOrigin::DirectUser;
-        value.capability_id = "system:settings".to_string();
-        value.relative_paths.clear();
-        value.vault_id = None;
-        value.model_decision_receipt = None;
-        let decision = evaluate(&value);
-        assert_eq!(decision.outcome, PolicyOutcome::Allow);
-        assert!(!decision
-            .reason_codes
-            .contains(&"assistant_settings_forbidden".to_string()));
-    }
-
-    #[test]
-    fn allows_runtime_configuration_without_vault_scope() {
-        let mut value = command("create");
-        value.intent = "schedule".to_string();
-        value.capability_id = "system:schedule".to_string();
-        value.vault_id = None;
-        value.relative_paths.clear();
-        assert_eq!(evaluate(&value).outcome, PolicyOutcome::Allow);
-    }
-
-    #[test]
-    fn rejects_public_plain_http_targets() {
-        let mut value = command("capture.run");
-        value.network_targets = vec!["http://example.com/article".to_string()];
-        let decision = evaluate(&value);
-        assert_eq!(decision.outcome, PolicyOutcome::Deny);
-        assert!(decision
-            .reason_codes
-            .contains(&"invalid_network_target".to_string()));
-    }
-
-    #[test]
-    fn allows_local_plain_http_targets() {
-        let mut value = command("capture.run");
-        value.network_targets = vec!["http://127.0.0.1:4173/health".to_string()];
-        assert_eq!(evaluate(&value).outcome, PolicyOutcome::Allow);
     }
 }

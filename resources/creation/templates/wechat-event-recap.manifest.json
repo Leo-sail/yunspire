@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "template",
+  "catalogVersion": "0.4.0",
+  "id": "wechat-event-recap",
+  "version": "1.0.0",
+  "displayName": "活动复盘文",
+  "description": "将活动亮点、现场反馈和后续动作整理为可分享的复盘。",
+  "status": "active",
+  "contentType": "wechat",
+  "artifactType": "wechatArticle",
+  "tags": [
+    "公众号",
+    "活动",
+    "复盘",
+    "原创模板",
+    "本地知识库"
+  ],
+  "inputFormats": [
+    "plainText",
+    "markdown",
+    "docx",
+    "pdf"
+  ],
+  "outputFormats": [
+    "markdown",
+    "html"
+  ],
+  "entrypoint": "wechat-event-recap/template.md",
+  "files": [
+    {
+      "path": "wechat-event-recap/template.md",
+      "kind": "markdown",
+      "editable": true,
+      "contentHash": "sha256:37b6802b136f88bc367e0ea097e39b89f34013e0ff99596b87d945e30cdde58e"
+    }
+  ],
+  "editableSurfaces": [
+    "content"
+  ],
+  "agentCapabilities": [
+    "creation.generate",
+    "creation.edit"
+  ],
+  "sandbox": {
+    "network": false,
+    "shell": false,
+    "vaultWrite": false,
+    "allowTopNavigation": false,
+    "allowPopups": false,
+    "allowExternalScripts": false
+  },
+  "compatibility": {
+    "minRuntimeVersion": "0.1.2",
+    "previewMode": "sandboxedIframe"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This template is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire template manifest and Markdown entrypoint; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

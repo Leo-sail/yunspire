@@ -1,0 +1,71 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "template",
+  "catalogVersion": "0.4.0",
+  "id": "case-study-paper",
+  "version": "1.0.0",
+  "displayName": "案例研究论文",
+  "description": "以严谨的案例材料解释机制、情境与可迁移边界。",
+  "status": "active",
+  "contentType": "paper",
+  "artifactType": "report",
+  "tags": [
+    "论文",
+    "案例",
+    "机制",
+    "原创模板",
+    "本地知识库"
+  ],
+  "inputFormats": [
+    "plainText",
+    "markdown",
+    "docx",
+    "xlsx",
+    "pdf"
+  ],
+  "outputFormats": [
+    "markdown",
+    "html",
+    "pdf"
+  ],
+  "entrypoint": "case-study-paper/template.md",
+  "files": [
+    {
+      "path": "case-study-paper/template.md",
+      "kind": "markdown",
+      "editable": true,
+      "contentHash": "sha256:b091b5b8d60ee371d8204d4e368e577ad15a5bb4e8b839c322e79ce0401f79c7"
+    }
+  ],
+  "editableSurfaces": [
+    "content"
+  ],
+  "agentCapabilities": [
+    "creation.generate",
+    "creation.edit"
+  ],
+  "sandbox": {
+    "network": false,
+    "shell": false,
+    "vaultWrite": false,
+    "allowTopNavigation": false,
+    "allowPopups": false,
+    "allowExternalScripts": false
+  },
+  "compatibility": {
+    "minRuntimeVersion": "0.1.2",
+    "previewMode": "sandboxedIframe"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This template is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire template manifest and Markdown entrypoint; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "component",
+  "catalogVersion": "0.4.0",
+  "id": "infographic",
+  "version": "1.0.0",
+  "displayName": "信息图",
+  "description": "把一组事实、步骤或数字组织成可快速理解的视觉摘要。",
+  "status": "active",
+  "category": "media",
+  "legacyIds": [],
+  "blockKind": "collection",
+  "slots": [
+    {
+      "id": "items",
+      "kind": "list",
+      "required": true,
+      "maxLength": 10000
+    }
+  ],
+  "semantics": {
+    "role": "figure",
+    "ariaLabel": "信息图",
+    "markdownFallback": "figure"
+  },
+  "constraints": {
+    "minItems": 1,
+    "maxItems": 20,
+    "allowNestedComponents": false,
+    "spanLeaf": true,
+    "allowScripts": false,
+    "allowExternalStyles": false
+  },
+  "templateMarkdown": "### 信息图\n\n![替换为实际图片](assets/replace-me.png)\n\n**一句话结论：** [填写说明]\n\n**事实单元：** [填写说明]\n\n**设计说明：** [填写说明]\n\n**来源与授权：** [[替换为实际笔记标题]]",
+  "renderers": {
+    "markdown": "creation.component.infographic.markdown.v1",
+    "html": "creation.component.infographic.html.v1",
+    "wechatRichText": "creation.component.infographic.wechat.v1"
+  },
+  "compatibility": {
+    "targets": [
+      "markdown",
+      "html",
+      "wechatRichText"
+    ],
+    "minRuntimeVersion": "0.1.2"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This component is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire component manifest and Markdown block; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

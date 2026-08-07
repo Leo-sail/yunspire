@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "component",
+  "catalogVersion": "0.4.0",
+  "id": "faq",
+  "version": "1.0.0",
+  "displayName": "问答集",
+  "description": "把读者高频问题和基于来源的回答集中呈现。",
+  "status": "active",
+  "category": "conversation",
+  "legacyIds": [],
+  "blockKind": "collection",
+  "slots": [
+    {
+      "id": "items",
+      "kind": "list",
+      "required": true,
+      "maxLength": 10000
+    }
+  ],
+  "semantics": {
+    "role": "dialog",
+    "ariaLabel": "问答集",
+    "markdownFallback": "paragraphs"
+  },
+  "constraints": {
+    "minItems": 2,
+    "maxItems": 30,
+    "allowNestedComponents": false,
+    "spanLeaf": true,
+    "allowScripts": false,
+    "allowExternalStyles": false
+  },
+  "templateMarkdown": "### 问答集\n\n**适用情况：** [填写基于本地知识库的内容]\n\n**常见误解：** [填写基于本地知识库的内容]\n\n**下一步动作：** [填写基于本地知识库的内容]\n\n**来源：** [[替换为实际笔记标题]]",
+  "renderers": {
+    "markdown": "creation.component.faq.markdown.v1",
+    "html": "creation.component.faq.html.v1",
+    "wechatRichText": "creation.component.faq.wechat.v1"
+  },
+  "compatibility": {
+    "targets": [
+      "markdown",
+      "html",
+      "wechatRichText"
+    ],
+    "minRuntimeVersion": "0.1.2"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This component is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire component manifest and Markdown block; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

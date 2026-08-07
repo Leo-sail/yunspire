@@ -17,6 +17,7 @@ pub struct CommandReceipt {
     duplicate: bool,
     decision: PolicyDecision,
     execution_ticket: Option<ExecutionTicketReceipt>,
+    plan_revision: Option<u64>,
     accepted_at: String,
 }
 
@@ -72,11 +73,27 @@ pub fn submit_application_command(
     } else {
         task_id
             .as_deref()
-            .map(|task_id| {
-                ticket_state.issue(&workspace_scope, task_id, &trace_id, &command, &decision)
+            .map(|task_id| -> Result<ExecutionTicketReceipt, String> {
+                let receipt = ticket_state.issue(
+                    &workspace_scope,
+                    task_id,
+                    &trace_id,
+                    &command,
+                    &decision,
+                )?;
+                if let Some(binding) = command.step_binding.as_ref() {
+                    ticket_state.validate_step_binding(&receipt.token, binding)?;
+                }
+                Ok(receipt)
             })
             .transpose()?
     };
+    let plan_revision = task_id
+        .as_deref()
+        .map(|task_id| database.runtime_task_contract(&workspace_scope, task_id))
+        .transpose()?
+        .flatten()
+        .map(|contract| contract.plan.revision);
     Ok(CommandReceipt {
         command_id: command.id,
         task_id,
@@ -84,6 +101,7 @@ pub fn submit_application_command(
         duplicate,
         decision,
         execution_ticket,
+        plan_revision,
         accepted_at,
     })
 }

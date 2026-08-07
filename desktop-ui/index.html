@@ -1,123 +1,186 @@
 <!doctype html>
+<!--
+THESIS: 云枢是一个让知识对象持续向前的工作台，拒绝把真实工作拆成漂浮卡片和后台指标墙。
+OWN-WORLD: 珍珠白工作面、钢蓝动作、暖纸成长面、细分隔线与清晰的对象行，控件在需要时出现并保持原生可预期。
+STORY: 用户一眼看到当前要继续的对象，能在不迷路的情况下阅读、创作、采集、回顾成长或请求帮助。
+FIRST VIEWPORT: 64px 稳定顶栏下，主空间占满窗口；对象和下一步动作在首屏形成清楚的阅读顺序，侧栏只在上下文需要时展开。
+FORM: Operate 模式的对象优先工作台；沿用四个长期空间，重排密度与状态层级，不以装饰性容器制造重点。
+FINISH: unreviewed and undocumented is unfinished; this build ends with a verified user flow and release audit
+-->
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="light" />
-  <title>Yunspire 本地知识工作台</title>
+  <title>云枢 Yunspire · 自成长知识中枢</title>
   <link rel="icon" type="image/png" href="./assets/brand/yunspire-favicon.png" />
+  <link rel="stylesheet" href="./generated/yunspire-r10.css" />
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
+  <a class="skip-link" href="#workspace">跳到主要内容</a>
   <div class="app-shell">
-    <aside class="sidebar" aria-label="主导航">
-      <div class="brand">
-        <div class="brand-mark"><img src="./assets/brand/yunspire-symbol.png" alt="" /></div>
-        <div>
-          <div class="brand-name">Yunspire</div>
-          <div class="brand-subtitle" hidden>本地知识工作台</div>
-        </div>
-      </div>
-
-      <nav class="nav-groups">
-        <section class="nav-group">
-          <div class="nav-label">知识工作</div>
-          <button class="nav-item" data-route="agent"><i data-lucide="message-square"></i><span>AI助手</span></button>
-          <button class="nav-item" data-route="dashboard"><i data-lucide="layout-dashboard"></i><span>仪表盘</span><span class="nav-count warning">0</span></button>
-          <button class="nav-item" data-route="capture"><i data-lucide="inbox"></i><span>采集</span><span class="nav-count">0</span></button>
-          <button class="nav-item" data-route="search"><i data-lucide="search"></i><span>搜索</span></button>
-          <button class="nav-item" data-route="create"><i data-lucide="square-pen"></i><span>创作</span></button>
-        </section>
-        <section class="nav-group">
-          <div class="nav-label">系统</div>
-          <button class="nav-item" data-route="skills"><i data-lucide="blocks"></i><span>技能</span><span class="nav-count" data-user-skill-nav-count>0</span></button>
-          <button class="nav-item" data-route="tasks"><i data-lucide="list-checks"></i><span>任务</span><span class="nav-count warning">0</span></button>
-          <button class="nav-item" data-route="reports"><i data-lucide="chart-no-axes-column-increasing"></i><span>报告</span><span class="nav-count">0</span></button>
-          <button class="nav-item" data-route="audit"><i data-lucide="history"></i><span>操作日志</span></button>
-          <button class="nav-item" data-route="settings"><i data-lucide="settings-2"></i><span>设置</span></button>
-        </section>
-      </nav>
-
-      <div class="sidebar-footer">
-        <div class="vault-popover" id="vault-popover" aria-label="本地 Obsidian 知识库">
-          <header><strong>本地 Obsidian 知识库</strong><span>正在读取本机配置</span></header>
-          <footer>AI助手可读取、写入、新增、删除和整理笔记，并管理文件夹、标签、双向链接与 Obsidian 图谱。</footer>
-        </div>
-        <button class="vault-switcher" id="vault-switcher" title="选择本地 Obsidian 知识库" aria-expanded="false">
-          <span class="vault-icon"><i data-lucide="database"></i></span>
-          <span><strong data-active-vault-name>正在连接 Obsidian</strong><small data-active-vault-notes>读取本机知识库配置</small></span>
-          <i data-lucide="chevrons-up-down" class="chevron"></i>
+    <header class="r10-topbar" aria-label="云枢主导航">
+      <div class="r10-topbar-inner">
+        <button class="r10-brand" type="button" data-route="dashboard" aria-label="云枢工作台">
+          <img src="./assets/brand/yunspire-symbol.png" alt="" />
+          <span>云枢</span>
         </button>
-        <div class="local-status"><span class="local-dot"></span><span class="local-label">Obsidian 数据仅存于本机</span></div>
+        <span class="r10-brand-divider" aria-hidden="true"></span>
+        <nav class="r10-primary-navigation" aria-label="知识工作区">
+          <button class="r10-nav-item" type="button" data-route="dashboard"><i data-lucide="layout-dashboard"></i><span>工作台</span></button>
+          <button class="r10-nav-item" type="button" data-route="search"><i data-lucide="library-big"></i><span>知识库</span></button>
+          <button class="r10-nav-item" type="button" data-route="create"><i data-lucide="square-pen"></i><span>创作</span></button>
+          <button class="r10-nav-item" type="button" data-route="reports"><i data-lucide="history"></i><span>成长中心</span></button>
+        </nav>
+        <div class="r10-topbar-actions">
+          <button class="r10-command-trigger" id="r10-command-trigger" type="button" aria-label="搜索知识或运行命令"><i data-lucide="search"></i><span>搜索</span><kbd data-shortcut-display="search">⌘ K</kbd></button>
+          <button class="r10-capture-trigger" id="r10-capture-trigger" type="button"><i data-lucide="plus"></i><span>采集</span></button>
+          <span class="r10-assistant-island" id="r10-assistant-island"></span>
+          <button class="r10-vault-switcher" id="r10-vault-switcher" type="button" aria-haspopup="menu" aria-expanded="false" title="选择本地知识库">
+            <span class="r10-vault-icon"><i data-lucide="library-big"></i></span>
+            <span data-active-vault-name>我的知识库</span>
+            <i data-lucide="chevron-down"></i>
+          </button>
+        </div>
       </div>
-    </aside>
+      <div class="notification-popover r10-notification-popover" id="notification-popover" role="dialog" aria-label="通知" aria-hidden="true">
+        <header class="notification-popover-header"><strong>通知</strong><button class="icon-button quiet" type="button" data-close-notifications aria-label="隐藏通知" title="隐藏通知"><i data-lucide="x"></i></button></header>
+        <div class="notification-row"><div><strong>暂无通知</strong><small>新消息和任务提醒会显示在这里</small></div></div>
+      </div>
+      <div class="vault-popover r10-vault-popover" id="vault-popover" role="menu" aria-label="本地 Obsidian 知识库">
+        <header><strong>本地知识库</strong><span>正在读取本机配置</span></header>
+        <div class="r10-vault-actions">
+          <button class="r10-vault-action" id="r10-task-drawer-trigger" type="button" aria-controls="task-drawer" aria-expanded="false"><i data-lucide="clock-3"></i><span>后台任务</span><strong>0 个任务进行中</strong></button>
+          <button class="r10-vault-action" id="r10-notification-trigger" type="button" aria-expanded="false"><i data-lucide="bell"></i><span>通知</span></button>
+          <button class="r10-vault-action" type="button" data-route-jump="settings"><i data-lucide="settings-2"></i><span>知识库与偏好</span></button>
+        </div>
+        <footer>知识和附件始终保留在你选择的本机 Obsidian Vault 中。</footer>
+      </div>
+    </header>
 
     <section class="app-main">
-      <header class="topbar">
-        <button class="icon-button quiet sidebar-toggle" id="sidebar-toggle" title="收起侧边栏" aria-label="收起侧边栏" aria-pressed="false"><i data-lucide="panel-left-close"></i></button>
-        <button class="command-trigger" id="command-trigger"><i data-lucide="search"></i><span>搜索笔记、标签、链接或命令</span><kbd>⌘ K</kbd></button>
-        <div class="topbar-spacer"></div>
-        <button class="task-status" id="task-drawer-trigger" aria-controls="task-drawer" aria-expanded="false"><strong>0 个任务进行中</strong></button>
-        <button class="icon-button" id="notification-trigger" title="通知"><i data-lucide="bell"></i></button>
-        <div class="notification-popover" id="notification-popover">
-          <div class="popover-title">通知</div>
-          <div class="notification-row"><div><strong>暂无通知</strong><small>真实任务状态会在此显示</small></div></div>
-        </div>
-      </header>
-
       <main class="workspace" id="workspace">
-        <section class="view" data-view="dashboard">
-          <div class="overview-strip dashboard-module dashboard-overview-module" aria-label="知识库概览">
-            <div><span>Obsidian 知识库</span><strong data-dashboard-vault-count>0</strong><small>来自本机配置</small></div>
-            <div><span>Markdown 笔记</span><strong data-dashboard-note-count>0</strong><small>来自本机扫描</small></div>
-            <div><span>本地索引</span><strong data-dashboard-index-count>0</strong><small>来自 SQLite FTS</small></div>
-            <div><span>执行记录</span><strong data-dashboard-task-count>0</strong><small>实时状态</small></div>
-          </div>
+        <section class="view r10-overview r11-dashboard-view" data-view="dashboard" aria-labelledby="r10-overview-title">
+          <div class="r12-dashboard-shell">
+            <div class="r12-dashboard-layout">
+              <div class="r12-dashboard-main">
+                <header class="r12-dashboard-header">
+                  <div class="r12-dashboard-title-group">
+                    <h1 id="r10-overview-title">工作台</h1>
+                  </div>
+                  <div class="r12-dashboard-header-side">
+                    <p class="r12-dashboard-context"><time data-r10-overview-date></time><span aria-hidden="true"> · </span><span data-r10-overview-vault>本地知识库</span></p>
+                    <button class="r12-dashboard-new-note" type="button" data-route-jump="create"><i data-lucide="square-pen"></i><span>新建笔记</span></button>
+                  </div>
+                </header>
 
-          <section class="dashboard-summary-panel dashboard-module hidden" data-dashboard-summary aria-label="今日知识摘要">
-            <div class="dashboard-summary-head"><span class="status-icon jade"><i data-lucide="book-open-check"></i></span><div><strong>今日知识摘要</strong><small>等待真实任务与知识增量</small></div><button class="icon-button quiet" data-dashboard-summary-toggle aria-label="关闭知识摘要"><i data-lucide="x"></i></button></div>
-            <div class="dashboard-summary-metrics"><span><b>0</b>新增知识</span><span><b>0</b>新增链接</span><span><b>0</b>待确认</span><span><b>0</b>已完成任务</span></div>
-            <p>今日暂无知识增量。</p>
-          </section>
+                <section class="r12-dashboard-capture" aria-labelledby="r12-capture-title">
+                  <header>
+                    <div><span class="r12-dashboard-capture-icon"><i data-lucide="inbox"></i></span><span><h2 id="r12-capture-title">快速采集</h2><p>把正在阅读或刚想到的内容放进知识库</p></span></div>
+                    <button type="button" data-dashboard-capture-history><span>运行历史</span><i data-lucide="arrow-right"></i></button>
+                  </header>
+                  <div class="r12-dashboard-capture-actions">
+                    <button type="button" data-dashboard-capture-source="url"><i data-lucide="link"></i><span><strong>链接</strong><small>网页与文章</small></span></button>
+                    <button type="button" data-dashboard-capture-source="file"><i data-lucide="file-up"></i><span><strong>文件</strong><small>文档与附件</small></span></button>
+                    <button type="button" data-dashboard-capture-source="text"><i data-lucide="clipboard"></i><span><strong>文本</strong><small>摘录与片段</small></span></button>
+                  </div>
+                </section>
 
-          <div class="dashboard-grid">
-            <section class="work-queue dashboard-task-board dashboard-module">
-              <div class="section-heading"><div><h2>最近执行</h2><p>聚合今天正在处理和已经完成的操作</p></div><div class="section-actions"><button class="button secondary small" data-dashboard-summary-toggle aria-expanded="false"><i data-lucide="book-open-check"></i>知识摘要</button><button class="text-button" data-route-jump="audit">全部日志</button><button class="button primary small" data-assistant-request="请帮我创建一个新的采集任务。请询问或识别信息来源，然后自动完成读取、模型分析和 Obsidian 入库。"><i data-lucide="message-square"></i>交给AI助手</button></div></div>
+                <div class="r12-dashboard-modules" aria-label="知识工作模块">
+                  <div class="r12-dashboard-module-column" role="group" aria-label="知识变化">
+                    <section class="r12-dashboard-module" data-dashboard-module="continue" aria-labelledby="r12-continue-title">
+                      <header class="r12-dashboard-module-header"><div><h2 id="r12-continue-title">继续工作</h2><p>最近打开 · 最近编辑 · 未完成</p></div><strong data-dashboard-module-count hidden>0</strong></header>
+                      <div class="r12-dashboard-module-list" data-dashboard-module-list="continue" aria-live="polite"></div>
+                    </section>
 
-              <div class="dashboard-task-tabs" role="tablist" aria-label="当日任务筛选">
-                <button class="active" data-dashboard-task-filter="pending" role="tab" aria-selected="true">当日待处理操作 <span>0</span></button>
-                <button data-dashboard-task-filter="completed" role="tab" aria-selected="false">当日已完成操作 <span>0</span></button>
-              </div>
+                    <section class="r12-dashboard-module" data-dashboard-module="updates" aria-labelledby="r12-updates-title">
+                      <header class="r12-dashboard-module-header"><div><h2 id="r12-updates-title">最近更新</h2><p>新增或修改的知识</p></div><strong data-dashboard-module-count hidden>0</strong></header>
+                      <div class="r12-dashboard-module-list" data-dashboard-module-list="updates" aria-live="polite"></div>
+                    </section>
 
-              <div class="dashboard-task-panel active" data-dashboard-task-panel="pending" role="tabpanel">
-              </div>
+                    <section class="r12-dashboard-module" data-dashboard-module="health" aria-labelledby="r12-health-title">
+                      <header class="r12-dashboard-module-header"><div><h2 id="r12-health-title">知识库健康</h2><p>孤立 · 重复 · 过期 · 失效链接</p></div><strong data-dashboard-module-count hidden>0</strong></header>
+                      <div class="r12-dashboard-module-list" data-dashboard-module-list="health" aria-live="polite"></div>
+                    </section>
+                  </div>
 
-              <div class="dashboard-task-panel" data-dashboard-task-panel="completed" role="tabpanel" aria-hidden="true">
-              </div>
-            </section>
+                  <div class="r12-dashboard-module-column" role="group" aria-label="待整理与行动">
+                    <section class="r12-dashboard-module" data-dashboard-module="inbox" aria-labelledby="r12-inbox-title">
+                      <header class="r12-dashboard-module-header"><div><h2 id="r12-inbox-title">待整理 Inbox</h2><p>新捕获 · 未分类 · 未加标签 · 待确认</p></div><strong data-dashboard-module-count hidden>0</strong></header>
+                      <div class="r12-dashboard-module-list" data-dashboard-module-list="inbox" aria-live="polite"></div>
+                    </section>
 
-            <aside class="dashboard-aside">
-              <section class="summary-block dashboard-vault-panel dashboard-module">
-                <div class="section-heading compact"><div><h2>Obsidian 仓库</h2><p>选择仪表盘当前使用的本地 Vault</p></div></div>
-                <div class="dashboard-vault-list">
+                    <section class="r12-dashboard-module" data-dashboard-module="focus" aria-labelledby="r12-focus-title">
+                      <header class="r12-dashboard-module-header"><div><h2 id="r12-focus-title">重点知识</h2><p>置顶 · 常用专题 · 收藏</p></div><strong data-dashboard-module-count hidden>0</strong></header>
+                      <div class="r12-dashboard-module-list" data-dashboard-module-list="focus" aria-live="polite"></div>
+                    </section>
+
+                    <section class="r12-dashboard-module" data-dashboard-module="todo" aria-labelledby="r12-todo-title">
+                      <header class="r12-dashboard-module-header"><div><h2 id="r12-todo-title">个人待办</h2><p>复查 · 补充 · 归档</p></div><strong data-dashboard-module-count hidden>0</strong></header>
+                      <div class="r12-dashboard-module-list" data-dashboard-module-list="todo" aria-live="polite"></div>
+                    </section>
+                  </div>
                 </div>
-                <div class="dashboard-vault-status"><i data-lucide="shield-check"></i><span><strong data-active-vault-name>正在连接 Obsidian</strong><small><span data-active-vault-notes>读取本机配置</span> · 数据仅存于本机</small></span></div>
-              </section>
-            </aside>
+
+                <section class="r11-dashboard-panel r11-dashboard-workbench-panel" aria-labelledby="r11-workbench-title">
+                  <header class="r11-dashboard-panel-header">
+                    <div><h2 id="r11-workbench-title">工作入口</h2><p>进入需要的工作，保持在当前上下文里</p></div>
+                    <span class="r11-dashboard-panel-state"><i data-lucide="layout-dashboard"></i>本地工作</span>
+                  </header>
+                  <div class="r11-dashboard-workbench" data-r11-dashboard-workbench>
+                    <div class="r11-dashboard-workbench-group">
+                      <span>开始</span>
+                      <button type="button" data-workbench-route="agent"><i data-lucide="message-square"></i><span><strong>AI 助手</strong><small>对话、附件与执行确认</small></span><i data-lucide="arrow-up-right"></i></button>
+                      <button type="button" data-workbench-route="capture"><i data-lucide="inbox"></i><span><strong>采集</strong><small>链接、文本、文件与定时来源</small></span><i data-lucide="arrow-up-right"></i></button>
+                      <button type="button" data-workbench-route="search"><i data-lucide="search"></i><span><strong>知识检索</strong><small>搜索并阅读本机 Obsidian</small></span><i data-lucide="arrow-up-right"></i></button>
+                      <button type="button" data-workbench-route="search" data-workbench-folder="项目"><i data-lucide="folder"></i><span><strong>项目</strong><small>进行中、已完成和计划事项</small></span><i data-lucide="arrow-up-right"></i></button>
+                    </div>
+                    <div class="r11-dashboard-workbench-group">
+                      <span>积累与治理</span>
+                      <button type="button" data-workbench-route="reports" data-workbench-tab="memory"><i data-lucide="brain"></i><span><strong>长期记忆</strong><small>查询、纠错、过期与导出</small></span><i data-lucide="arrow-up-right"></i></button>
+                      <button type="button" data-workbench-route="reports" data-workbench-tab="growth"><i data-lucide="git-branch"></i><span><strong>成长版本</strong><small>查看优化历史并恢复旧版本</small></span><i data-lucide="arrow-up-right"></i></button>
+                      <button type="button" data-workbench-route="settings" data-workbench-setting="skills"><i data-lucide="blocks"></i><span><strong>Skills</strong><small>启停、版本与回滚</small></span><i data-lucide="arrow-up-right"></i></button>
+                      <button type="button" data-workbench-action="tasks"><i data-lucide="clock-3"></i><span><strong>后台任务</strong><small>查看当前执行与恢复状态</small></span><i data-lucide="arrow-up-right"></i></button>
+                      <button type="button" data-workbench-route="audit"><i data-lucide="list-checks"></i><span><strong>操作记录</strong><small>追踪本机变更与执行证据</small></span><i data-lucide="arrow-up-right"></i></button>
+                    </div>
+                    <button class="r11-dashboard-workbench-settings" type="button" data-workbench-route="settings"><i data-lucide="settings-2"></i><span>设置与本机数据</span><i data-lucide="chevron-right"></i></button>
+                  </div>
+                </section>
+              </div>
+
+              <aside class="r12-dashboard-rail" aria-label="工作台辅助工具">
+                <section class="r12-dashboard-priority-panel r12-dashboard-calendar-panel" aria-labelledby="r12-calendar-title">
+                  <header class="r12-dashboard-panel-header">
+                    <div><h2 id="r12-calendar-title">日历</h2><p>选择一天，查看云枢内容的所有本地变化</p></div>
+                    <div class="r11-dashboard-calendar-actions">
+                      <button class="r11-dashboard-calendar-today" type="button" data-dashboard-calendar-today>今天</button>
+                      <button class="r11-dashboard-panel-action" type="button" data-dashboard-calendar-nav="-1" aria-label="上个月" title="上个月"><i data-lucide="chevron-left"></i></button>
+                      <button class="r11-dashboard-panel-action" type="button" data-dashboard-calendar-nav="1" aria-label="下个月" title="下个月"><i data-lucide="chevron-right"></i></button>
+                    </div>
+                  </header>
+                  <div class="r11-dashboard-calendar">
+                    <div class="r11-dashboard-calendar-heading"><strong data-dashboard-calendar-label>本月</strong><span>当天变化</span></div>
+                    <div class="r11-dashboard-calendar-weekdays" role="row" aria-label="星期"><span role="columnheader">一</span><span role="columnheader">二</span><span role="columnheader">三</span><span role="columnheader">四</span><span role="columnheader">五</span><span role="columnheader">六</span><span role="columnheader">日</span></div>
+                    <div class="r11-dashboard-calendar-grid" data-dashboard-calendar-grid role="grid" aria-label="工作台日历"></div>
+                    <div class="r11-dashboard-calendar-events" data-dashboard-calendar-events aria-live="polite"></div>
+                  </div>
+                </section>
+
+                <section class="r12-dashboard-priority-panel r11-dashboard-sticky-panel" aria-labelledby="r12-sticky-title">
+                  <header class="r12-dashboard-panel-header">
+                    <div><h2 id="r12-sticky-title">灵感便签</h2><p>随时记下，确认后写入本地知识库</p></div>
+                    <span class="r11-dashboard-panel-state"><i data-lucide="lightbulb"></i><span data-dashboard-sticky-target>个人库 · 随想</span></span>
+                  </header>
+                  <form class="r11-dashboard-sticky-form" data-dashboard-sticky-form>
+                    <label class="sr-only" for="dashboard-sticky-input">灵感便签内容</label>
+                    <textarea id="dashboard-sticky-input" data-dashboard-sticky-input rows="5" maxlength="10000" placeholder="写下刚刚想到的事……"></textarea>
+                    <div class="r11-dashboard-sticky-footer"><span data-dashboard-sticky-status>写下内容后，点击保存</span><span class="r11-dashboard-sticky-count" data-dashboard-sticky-count>0 / 10000</span><button class="r10-button r10-button-primary" type="submit" data-dashboard-sticky-save><i data-lucide="notebook-pen"></i><span>保存到知识库</span></button></div>
+                  </form>
+                </section>
+              </aside>
+            </div>
           </div>
-
-          <section class="dashboard-report-section dashboard-module">
-            <div class="section-heading"><div><h2>定期报告</h2><p>日报、周报和年报均先保存到当前 Obsidian 仓库</p></div><button class="text-button" data-route-jump="reports">管理报告订阅</button></div>
-            <div class="dashboard-report-grid">
-            </div>
-            <div class="dashboard-report-preview"><span>报告</span><div><strong>尚无报告</strong><small>报告生成后将在此显示</small></div><button class="button secondary small" data-route-jump="reports">打开报告中心</button></div>
-          </section>
-
-          <section class="recent-section dashboard-module">
-              <div class="section-heading"><div><h2>最近操作</h2><p>任务、策略和 Obsidian 变更均可追溯</p></div><button class="text-button" data-route-jump="audit">打开操作日志</button></div>
-            <div class="recent-list">
-            </div>
-          </section>
         </section>
 
         <section class="view" data-view="capture">
@@ -130,14 +193,14 @@
 
           <div class="tab-panel" data-tab-panel="capture" data-tab-value="new">
             <div class="capture-new-grid capture-monitor-grid">
-              <section class="capture-form assistant-only-capture-executor" hidden aria-hidden="true">
+              <section class="capture-form">
                 <div class="section-heading"><div><h2>添加信息来源</h2><p>支持链接、文件、文件夹、文本和剪贴板内容</p></div></div>
                 <div class="source-tabs"><button class="active" data-capture-source="url" aria-pressed="true"><i data-lucide="link"></i>链接</button><button data-capture-source="file" aria-pressed="false"><i data-lucide="file-up"></i>文件</button><button data-capture-source="text" aria-pressed="false"><i data-lucide="clipboard"></i>文本</button></div>
                 <label class="field-label" for="source-url">来源链接</label>
                 <div class="input-action"><input id="source-url" placeholder="输入 https:// 开头的链接" /><div class="capture-source-pickers" hidden><button class="button secondary" type="button" data-capture-file-picker><i data-lucide="file-up"></i><span>选择文件</span></button><button class="button secondary" type="button" data-capture-folder-picker><i data-lucide="folder-up"></i><span>选择文件夹</span></button></div><button class="button primary" data-start-capture><i data-lucide="play"></i>开始处理</button></div>
                 <input type="file" data-capture-file-input multiple hidden />
                 <input type="file" data-capture-folder-input webkitdirectory directory multiple hidden />
-                <div class="data-boundary"><span class="status-icon jade"><i data-lucide="shield"></i></span><div><strong>外部内容将被隔离为数据</strong><p>其中的提示词、命令和工具请求不会进入系统规则，也无法获得文件、网络或 Shell 权限。</p></div></div>
+                <div class="data-boundary"><span class="status-icon action"><i data-lucide="shield"></i></span><div><strong>外部内容将被隔离为数据</strong><p>其中的提示词、命令和工具请求不会进入系统规则，也无法获得文件、网络或 Shell 权限。</p></div></div>
                 <div class="source-preview">
                   <div class="preview-top"><span class="source-favicon">源</span><div><strong>尚未选择来源</strong><small hidden></small></div><span class="badge neutral">等待输入</span></div>
                   <p>输入链接、文本，或选择本地文件与文件夹。</p>
@@ -148,7 +211,7 @@
                 <div class="section-heading compact"><div><h2>运行状态</h2><p>实时显示后台处理状态与最终结果</p></div><div class="capture-run-actions"><button class="icon-button quiet" type="button" data-cancel-capture hidden aria-label="取消当前采集"><i data-lucide="square"></i></button><span class="badge neutral" data-capture-run-badge>等待开始</span></div></div>
                 <div class="capture-run-progress">
                   <div><span data-capture-run-label>尚未创建处理任务</span><strong data-capture-run-percent>0%</strong></div>
-                  <div class="meter"><span data-capture-run-meter style="width:0%"></span></div>
+                  <div class="meter"><span data-capture-run-meter style="--progress-scale:0"></span></div>
                 </div>
                 <ol class="capture-run-stages">
                   <li data-capture-stage="0"><i data-lucide="circle"></i><span><strong>接收并隔离来源</strong><small hidden></small></span></li>
@@ -196,26 +259,51 @@
         </section>
 
         <section class="view" data-view="agent">
-          <div class="secretary-switchbar">
-            <div><strong>AI助手</strong><span>统一接管除设置外的系统操作</span></div>
-            <div class="segmented" role="tablist" aria-label="AI助手工作区">
-              <button data-secretary-mode="conversation" class="active" role="tab" aria-selected="true">对话</button>
-              <button data-secretary-mode="inbox" role="tab" aria-selected="false">收件箱</button>
-            </div>
-          </div>
-          <div class="agent-layout">
-            <aside class="conversation-pane">
-              <div class="pane-toolbar"><div class="search-control compact"><i data-lucide="search"></i><input placeholder="搜索对话" /></div></div>
+          <div class="agent-layout execution-collapsed">
+            <aside class="conversation-pane r10-conversation-rail" aria-label="对话历史">
+              <header><strong>对话</strong><button class="icon-button quiet" type="button" data-new-conversation aria-label="新建对话" title="新建对话"><i data-lucide="plus"></i></button></header>
+              <label class="conversation-search"><i data-lucide="search"></i><input type="search" aria-label="搜索对话" placeholder="搜索本地对话" /></label>
               <div class="conversation-list" data-conversation-list></div>
             </aside>
             <section class="message-pane">
-              <div class="conversation-header"><div><strong>AI助手</strong><span>尚无本地对话</span></div><div class="conversation-header-actions"><button class="execution-header-toggle is-expanded" data-execution-toggle aria-label="折叠本次执行" aria-expanded="true" title="折叠本次执行"><span class="execution-toggle-icon"><i data-lucide="panel-right-close"></i></span><span>本次执行</span><i class="execution-status-corner" data-execution-status-corner hidden></i></button><button class="icon-button quiet" title="新建对话"><i data-lucide="plus"></i></button><button class="icon-button quiet" title="对话更多操作" data-conversation-menu-toggle aria-expanded="false"><i data-lucide="more-horizontal"></i></button><div class="conversation-action-menu" data-conversation-menu hidden><button data-conversation-action="rename"><i data-lucide="pencil"></i>自定义命名</button><button data-conversation-action="assistant-preferences"><i data-lucide="sliders-horizontal"></i>助手偏好</button><button data-conversation-action="duplicate"><i data-lucide="copy"></i>复制为新对话</button><button data-conversation-action="export"><i data-lucide="download"></i>导出本地记录</button><button data-conversation-action="clear"><i data-lucide="eraser"></i>清空本地记录</button><button class="danger" data-conversation-action="delete"><i data-lucide="trash-2"></i><span>删除对话</span></button></div></div></div>
+              <div class="conversation-header"><div><strong>AI助手</strong><span>尚无本地对话</span></div><div class="conversation-header-actions"><button class="execution-header-toggle" data-execution-toggle aria-label="展开本次执行" aria-expanded="false" title="展开本次执行"><span class="execution-toggle-icon"><i data-lucide="panel-right-open"></i></span><span>执行详情</span><i class="execution-status-corner" data-execution-status-corner hidden></i></button><button class="icon-button quiet" title="新建对话"><i data-lucide="plus"></i></button><button class="icon-button quiet" title="对话更多操作" data-conversation-menu-toggle aria-expanded="false"><i data-lucide="more-horizontal"></i></button><div class="conversation-action-menu" data-conversation-menu hidden><button data-conversation-action="rename"><i data-lucide="pencil"></i>自定义命名</button><button data-conversation-action="assistant-preferences"><i data-lucide="sliders-horizontal"></i>助手偏好</button><button data-conversation-action="duplicate"><i data-lucide="copy"></i>复制为新对话</button><button data-conversation-action="export"><i data-lucide="download"></i>导出本地记录</button><button data-conversation-action="clear"><i data-lucide="eraser"></i>清空本地记录</button><button class="danger" data-conversation-action="delete"><i data-lucide="trash-2"></i><span>删除对话</span></button></div></div></div>
               <div class="message-stream" aria-live="polite"></div>
               <div class="composer">
                 <div class="attachment-tray" data-attachment-tray hidden></div>
+                <div class="selected-tools" data-selected-tools hidden aria-live="polite"></div>
                 <div class="slash-command-menu" data-slash-command-menu role="listbox" aria-label="斜杠命令" hidden></div>
-                <div class="composer-input-row"><textarea placeholder="告诉AI助手你想完成什么……" aria-label="给AI助手发送消息"></textarea><button class="send-button" title="回车发送" aria-label="回车发送"><i data-lucide="corner-down-left"></i></button></div>
-                <div class="composer-footer"><input data-attachment-input type="file" multiple hidden /><input data-folder-input type="file" webkitdirectory directory multiple hidden /><input data-screenshot-input type="file" accept="image/*" multiple hidden /><button data-attachment-trigger><i data-lucide="paperclip"></i>上传文件</button><button data-folder-trigger><i data-lucide="folder-up"></i>上传文件夹</button><button data-screenshot-trigger><i data-lucide="image-plus"></i>上传截图</button><div class="composer-picker"><button class="composer-picker-trigger" data-composer-picker-toggle="vault" aria-haspopup="listbox" aria-expanded="false" aria-label="选择当前 Obsidian Vault"><i data-lucide="database"></i><span data-composer-vault-label>本地 Obsidian 所有库</span><i data-lucide="chevron-up"></i></button><div class="composer-picker-menu composer-vault-menu" data-composer-picker-menu="vault" role="listbox" aria-label="选择当前 Obsidian Vault" hidden></div></div><div class="composer-picker"><button class="composer-picker-trigger" data-composer-picker-toggle="model" aria-haspopup="listbox" aria-expanded="false" aria-label="选择模型"><i data-lucide="cpu"></i><span data-composer-model-label>尚未选择模型</span><i data-lucide="chevron-up"></i></button><div class="composer-picker-menu composer-model-menu" data-composer-picker-menu="model" role="listbox" aria-label="选择模型" hidden><div class="composer-model-empty">请先在设置的 API 配置中选择模型</div></div></div><span class="composer-footer-spacer"></span></div>
+                <div class="composer-input-row"><textarea placeholder="告诉AI助手你想完成什么……" aria-label="给AI助手发送消息"></textarea></div>
+                <div class="composer-footer">
+                  <input data-attachment-input type="file" multiple hidden />
+                  <input data-folder-input type="file" webkitdirectory directory multiple hidden />
+                  <input data-screenshot-input type="file" accept="image/*" multiple hidden />
+                  <div class="composer-action-menu attachment-actions">
+                    <button class="composer-icon-trigger" data-attachment-actions-trigger aria-haspopup="menu" aria-expanded="false" aria-controls="attachment-actions-menu" aria-label="添加内容" title="添加内容"><i data-lucide="plus"></i></button>
+                    <div class="composer-popover attachment-actions-menu" id="attachment-actions-menu" data-attachment-actions-menu role="menu" aria-label="添加内容" hidden>
+                      <button data-attachment-trigger role="menuitem"><i data-lucide="paperclip"></i><span><strong>文件</strong><small>选择一个或多个本地文件</small></span></button>
+                      <button data-folder-trigger role="menuitem"><i data-lucide="folder-up"></i><span><strong>文件夹</strong><small>递归添加文件夹内容</small></span></button>
+                      <button data-screenshot-trigger role="menuitem"><i data-lucide="image-plus"></i><span><strong>图片或截图</strong><small>选择本地图片进行分析</small></span></button>
+                    </div>
+                  </div>
+                  <div class="composer-action-menu tool-actions">
+                    <button class="composer-tool-trigger" data-tool-menu-trigger aria-haspopup="dialog" aria-expanded="false" aria-controls="composer-tool-menu"><i data-lucide="hammer"></i><span>工具</span></button>
+                    <section class="composer-popover tool-menu" id="composer-tool-menu" data-tool-menu role="dialog" aria-label="选择本轮工具和 Skill" hidden>
+                      <header><strong>工具与 Skill</strong><small>只影响本轮可用能力，仍受权限策略约束</small></header>
+                      <label class="tool-search"><i data-lucide="search"></i><input data-tool-search type="search" placeholder="搜索工具或 Skill" aria-label="搜索工具或 Skill" /></label>
+                      <button class="tool-auto" data-tool-auto type="button" aria-pressed="true"><span class="tool-option-icon"><i data-lucide="sparkles"></i></span><span><strong>自动选择</strong><small>由 AI 根据任务与当前权限选择</small></span><i data-lucide="check"></i></button>
+                      <div class="tool-list" data-tool-list role="menu" aria-label="可用工具和 Skill"><div class="tool-menu-empty">正在读取可用能力…</div></div>
+                      <footer aria-label="Skill 操作">
+                        <button type="button" data-skill-create-with-assistant><i data-lucide="sparkles"></i><span>让 AI 创建 Skill</span><i data-lucide="chevron-right"></i></button>
+                        <button type="button" data-skill-install-with-assistant><i data-lucide="download"></i><span>通过 AI 安装 Skill</span><i data-lucide="chevron-right"></i></button>
+                        <button type="button" data-skill-manage-with-assistant><i data-lucide="sliders-horizontal"></i><span>通过 AI 管理 Skill</span><i data-lucide="chevron-right"></i></button>
+                      </footer>
+                    </section>
+                  </div>
+                  <div class="composer-picker"><button class="composer-picker-trigger" data-composer-picker-toggle="vault" aria-haspopup="listbox" aria-expanded="false" aria-label="选择当前 Obsidian Vault"><i data-lucide="database"></i><span data-composer-vault-label>本地 Obsidian 所有库</span><i data-lucide="chevron-up"></i></button><div class="composer-picker-menu composer-vault-menu" data-composer-picker-menu="vault" role="listbox" aria-label="选择当前 Obsidian Vault" hidden></div></div>
+                  <span class="composer-footer-spacer"></span>
+                  <div class="composer-picker"><button class="composer-picker-trigger" data-composer-picker-toggle="model" aria-haspopup="listbox" aria-expanded="false" aria-label="选择模型"><i data-lucide="cpu"></i><span data-composer-model-label>尚未选择模型</span><i data-lucide="chevron-up"></i></button><div class="composer-picker-menu composer-model-menu" data-composer-picker-menu="model" role="listbox" aria-label="选择模型" hidden><div class="composer-model-empty">请先在设置的 API 配置中选择模型</div></div></div>
+                  <button class="send-button" title="回车发送" aria-label="回车发送"><i data-lucide="arrow-up"></i></button>
+                </div>
                 <div class="composer-drop-overlay" aria-hidden="true" hidden><i data-lucide="upload-cloud"></i><strong>释放以添加文件或图片</strong><span>内容将作为不可信数据等待AI助手处理</span></div>
               </div>
             </section>
@@ -229,15 +317,14 @@
           </div>
           <div class="secretary-state secretary-inbox" data-secretary-panel="inbox">
             <section class="inbound-list"><div class="tool-toolbar"><div class="search-control"><i data-lucide="search"></i><input placeholder="搜索内容收件箱" /></div><div class="inbound-type-filter"><button class="button secondary" data-inbound-filter-toggle aria-expanded="false"><i data-lucide="list-filter"></i><span>全部类型</span><i data-lucide="chevron-down"></i></button><div class="inbound-filter-menu" hidden><button class="active" data-inbound-type="all">全部类型 <small>0</small></button><button data-inbound-type="link">链接与文本 <small>0</small></button><button data-inbound-type="file">文件与 PDF <small>0</small></button><button data-inbound-type="image">图片与截图 <small>0</small></button></div></div><span class="toolbar-meta">0 条待处理</span></div><div class="inbound-empty">收件箱暂无真实内容</div></section>
-            <aside class="inbound-inspector is-empty"><div class="inspector-header"><div><span>内容处理</span><strong>尚未选择内容</strong></div><span class="badge neutral">本地空状态</span></div><div class="data-boundary compact"><span class="status-icon jade"><i data-lucide="shield"></i></span><div><strong>只作为数据处理</strong><p>外部消息到达后会作为不可信数据隔离，不会获得系统指令或工具权限。</p></div></div></aside>
+            <aside class="inbound-inspector is-empty"><div class="inspector-header"><div><span>内容处理</span><strong>尚未选择内容</strong></div><span class="badge neutral">本地空状态</span></div><div class="data-boundary compact"><span class="status-icon action"><i data-lucide="shield"></i></span><div><strong>只作为数据处理</strong><p>外部消息到达后会作为不可信数据隔离，不会获得系统指令或工具权限。</p></div></div></aside>
           </div>
         </section>
 
         <section class="view" data-view="search">
           <div class="search-hero"><i data-lucide="search"></i><input aria-label="搜索知识库" placeholder="搜索标题、正文或路径" /><kbd>↵</kbd></div>
           <div class="search-layout">
-            <aside class="filter-pane">
-              <div class="pane-title filter-pane-title"><span>筛选</span><button class="icon-button quiet" data-filter-collapse aria-label="折叠筛选" aria-expanded="true" title="折叠筛选"><i data-lucide="panel-left-close"></i></button></div>
+            <aside class="filter-pane" hidden aria-hidden="true">
               <div class="filter-content">
                 <div class="filter-section"><h3>结果类型</h3><label><input type="checkbox" data-search-filter="type" value="source" checked />原始来源</label><label><input type="checkbox" data-search-filter="type" value="atom" checked />知识原子</label><label><input type="checkbox" data-search-filter="type" value="relation" checked />属性与链接</label></div>
                 <div class="filter-section"><h3>内容目录</h3><label><input type="checkbox" data-search-filter="folder" value="source" checked />资料库</label><label><input type="checkbox" data-search-filter="folder" value="knowledge" checked />知识与原子</label><label><input type="checkbox" data-search-filter="folder" value="personal" checked />个人内容</label><label><input type="checkbox" data-search-filter="folder" value="other" checked />其他目录</label></div>
@@ -245,7 +332,14 @@
               </div>
             </aside>
             <section class="results-pane">
-              <div class="results-meta"><strong>输入关键词搜索本机 Obsidian</strong><span data-search-order-description>按本地索引结果排序</span><div class="search-sort"><button class="select-control compact-select" data-search-sort-toggle aria-haspopup="listbox" aria-expanded="false"><span>综合相关性</span><i data-lucide="chevron-down"></i></button><div class="search-sort-menu" role="listbox" aria-label="结果排序" hidden><button class="active" data-search-sort="relevance" role="option" aria-selected="true"><span>综合相关性</span><small>本地索引评分</small><i data-lucide="check"></i></button><button data-search-sort="updated" role="option" aria-selected="false"><span>最近更新</span><small>最新修改优先</small><i data-lucide="check"></i></button><button data-search-sort="trust" role="option" aria-selected="false"><span>来源可信度</span><small>保留来源字段</small><i data-lucide="check"></i></button></div></div></div>
+              <div class="results-meta"><strong data-knowledge-results-title>输入关键词搜索本机 Obsidian</strong><span data-search-order-description>按本地索引结果排序</span><div class="knowledge-results-actions"><button class="r10-knowledge-action" type="button" data-browse-all-knowledge><i data-lucide="files"></i><span>全部文件</span></button><button class="r10-knowledge-action" type="button" data-open-active-obsidian-graph><i data-lucide="network"></i><span>原生图谱</span></button><button class="r10-knowledge-action" type="button" data-open-active-obsidian><i data-lucide="external-link"></i><span>在 Obsidian 中打开</span></button></div><div class="search-sort"><button class="select-control compact-select" data-search-sort-toggle aria-haspopup="listbox" aria-expanded="false"><span>综合相关性</span><i data-lucide="chevron-down"></i></button><div class="search-sort-menu" role="listbox" aria-label="结果排序" hidden><button class="active" data-search-sort="relevance" role="option" aria-selected="true"><span>综合相关性</span><small>本地索引评分</small><i data-lucide="check"></i></button><button data-search-sort="updated" role="option" aria-selected="false"><span>最近更新</span><small>最新修改优先</small><i data-lucide="check"></i></button><button data-search-sort="trust" role="option" aria-selected="false"><span>来源可信度</span><small>保留来源字段</small><i data-lucide="check"></i></button></div></div></div>
+              <div class="knowledge-list-footer" data-knowledge-list-footer hidden><span data-knowledge-list-footer-status></span><button class="r10-button r10-button-secondary" type="button" data-knowledge-load-more><i data-lucide="chevrons-down"></i><span>继续加载</span></button></div>
+              <div class="r10-knowledge-empty">
+                <i data-lucide="library-big" aria-hidden="true"></i>
+                <h2>还没有可显示的笔记</h2>
+                <p>选择本机知识库，或在上方搜索已经连接的 Obsidian 内容。</p>
+                <button class="r10-button r10-button-secondary" type="button" data-route-jump="settings"><i data-lucide="settings-2"></i><span>选择知识库</span></button>
+              </div>
             </section>
             <aside class="preview-pane">
               <div class="preview-head"><span class="badge neutral">本机 Obsidian</span><button class="icon-button quiet" data-open-note-viewer aria-label="查看完整笔记" title="查看完整笔记"><i data-lucide="book-open-check"></i></button></div><h2>尚未选择笔记</h2><p class="preview-path">本机 Obsidian</p>
@@ -255,77 +349,201 @@
         </section>
 
         <section class="view" data-view="create">
-          <div class="editor-layout">
-            <aside class="document-pane">
-              <div class="pane-title-row"><strong>创作</strong><button class="icon-button quiet" title="新建文档"><i data-lucide="plus"></i></button></div>
-              <div class="search-control compact"><i data-lucide="search"></i><input placeholder="搜索文档" /></div>
+          <div class="editor-layout" data-creation-layout>
+            <aside class="document-pane" id="creation-document-library">
+              <div class="pane-title-row">
+                <strong>创作</strong>
+                <div class="document-pane-actions">
+                  <button class="icon-button quiet" type="button" data-delete-creation-document title="删除整篇草稿" aria-label="删除整篇草稿" disabled><i data-lucide="trash-2"></i></button>
+                  <button class="icon-button quiet" type="button" data-r10-close-creation-library title="隐藏草稿列表" aria-label="隐藏草稿列表"><i data-lucide="x"></i></button>
+                  <button class="icon-button quiet" type="button" data-new-creation-document title="新建文档" aria-label="新建文档"><i data-lucide="plus"></i></button>
+                </div>
+              </div>
+              <div class="search-control compact"><i data-lucide="search"></i><input placeholder="搜索文档" aria-label="搜索创作文档" /></div>
               <div class="document-group"><span>本地草稿</span></div>
             </aside>
+
             <section class="editor-main">
-              <div class="editor-toolbar"><div><strong>未命名笔记</strong><span>本地草稿 · 尚未写入 Obsidian</span></div><div class="creation-targets"><label title="保存到知识库"><i data-lucide="database"></i><select data-creation-vault aria-label="保存到知识库"><option value="">选择知识库</option></select><i data-lucide="chevron-down"></i></label><label title="保存到目录"><i data-lucide="folder"></i><select data-creation-folder aria-label="保存到目录" disabled><option value="创作成品/文章">创作成品/文章</option></select><i data-lucide="chevron-down"></i></label></div><div class="editor-actions"><button class="icon-button quiet" title="版本历史"><i data-lucide="history"></i></button><div class="segmented small-segment"><button class="active">编辑</button><button>预览</button></div><button class="button secondary" data-beautify-document><i data-lucide="sparkles"></i>一键排版</button><button class="button primary" data-save-document><i data-lucide="database"></i>保存</button></div></div>
-              <div class="format-toolbar"><label class="creation-block-style"><span class="sr-only">段落样式</span><select data-creation-block-style aria-label="段落样式"><option value="p">正文</option><option value="h1">一级标题</option><option value="h2">二级标题</option><option value="h3">三级标题</option><option value="blockquote">引用</option></select><i data-lucide="chevron-down"></i></label><span></span><button title="加粗"><i data-lucide="bold"></i></button><button title="斜体"><i data-lucide="italic"></i></button><button title="链接"><i data-lucide="link"></i></button><button title="引用"><i data-lucide="quote"></i></button><button title="无序列表"><i data-lucide="list"></i></button><span></span><button type="button" data-insert-image aria-label="插入图片" title="插入图片"><i data-lucide="image-plus"></i></button><input id="creation-image-input" type="file" accept="image/*" multiple hidden /><button aria-label="插入 Wiki Link" title="插入 Wiki Link"><i data-lucide="braces"></i></button><button aria-label="引用主题笔记" title="引用主题笔记"><i data-lucide="at-sign"></i></button><span class="format-spacer"></span><b class="skill-chip"><i data-lucide="sparkles"></i>自动美化排版</b></div>
-              <article class="editor-page" contenteditable="true" data-creation-editor>
-                <h1>未命名笔记</h1>
-              </article>
-              <div class="beautify-status" data-beautify-status hidden><span class="task-spinner"></span><div><strong>自动美化排版正在后台运行</strong><small>保护正文、图片、Wiki Links、引用和 Obsidian 属性</small></div><b>0%</b></div>
-            </section>
-            <aside class="knowledge-pane">
-              <div class="pane-title">知识与证据</div>
-              <div class="search-control compact creation-evidence-search"><i data-lucide="search"></i><input placeholder="搜索可引用内容" data-creation-evidence-input /><button class="icon-button quiet" type="button" data-search-creation-evidence aria-label="搜索证据" title="搜索证据"><i data-lucide="arrow-right"></i></button></div>
-              <div class="knowledge-tabs"><button class="active" data-creation-knowledge-tab="references">引用 0</button><button data-creation-knowledge-tab="claims">声明 0</button><button data-creation-knowledge-tab="outline">大纲</button></div>
-              <div class="claim-summary"><i data-lucide="shield-check"></i><div><strong>尚无引用</strong><small>搜索真实知识后可插入引用</small></div></div>
-              <div class="creation-knowledge-results" data-creation-knowledge-results></div>
-            </aside>
-          </div>
-        </section>
-
-        <section class="view" data-view="skills">
-          <div class="tabs compact-tabs tabs-with-actions" role="tablist"><button data-tab="skills" data-tab-value="registry">技能库</button><button data-tab="skills" data-tab-value="editor">编辑器</button><span class="tabs-spacer"></span><button class="button primary small tab-action" data-skill-tab-target="editor"><i data-lucide="plus"></i>创建技能</button></div>
-          <div class="tab-panel skill-panel" data-tab-panel="skills" data-tab-value="registry"><div class="skill-layout split-tool">
-            <section class="skill-list-pane list-pane">
-              <div class="tool-toolbar"><div class="search-control"><i data-lucide="search"></i><input placeholder="搜索用户技能" /></div><span class="toolbar-meta" data-skill-count>显示 0 / 0 个用户 Skill</span></div>
-              <div class="skill-list">
-                <div class="skill-list-empty"><span class="status-icon"><i data-lucide="blocks"></i></span><strong>尚未创建用户 Skill</strong><button class="button primary small" data-skill-tab-target="editor"><i data-lucide="plus"></i>创建第一个技能</button></div>
+              <div class="editor-toolbar">
+                <div class="r10-creation-document-title">
+                  <button class="r10-creation-library-trigger" type="button" data-r10-toggle-creation-library aria-controls="creation-document-library" aria-expanded="false"><i data-lucide="list"></i><span>结构</span></button>
+                  <span class="r10-creation-title-copy"><strong>未命名笔记</strong><span>本地草稿 · 尚未写入 Obsidian</span></span>
+                </div>
+                <div class="creation-targets">
+                  <label title="保存到知识库"><i data-lucide="database"></i><select data-creation-vault aria-label="保存到知识库"><option value="">选择知识库</option></select><i data-lucide="chevron-down"></i></label>
+                  <label title="保存到目录"><i data-lucide="folder"></i><select data-creation-folder aria-label="保存到目录" disabled><option value="创作成品">创作成品（分类由你决定）</option></select><i data-lucide="chevron-down"></i></label>
+                </div>
+                <div class="editor-actions">
+                  <button class="button secondary creation-ai-trigger" type="button" data-toggle-creation-studio="compose" aria-expanded="false"><i data-lucide="sparkles"></i>AI 创作</button>
+                  <button class="icon-button quiet" title="版本历史" aria-label="版本历史"><i data-lucide="history"></i></button>
+                  <div class="segmented small-segment creation-mode-switch" role="tablist" aria-label="创作视图">
+                    <button class="active" data-creation-mode="edit" role="tab" aria-selected="true">编辑</button>
+                    <button data-creation-mode="preview" role="tab" aria-selected="false">预览</button>
+                  </div>
+                  <button class="icon-button quiet" type="button" data-copy-creation-html data-creation-preview-action hidden aria-label="复制预览 HTML" title="复制预览 HTML"><i data-lucide="copy"></i></button>
+                  <button class="button primary" data-save-document><i data-lucide="database"></i>保存到库</button>
+                </div>
               </div>
-            </section>
-            <aside class="skill-detail inspector-pane" hidden>
-              <div class="skill-detail-head"><span class="skill-icon large"><i data-lucide="sparkles"></i></span><div><h2>用户 Skill</h2><p class="mono">user-skill</p></div><span class="badge neutral">已停用</span></div>
-              <p class="skill-description"></p>
-              <div class="inspector-section"><h3>技能属性</h3><div class="tag-list"></div></div>
-              <div class="inspector-section"><h3>路由依据</h3><p class="body-copy"></p><button class="text-button" data-skill-route-rules aria-expanded="false">查看路由规则</button></div>
-              <div class="inspector-section"><h3>能力与权限</h3><div class="permission-row"><i data-lucide="folder-search"></i><span><strong>读取知识库</strong><small>按任务上下文限制范围</small></span><b>允许</b></div><div class="permission-row"><i data-lucide="file-pen"></i><span><strong>写入知识文件</strong><small>变更前执行差异检查</small></span><b>需策略允许</b></div><div class="permission-row"><i data-lucide="wifi-off"></i><span><strong>访问网络</strong><small>技能本身不需要网络</small></span><b>不需要</b></div></div>
-              <div class="inspector-section"><h3>运行数据</h3><div class="performance-grid"><div><strong>0</strong><span>真实运行</span></div><div><strong>0</strong><span>已验证结果</span></div><div><strong>未运行</strong><span>最近状态</span></div></div></div>
-              <div class="detail-actions"><button class="button danger-text-button" data-custom-skill-delete><i data-lucide="archive"></i>退役</button><button class="button secondary" data-custom-skill-edit><i data-lucide="square-pen"></i>编辑</button><button class="button primary" data-custom-skill-toggle><i data-lucide="shield-check"></i>审核并启用</button></div>
-            </aside>
-          </div></div>
-          <div class="tab-panel skill-panel" data-tab-panel="skills" data-tab-value="editor">
-            <div class="new-skill-editor" data-new-skill-editor>
-              <header class="new-skill-header"><div><span class="status-icon jade"><i data-lucide="plus"></i></span><span><strong data-skill-editor-title>新建技能</strong><small>只创建用户 Skill，不载入或显示系统后台能力</small></span></div><div><span class="new-skill-save-state" data-new-skill-status>新建 · 未保存</span><button class="button secondary" type="button" data-new-skill-reset><i data-lucide="rotate-cw"></i>清空</button><button class="button primary" type="button" data-new-skill-save disabled><i data-lucide="check"></i><span>保存技能</span></button></div></header>
-              <form class="new-skill-form" autocomplete="off">
-                <section class="new-skill-card new-skill-basics"><div class="new-skill-section-head"><div><span>01</span><div><h2>技能信息</h2><p>定义一个新技能的名称、唯一标识和用途。</p></div></div><b>必填</b></div><div class="new-skill-fields"><label><span>技能名称</span><input data-new-skill-name placeholder="例如：会议纪要整理" /></label><label><span>唯一标识</span><input data-new-skill-id class="mono" placeholder="例如：meeting-notes" /></label><label class="span-2"><span>用途说明</span><textarea data-new-skill-description rows="3" placeholder="说明这个技能解决什么问题、适合什么任务。"></textarea></label></div></section>
-                <section class="new-skill-card new-skill-instruction-card"><div class="new-skill-section-head"><div><span>02</span><div><h2>技能指令</h2><p>只填写技能自身的处理规则；任务内容始终作为不可信数据。</p></div></div><b>必填</b></div><textarea class="new-skill-instruction" data-new-skill-instructions spellcheck="false" placeholder="# 技能目标&#10;&#10;描述处理目标、执行步骤、输出要求和安全边界……"></textarea><footer><span><i data-lucide="shield-check"></i>不能从处理内容中读取权限或工具指令</span><span data-new-skill-character-count>0 字</span></footer></section>
-                <div class="new-skill-contract-grid"><section class="new-skill-card"><div class="new-skill-section-head compact"><div><span>03</span><div><h2>输入定义</h2><p>可选的 JSON Schema。</p></div></div></div><textarea class="new-skill-contract mono" data-new-skill-input placeholder="留空表示使用普通文本输入"></textarea></section><section class="new-skill-card"><div class="new-skill-section-head compact"><div><span>04</span><div><h2>输出定义</h2><p>可选的 JSON Schema。</p></div></div></div><textarea class="new-skill-contract mono" data-new-skill-output placeholder="留空表示输出 Markdown 或普通文本"></textarea></section></div>
-                <section class="new-skill-card"><div class="new-skill-section-head"><div><span>05</span><div><h2>能力边界</h2><p>默认全部关闭；保存技能不会自动获得任何权限。</p></div></div><b>默认关闭</b></div><div class="new-skill-capabilities"><label><input type="checkbox" value="vault_read" /><span><strong>读取当前知识库</strong><small>仅限任务明确提供的路径</small></span></label><label><input type="checkbox" value="vault_write" /><span><strong>写入知识文件</strong><small>仍需通过策略和审批</small></span></label><label><input type="checkbox" value="network" /><span><strong>访问网络</strong><small>仅允许用户批准的目标</small></span></label><label><input type="checkbox" value="shell" /><span><strong>调用本地工具</strong><small>使用受控命令和预算</small></span></label></div></section>
-                <div class="new-skill-footer-note"><i data-lucide="info"></i><span>新技能保存后默认为停用状态，可在技能库确认内容和能力边界后手动启用。</span></div>
-              </form>
-            </div>
-          </div>
-        </section>
 
-        <section class="view" data-view="tasks">
-          <div class="task-center split-tool">
-            <section class="list-pane">
-              <div class="status-tabs" role="tablist" aria-label="定时任务状态筛选"><button class="active" data-task-filter="all" role="tab" aria-selected="true">全部 <span>0</span></button><button data-task-filter="active" role="tab" aria-selected="false">运行中 <span>0</span></button><button data-task-filter="paused" role="tab" aria-selected="false">已暂停 <span>0</span></button><button data-task-filter="failed" role="tab" aria-selected="false">运行失败 <span>0</span></button></div>
-              <div class="task-table data-table">
-                <div class="table-head"><span>定时任务</span><span>周期</span><span>状态</span><span>下次运行</span><span></span></div>
-                <div class="task-filter-empty">尚无定时任务</div>
+              <div class="format-toolbar" role="toolbar" aria-label="正文格式">
+                <button type="button" data-creation-history="undo" title="撤销" aria-label="撤销" disabled><i data-lucide="undo-2"></i></button>
+                <button type="button" data-creation-history="redo" title="重做" aria-label="重做" disabled><i data-lucide="redo-2"></i></button>
+                <span></span>
+                <label class="creation-block-style"><span class="sr-only">段落样式</span><select data-creation-block-style aria-label="段落样式"><option value="p">正文</option><option value="h1">一级标题</option><option value="h2">二级标题</option><option value="h3">三级标题</option><option value="blockquote">引用</option></select><i data-lucide="chevron-down"></i></label>
+                <span></span>
+                <button type="button" data-editor-command="bold" title="加粗" aria-label="加粗"><i data-lucide="bold"></i></button>
+                <button type="button" data-editor-command="italic" title="斜体" aria-label="斜体"><i data-lucide="italic"></i></button>
+                <button type="button" data-editor-command="underline" title="下划线" aria-label="下划线"><i data-lucide="underline"></i></button>
+                <button type="button" data-editor-command="strikeThrough" title="删除线" aria-label="删除线"><i data-lucide="strikethrough"></i></button>
+                <button type="button" data-editor-command="createLink" title="插入链接" aria-label="插入链接"><i data-lucide="link"></i></button>
+                <button type="button" data-editor-command="blockquote" title="引用" aria-label="引用"><i data-lucide="quote"></i></button>
+                <button type="button" data-editor-command="insertUnorderedList" title="无序列表" aria-label="无序列表"><i data-lucide="list"></i></button>
+                <button type="button" data-editor-command="insertOrderedList" title="有序列表" aria-label="有序列表"><i data-lucide="list-plus"></i></button>
+                <span></span>
+                <button type="button" data-insert-image aria-label="插入图片" title="插入图片"><i data-lucide="image-plus"></i></button><input id="creation-image-input" type="file" accept="image/*" multiple hidden />
+                <button type="button" data-insert-creation-text="wiki" aria-label="插入 Wiki Link" title="插入 Wiki Link"><i data-lucide="braces"></i></button>
+                <button type="button" data-insert-creation-text="reference" aria-label="引用主题笔记" title="引用主题笔记"><i data-lucide="at-sign"></i></button>
+                <span class="format-spacer"></span>
+                <button class="creation-design-trigger" type="button" data-toggle-creation-studio="resources" aria-label="打开文稿设计" title="打开文稿设计"><i data-lucide="palette"></i><span>文稿设计</span><i data-lucide="panel-right-open"></i></button>
               </div>
+
+              <div class="creation-canvas">
+                <article class="editor-page" contenteditable="true" role="textbox" aria-label="文章正文" aria-multiline="true" spellcheck="true" data-creation-editor data-creation-surface="edit"><h1>未命名笔记</h1></article>
+                <section class="creation-preview-stage" data-creation-surface="preview" hidden>
+                  <iframe title="创作内容预览" sandbox="" data-creation-preview></iframe>
+                </section>
+                <div class="creation-selection-assistant" data-creation-selection-assistant hidden>
+                  <div class="creation-selection-actions"><button type="button" data-selection-ai-action="polish">润色</button><button type="button" data-selection-ai-action="rewrite">改写</button><button type="button" data-selection-ai-action="imitate">仿写</button></div>
+                </div>
+              </div>
+              <div class="beautify-status" data-beautify-status hidden><span class="task-spinner"></span><div><strong>正在自动排版</strong><small>标题、段落、图片和引用会保持完整</small></div><b>0%</b></div>
             </section>
-            <aside class="inspector-pane task-detail">
-              <div class="inspector-header"><div><span>定时任务详情</span><strong>尚未选择任务</strong></div><span class="badge neutral">无任务</span></div>
-              <div class="task-big-progress"><div><strong data-recurring-summary>选择一项定时任务查看调度信息</strong></div><small data-recurring-next hidden></small></div>
-              <div class="inspector-section"><h3>调度配置</h3><dl><div><dt>任务类型</dt><dd>未选择</dd></div><div><dt>执行周期</dt><dd>未设置</dd></div><div><dt>保存位置</dt><dd class="mono">无</dd></div><div><dt>信息来源</dt><dd>无</dd></div></dl></div>
-              <div class="detail-actions"><button class="button primary" data-recurring-task-assistant disabled><i data-lucide="message-square"></i>交给AI助手修改</button></div>
+
+            <aside class="knowledge-pane creation-studio-pane" data-creation-studio hidden>
+              <div class="pane-title"><span>创作助手</span><div><small data-creation-studio-status>按需使用</small><button class="icon-button quiet" type="button" data-close-creation-studio aria-label="关闭创作助手" title="关闭创作助手"><i data-lucide="x"></i></button></div></div>
+              <div class="creation-studio-tabs" role="tablist" aria-label="创作助手">
+                <button class="active" data-creation-studio-tab="compose" role="tab" aria-selected="true"><i data-lucide="sparkles"></i><span>AI 创作</span></button>
+                <button data-creation-studio-tab="resources" role="tab" aria-selected="false"><i data-lucide="palette"></i><span>文稿设计</span></button>
+                <button data-creation-studio-tab="publish" role="tab" aria-selected="false"><i data-lucide="badge-check"></i><span>检查</span></button>
+              </div>
+
+              <section class="creation-studio-panel active" data-creation-studio-panel="compose">
+                <div class="creation-ai-compose">
+                  <label for="creation-ai-requirement">想创作什么</label>
+                  <textarea id="creation-ai-requirement" data-creation-ai-requirement placeholder="输入主题或自然语言要求。AI 将检索所有本地知识库后写作。"></textarea>
+                  <details class="creation-writing-guidance">
+                    <summary><span>写作策略</span><small data-creation-writing-guidance-summary>自动匹配</small></summary>
+                    <div>
+                      <label><span>用途</span><select data-creation-purpose-preset aria-label="写作用途"><option value="auto">自动匹配</option></select></label>
+                      <label><span>模式</span><select data-creation-writing-pattern aria-label="写作模式"><option value="auto">自动匹配</option></select></label>
+                      <label><span>语气</span><select data-creation-writing-voice aria-label="写作语气"><option value="auto">自动匹配</option></select></label>
+                    </div>
+                  </details>
+                  <div class="creation-grounding-status" data-creation-grounding-status><i data-lucide="database"></i><span><strong>来源：所有本地知识库</strong><small>写作时会引用与你主题相关的本地笔记</small></span></div>
+                  <button class="button primary block-button" type="button" data-run-creation-ai><i data-lucide="sparkles"></i>基于知识库创作</button>
+                  <div class="creation-ai-evidence" data-creation-ai-evidence hidden></div>
+                </div>
+
+                <section class="creation-advanced-tools">
+                  <button class="creation-advanced-toggle" type="button" data-toggle-creation-rewrite aria-expanded="false" aria-controls="creation-rewrite-tools"><span><i data-lucide="wand-sparkles"></i><span><strong>全文优化</strong><small>调整表达、节奏和叙事方式</small></span></span><i data-lucide="chevron-down"></i></button>
+                  <div class="creation-advanced-body" id="creation-rewrite-tools" data-creation-rewrite-tools hidden>
+                  <div class="creation-action-grid">
+                    <button class="active" type="button" data-creation-rewrite-mode="humanize">去 AI 味</button>
+                    <button type="button" data-creation-rewrite-mode="spoken">口语化</button>
+                    <button type="button" data-creation-rewrite-mode="concise">精简</button>
+                    <button type="button" data-creation-rewrite-mode="narrative">增强叙事</button>
+                  </div>
+                  <div class="creation-rewrite-controls">
+                    <div class="creation-control-row"><label for="creation-rewrite-strength">改写强度</label><output data-rewrite-strength-label>标准</output></div><input id="creation-rewrite-strength" type="range" min="1" max="3" value="2" step="1" data-creation-rewrite-strength />
+                    <div class="creation-control-row"><label for="creation-rewrite-spoken">口语度</label><output data-rewrite-spoken-label>自然</output></div><input id="creation-rewrite-spoken" type="range" min="0" max="3" value="1" step="1" data-creation-rewrite-spoken />
+                    <div class="creation-control-row"><label for="creation-rewrite-rhythm">节奏变化</label><output data-rewrite-rhythm-label>适中</output></div><input id="creation-rewrite-rhythm" type="range" min="0" max="3" value="2" step="1" data-creation-rewrite-rhythm />
+                    <div class="creation-preserve-options"><label><input type="checkbox" data-creation-preserve="facts" checked /><span>保留事实与关系</span></label><label><input type="checkbox" data-creation-preserve="numbers" checked /><span>保留数字与单位</span></label><label><input type="checkbox" data-creation-preserve="references" checked /><span>保留引用与链接</span></label></div>
+                    <div class="segmented creation-scope-switch" role="group" aria-label="改写范围"><button class="active" type="button" data-creation-rewrite-scope="document">全文</button><button type="button" data-creation-rewrite-scope="selection">所选内容</button></div>
+                  </div>
+                  <div class="creation-writing-score" data-creation-writing-score><div><span>模板痕迹</span><strong>0</strong></div><div><span>句式波动</span><strong>0%</strong></div><div><span>重复提示词</span><strong>0</strong></div><p>这是写作启发式评分，不是 AI 检测结论。</p></div>
+                  <button class="button secondary block-button" type="button" data-run-creation-rewrite><i data-lucide="wand-sparkles"></i>生成全文改写</button>
+                  <div class="creation-writing-run-status" data-creation-writing-run-status data-state="idle" hidden aria-live="polite"><span><i data-lucide="loader-circle"></i></span><div><strong data-creation-writing-run-label>等待运行</strong><small data-creation-writing-run-detail></small></div><b data-creation-writing-run-progress>0%</b></div>
+                  </div>
+                </section>
+                <section class="creation-rewrite-review" data-creation-rewrite-review hidden><header><div><strong data-creation-review-title>改写差异</strong><small data-creation-rewrite-summary></small></div><span class="badge neutral" data-creation-rewrite-score></span></header><div class="creation-writing-gates" data-creation-writing-gates></div><div class="creation-rewrite-diff"><article><span data-creation-review-before-label>原文</span><p data-creation-rewrite-before></p></article><article><span data-creation-review-after-label>改写</span><p data-creation-rewrite-after></p></article></div><footer><button class="button secondary" type="button" data-retry-creation-rewrite hidden><i data-lucide="repeat-2"></i>再优化一轮</button><span></span><button class="button ghost" type="button" data-discard-creation-rewrite>放弃</button><button class="button primary" type="button" data-accept-creation-rewrite><i data-lucide="check"></i><span data-creation-review-accept-label>接受改写</span></button></footer></section>
+              </section>
+
+              <section class="creation-studio-panel" data-creation-studio-panel="resources" hidden>
+                <div class="search-control compact creation-resource-search"><i data-lucide="search"></i><input data-creation-resource-search placeholder="搜索主题、组件或模板" aria-label="搜索文稿设计" /></div>
+                <div class="creation-tool-section creation-design-setup">
+                  <div class="creation-section-heading"><div><strong>文稿设置</strong><small>先选择内容类型，再调整排版</small></div></div>
+                  <label class="creation-design-type"><span>内容类型</span><span><select data-creation-content-type aria-label="内容类型"><option value="auto">自动判断类型</option><option value="article">普通文章</option><option value="wechat">微信公众号</option><option value="xiaohongshu">小红书</option><option value="contract">正式合同</option><option value="paper">正式论文</option></select><i data-lucide="chevron-down"></i></span></label>
+                  <button class="creation-auto-layout" type="button" data-beautify-document><span><i data-lucide="align-left"></i><span><strong>自动排版</strong><small>整理标题、段落、标点与间距</small></span></span><i data-lucide="arrow-right"></i></button>
+                </div>
+                <div class="creation-tool-section">
+                  <div class="creation-section-heading"><div><strong>排版主题</strong><small data-creation-theme-count>加载全部可用主题</small></div><button class="text-button" type="button" data-expand-creation-resource="themes" aria-expanded="false">查看全部</button></div>
+                  <div class="creation-theme-grid"></div>
+                </div>
+                <div class="creation-tool-section creation-layout-controls">
+                  <label><span>字体</span><select data-creation-font><option value="sans">现代黑体</option><option value="serif">中文衬线</option><option value="kaiti">楷体手记</option></select></label>
+                  <label><span>正文字号</span><div class="creation-inline-stepper"><button type="button" data-creation-font-step="-1" aria-label="减小正文字号">−</button><output data-creation-font-size>16</output><button type="button" data-creation-font-step="1" aria-label="增大正文字号">+</button></div></label>
+                  <label><span>行距</span><input type="range" min="16" max="22" value="18" step="1" data-creation-line-height /><output data-creation-line-height-label>1.8</output></label>
+                  <label class="creation-check-row"><input type="checkbox" data-creation-fix-punctuation checked /><span>自动规范中文标点</span></label>
+                </div>
+                <div class="creation-tool-section">
+                  <div class="creation-section-heading"><div><strong>内容组件</strong><small data-creation-component-count>加载全部可用组件</small></div><button class="text-button" type="button" data-expand-creation-resource="components" aria-expanded="false">查看全部</button></div>
+                  <div class="creation-component-list"></div>
+                </div>
+                <div class="creation-tool-section">
+                  <div class="creation-section-heading"><div><strong>文章模板</strong><small data-creation-template-count>先选择类别</small></div><button class="text-button" type="button" data-expand-creation-resource="templates" aria-expanded="false">查看全部</button></div>
+                  <div class="creation-template-categories" data-creation-template-categories role="tablist" aria-label="文章模板类别"></div>
+                  <div class="creation-template-list" data-creation-template-list><div class="creation-resource-empty">暂无可用模板</div></div>
+                </div>
+                <div class="creation-tool-section creation-resource-generator">
+                  <div class="creation-section-heading"><div><strong>创建新设计</strong><small>保存后可继续用于其他文稿</small></div></div>
+                  <label><span>设计类型</span><select data-creation-resource-kind><option value="theme">排版主题</option><option value="component">内容组件</option><option value="template">文章模板</option></select></label>
+                  <textarea data-creation-resource-requirement placeholder="描述想要的样式、组件或模板"></textarea>
+                  <button class="button secondary block-button" type="button" data-generate-creation-resource><i data-lucide="sparkles"></i>生成并保存</button>
+                  <small data-creation-resource-status></small>
+                </div>
+                <div class="creation-tool-section creation-governance-section" data-creation-resource-governance>
+                  <div class="creation-section-heading"><div><strong>我的设计</strong><small data-creation-resource-governance-status>正在读取</small></div><button class="icon-button quiet" type="button" data-refresh-creation-governance aria-label="刷新我的设计" title="刷新我的设计"><i data-lucide="rotate-cw"></i></button></div>
+                  <label class="creation-governance-toggle"><input type="checkbox" data-show-archived-creation-resources /><span>显示已归档设计</span></label>
+                  <div class="creation-governance-list" data-creation-resource-governance-list><div class="creation-resource-empty">正在读取我的设计…</div></div>
+                  <section class="creation-revision-panel" data-creation-resource-revisions hidden>
+                    <header><div><strong data-creation-resource-revision-title>设计版本</strong><small>恢复后仍会保留当前版本</small></div><button class="icon-button quiet" type="button" data-close-creation-resource-revisions aria-label="关闭设计版本"><i data-lucide="x"></i></button></header>
+                    <div data-creation-resource-revision-list></div>
+                  </section>
+                </div>
+                <div class="creation-tool-section creation-governance-section" data-brand-profile-governance>
+                  <div class="creation-section-heading"><div><strong>品牌规范</strong><small data-brand-profile-status>正在读取品牌规范</small></div><button class="icon-button quiet" type="button" data-refresh-brand-profiles aria-label="刷新品牌规范" title="刷新品牌规范"><i data-lucide="rotate-cw"></i></button></div>
+                  <label class="creation-governance-toggle"><input type="checkbox" data-show-archived-brand-profiles /><span>显示已归档规范</span></label>
+                  <div class="creation-brand-binding" data-creation-brand-binding><i data-lucide="badge-check"></i><span><strong>当前文稿未使用品牌规范</strong><small>选择已启用的规范后应用到文稿</small></span><button class="text-button" type="button" data-unbind-brand-profile hidden>解除</button></div>
+                  <div class="creation-governance-list creation-brand-list" data-brand-profile-list><div class="creation-resource-empty">正在读取品牌规范…</div></div>
+                  <details class="creation-brand-editor">
+                    <summary><span>新建或编辑品牌规范</span><small data-brand-profile-editor-mode>新建</small></summary>
+                    <textarea spellcheck="false" data-brand-profile-json aria-label="品牌规范详细设置"></textarea>
+                    <div class="creation-governance-actions"><button class="button ghost small" type="button" data-new-brand-profile><i data-lucide="file-plus-2"></i>新建默认</button><button class="button primary small" type="button" data-save-brand-profile><i data-lucide="check"></i>保存草稿</button></div>
+                    <small>保存后可预览并启用，再应用到文稿。</small>
+                  </details>
+                  <div class="creation-brand-evaluation" data-brand-profile-evaluation hidden></div>
+                </div>
+                <div class="creation-html-health" data-creation-html-health><i data-lucide="shield-check"></i><div><strong>排版检查</strong><small>预览或导出时自动检查内容兼容性</small></div></div>
+              </section>
+
+              <section class="creation-studio-panel" data-creation-studio-panel="publish" hidden>
+                <div class="creation-tool-section">
+                  <div class="creation-section-heading"><div><strong>本地知识引用</strong><small>按需补充可复核来源</small></div></div>
+                  <div class="search-control compact creation-evidence-search"><i data-lucide="search"></i><input placeholder="搜索所有知识库" data-creation-evidence-input /><button class="icon-button quiet" type="button" data-search-creation-evidence aria-label="搜索证据" title="搜索证据"><i data-lucide="arrow-right"></i></button></div>
+                  <div class="knowledge-tabs"><button class="active" data-creation-knowledge-tab="references">引用 0</button><button data-creation-knowledge-tab="claims">声明 0</button><button data-creation-knowledge-tab="outline">大纲</button></div>
+                  <div class="claim-summary"><i data-lucide="shield-check"></i><div><strong>尚无引用</strong><small>搜索真实知识后可插入引用</small></div></div>
+                  <div class="creation-knowledge-results" data-creation-knowledge-results></div>
+                </div>
+                <div class="creation-tool-section">
+                  <div class="creation-section-heading"><div><strong>导出准备</strong><small>检查正文、结构、引用、素材与 HTML</small></div></div>
+                  <div class="creation-readiness-summary" data-creation-readiness-summary data-state="idle"><span><i data-lucide="badge-check"></i></span><div><strong data-creation-readiness-label>尚未检查</strong><small data-creation-readiness-detail>运行检查后显示阻断项与提醒</small></div><b data-creation-readiness-score>—</b></div>
+                  <button class="button secondary block-button" type="button" data-run-creation-readiness><i data-lucide="scan-search"></i>运行导出检查</button>
+                </div>
+                <div class="creation-readiness-checks" data-creation-readiness-checks><div class="creation-readiness-empty">检查结果会在这里按严重度列出。</div></div>
+                <div class="creation-export-grid creation-publish-actions"><button class="button primary" type="button" data-copy-wechat-html><i data-lucide="copy"></i>复制富文本</button><button class="button secondary" type="button" data-export-creation-html><i data-lucide="download"></i>导出 HTML</button><button class="button secondary" type="button" data-export-creation-markdown><i data-lucide="file-down"></i>导出 Markdown</button><button class="button secondary" type="button" data-export-creation-pdf><i data-lucide="file-down"></i>导出 PDF</button><button class="button secondary" type="button" data-export-creation-png><i data-lucide="image-plus"></i>导出 PNG</button><button class="button secondary" type="button" data-export-creation-jpeg><i data-lucide="image-plus"></i>导出 JPEG</button><button class="button secondary" type="button" data-copy-creation-html><i data-lucide="code-2"></i>复制 HTML</button></div>
+                <small class="creation-export-status" data-creation-export-status>长文会自动分页；多页 PNG/JPEG 将下载为 ZIP。</small>
+                <p class="creation-publication-boundary"><i data-lucide="info"></i><span>“可复制/导出”不代表内容已发布到任何外部平台。</span></p>
+              </section>
             </aside>
           </div>
         </section>
@@ -334,11 +552,14 @@
           <div class="tabs compact-tabs tabs-with-actions" role="tablist">
             <button data-tab="reports" data-tab-value="archive">报告归档</button>
             <button data-tab="reports" data-tab-value="subscriptions">订阅管理</button>
+            <button data-tab="reports" data-tab-value="memory">长期记忆</button>
+            <button data-tab="reports" data-tab-value="growth">成长版本</button>
             <span class="tabs-spacer"></span>
           </div>
           <div class="tab-panel report-panel" data-tab-panel="reports" data-tab-value="archive">
             <div class="report-layout">
               <section class="report-list">
+                <header class="report-surface-heading"><div><h2>已生成报告</h2><p>只查看已经完成的报告，可导出或删除本地归档。</p></div><span><i data-lucide="archive"></i>历史结果</span></header>
                 <div class="report-periods" role="tablist" aria-label="报告类型筛选">
                   <button class="active" data-report-period="all" role="tab" aria-selected="true">全部</button>
                   <button data-report-period="daily" role="tab" aria-selected="false">日报</button>
@@ -361,7 +582,7 @@
                 </div>
               </section>
               <aside class="report-preview">
-                <div class="report-preview-head"><div><span data-report-preview-type>报告</span><h2 data-report-preview-title>尚无真实报告</h2><p data-report-preview-meta hidden></p></div><button class="button secondary" disabled><i data-lucide="download"></i>导出</button></div>
+                <div class="report-preview-head"><div><span data-report-preview-type>报告</span><h2 data-report-preview-title>尚无真实报告</h2><p data-report-preview-meta hidden></p></div><div class="report-preview-actions"><button class="button secondary" data-report-export disabled><i data-lucide="download"></i>导出</button><button class="button danger-text-button" data-report-delete disabled><i data-lucide="trash-2"></i>删除归档</button></div></div>
                 <div class="report-kpis">
                   <div><strong data-report-kpi-value="0">0</strong><span data-report-kpi-label="0">完成任务</span></div>
                   <div><strong data-report-kpi-value="1">0</strong><span data-report-kpi-label="1">新增知识</span></div>
@@ -371,21 +592,84 @@
                 <section class="report-section" hidden><h3>值得关注</h3><div class="report-callout"><i data-lucide="info"></i><span><strong data-report-callout-title></strong><small data-report-callout-detail hidden></small></span><button class="text-button" data-report-action data-report-action-route="audit" hidden>立即审查</button></div></section>
                 <section class="report-section" hidden><h3 data-report-next-heading></h3><p data-report-next></p></section>
                 <footer data-report-footer>没有读取或修改任何本地报告文件</footer>
+                <section class="r10-reflection-empty">
+                  <i data-lucide="history" aria-hidden="true"></i>
+                  <h2>还没有生成成长报告</h2>
+                  <p>本机任务、报告和需要判断的变化产生后，会按时间顺序出现在成长中心。</p>
+                  <button class="r10-button r10-button-secondary" type="button" data-route-jump="dashboard"><i data-lucide="arrow-right"></i><span>回到工作台</span></button>
+                </section>
               </aside>
             </div>
           </div>
           <div class="tab-panel report-panel" data-tab-panel="reports" data-tab-value="subscriptions">
             <div class="subscription-layout">
               <section>
-                <div class="tool-toolbar"><strong>报告订阅</strong><span class="toolbar-meta">0 项已启用</span><span class="secretary-managed-note"><i data-lucide="message-square"></i>订阅调整由AI助手统一处理</span></div>
+                <div class="report-surface-heading subscription-surface-heading"><div><h2>生成计划</h2><p>设置成长报告的自动生成时间与保存位置</p></div><button class="button primary" type="button" data-manage-subscriptions><i data-lucide="message-square"></i>新建或调整</button></div>
+                <div class="subscription-summary"><span><strong class="toolbar-meta">0 项已启用</strong><small data-subscription-total>共 0 项计划</small></span><span><i data-lucide="calendar-clock"></i>按本地时区运行</span></div>
                 <div class="subscription-table">
-                  <div class="table-head"><span>名称</span><span>周期</span><span>生成时间</span><span>投递</span><span>状态</span></div>
+                  <div class="table-head"><span>订阅</span><span>生成安排</span><span>状态</span></div>
                   <div class="subscription-empty" data-subscription-empty>尚无真实报告订阅</div>
                 </div>
               </section>
               <aside class="subscription-detail">
                 <div class="inspector-header"><div><span>订阅详情</span><strong data-subscription-title>尚未选择订阅</strong></div><span class="badge neutral" data-subscription-status>未启用</span></div>
                 <div class="inspector-section"><h3>状态</h3><p class="body-copy" data-subscription-empty-detail>暂无真实报告订阅</p><div class="tag-list" data-subscription-tags></div><dl hidden data-subscription-fields><div><dt>周期</dt><dd data-subscription-cycle></dd></div><div><dt>时区</dt><dd data-subscription-timezone></dd></div><div><dt>下次生成</dt><dd data-subscription-next></dd></div><div><dt>保存路径</dt><dd data-subscription-path></dd></div><div><dt>投递</dt><dd data-subscription-delivery></dd></div><div><dt>失败策略</dt><dd data-subscription-policy></dd></div></dl></div>
+              </aside>
+            </div>
+          </div>
+          <div class="tab-panel report-panel memory-workspace" data-tab-panel="reports" data-tab-value="memory">
+            <header class="memory-workspace-header">
+              <div><h2>长期记忆</h2><p>直接查看云枢从证据中提炼的用户经历、用户偏好、Agent 案例和 Skill 经验；原始对话与操作仍可在行为记录中追溯。</p></div>
+              <div><button class="button secondary" type="button" data-memory-refresh><i data-lucide="rotate-cw"></i>刷新</button><button class="button primary" type="button" data-memory-export><i data-lucide="download"></i>导出 JSON</button></div>
+            </header>
+            <div class="memory-view-bar">
+              <div class="memory-mode-tabs" role="tablist" aria-label="长期记忆视图">
+                <button type="button" class="active" role="tab" aria-selected="true" data-memory-mode="structured"><i data-lucide="brain-circuit"></i><span>结构化记忆</span></button>
+                <button type="button" role="tab" aria-selected="false" data-memory-mode="ledger"><i data-lucide="history"></i><span>行为记录</span></button>
+              </div>
+              <small data-memory-status aria-live="polite">等待读取本机记忆</small>
+            </div>
+            <div class="memory-track-strip" data-memory-track-strip role="tablist" aria-label="结构化记忆类型">
+              <button type="button" class="active" role="tab" aria-selected="true" data-memory-track="all"><span><i data-lucide="layers-3"></i>全部记忆</span><strong data-memory-track-count="all">0</strong></button>
+              <button type="button" role="tab" aria-selected="false" data-memory-track="user_episode"><span><i data-lucide="milestone"></i>用户经历</span><strong data-memory-track-count="user_episode">0</strong></button>
+              <button type="button" role="tab" aria-selected="false" data-memory-track="user_profile"><span><i data-lucide="sliders-horizontal"></i>用户偏好</span><strong data-memory-track-count="user_profile">0</strong></button>
+              <button type="button" role="tab" aria-selected="false" data-memory-track="agent_case"><span><i data-lucide="briefcase-business"></i>Agent 案例</span><strong data-memory-track-count="agent_case">0</strong></button>
+              <button type="button" role="tab" aria-selected="false" data-memory-track="agent_skill"><span><i data-lucide="sparkles"></i>Skill 经验</span><strong data-memory-track-count="agent_skill">0</strong></button>
+            </div>
+            <div class="memory-summary-line" data-memory-ledger-summary aria-live="polite" hidden><strong><span data-memory-total>0</span> 条行为记录</strong><span><b data-memory-active>0</b> 条正在使用</span><span><b data-memory-corrected>0</b> 条已纠错</span><span><b data-memory-expired>0</b> 条已过期</span></div>
+            <div class="memory-layout split-tool">
+              <section class="memory-list-pane list-pane">
+                <div class="tool-toolbar"><div class="search-control"><i data-lucide="search"></i><input type="search" data-memory-search placeholder="搜索标题、内容或来源" aria-label="搜索长期记忆" /></div><label class="memory-history-toggle"><input type="checkbox" data-memory-include-inactive /><span data-memory-history-label>包含已替代与停用</span></label><span class="toolbar-meta" data-memory-count>显示 0 条</span></div>
+                <div class="memory-list" data-memory-list><div class="memory-empty"><i data-lucide="brain-circuit"></i><strong>还没有结构化记忆</strong><span>经证据提炼并确认的用户经历、偏好、Agent 案例和 Skill 经验会出现在这里。</span></div></div>
+              </section>
+              <aside class="inspector-pane memory-detail is-empty" data-memory-detail>
+                <div class="inspector-header"><div><span>记忆详情</span><strong data-memory-detail-title>尚未选择记录</strong></div><span class="badge neutral" data-memory-detail-state>无记录</span></div>
+                <div class="inspector-section"><h3>内容</h3><p class="memory-detail-content" data-memory-detail-content>从左侧选择一条记忆，查看它的来源、状态和完整内容。</p></div>
+                <div class="inspector-section" data-memory-structured-metadata><h3>结构与来源</h3><dl><div><dt>记忆类型</dt><dd data-memory-detail-track>未读取</dd></div><div><dt>置信度</dt><dd data-memory-detail-confidence>未读取</dd></div><div><dt>版本</dt><dd data-memory-detail-version>未读取</dd></div><div><dt>更新时间</dt><dd data-memory-detail-updated>未读取</dd></div><div><dt>来源</dt><dd data-memory-detail-source>未读取</dd></div><div><dt>作用域</dt><dd data-memory-detail-scope>未读取</dd></div></dl></div>
+                <div class="inspector-section memory-evidence-section" data-memory-evidence-section><h3>证据</h3><div class="memory-evidence-list" data-memory-evidence-list><p>选择一条结构化记忆后查看证据。</p></div></div>
+                <div class="inspector-section" data-memory-ledger-metadata hidden><h3>来源与状态</h3><dl><div><dt>类型</dt><dd data-memory-detail-type>未读取</dd></div><div><dt>记录者</dt><dd data-memory-detail-actor>未读取</dd></div><div><dt>时间</dt><dd data-memory-detail-time>未读取</dd></div><div><dt>治理状态</dt><dd data-memory-detail-governance>未读取</dd></div></dl></div>
+                <div class="inspector-section memory-governance-controls" data-memory-structured-governance><h3>治理</h3><label><span>停止使用原因</span><textarea rows="2" data-structured-memory-tombstone-reason placeholder="说明为什么不应继续使用这条记忆"></textarea></label><div><button class="button danger-text-button" type="button" data-structured-memory-tombstone disabled><i data-lucide="circle-stop"></i>停止使用</button></div></div>
+                <div class="inspector-section memory-governance-controls" data-memory-ledger-governance hidden><h3>行为记录治理</h3><label><span>说明</span><textarea rows="2" data-memory-governance-note placeholder="说明为什么需要调整这条记录"></textarea></label><label><span>替代记录 ID（纠错时必填）</span><input class="mono" data-memory-replacement-id placeholder="memory-…" /></label><div><button class="button secondary" type="button" data-memory-govern="activate" disabled>恢复使用</button><button class="button secondary" type="button" data-memory-govern="correct" disabled>标记纠错</button><button class="button secondary" type="button" data-memory-govern="expire" disabled>标记过期</button><button class="button danger-text-button" type="button" data-memory-govern="tombstone" disabled>停止使用</button></div></div>
+              </aside>
+            </div>
+          </div>
+          <div class="tab-panel report-panel growth-workspace" data-tab-panel="reports" data-tab-value="growth">
+            <header class="growth-workspace-header">
+              <div><h2>成长版本</h2><p>经评估并由你确认的助手行为规则与 Skill 路由优化会形成新版本；它不是笔记版本历史。</p></div>
+              <button class="button secondary" type="button" data-growth-refresh><i data-lucide="rotate-cw"></i>刷新</button>
+            </header>
+            <div class="growth-current-summary" data-growth-summary aria-live="polite"><span><strong data-growth-current-version>v0</strong><small>当前版本</small></span><p data-growth-current-guidance>等待读取本机优化配置</p><b class="badge neutral" data-growth-status>未读取</b></div>
+            <div class="growth-layout split-tool">
+              <section class="growth-list-pane list-pane">
+                <div class="tool-toolbar"><strong>版本记录</strong><span class="toolbar-meta" data-growth-count>0 个版本</span></div>
+                <div class="growth-version-list" data-growth-list><div class="growth-empty"><i data-lucide="git-branch"></i><strong>还没有成长版本</strong><span>经你确认并应用的优化会按时间保存在这里。</span></div></div>
+              </section>
+              <aside class="inspector-pane growth-detail is-empty" data-growth-detail>
+                <div class="inspector-header"><div><span>版本详情</span><strong data-growth-detail-title>尚未选择版本</strong></div><span class="badge neutral" data-growth-detail-state>无版本</span></div>
+                <div class="inspector-section"><h3>形成时间</h3><p data-growth-detail-time>从左侧选择一个版本。</p></div>
+                <div class="inspector-section"><h3>优化说明</h3><p class="body-copy" data-growth-detail-guidance>版本说明会显示在这里。</p></div>
+                <div class="inspector-section"><h3>版本来源</h3><dl><div><dt>候选 ID</dt><dd class="mono" data-growth-detail-candidate>未记录</dd></div><div><dt>回滚目标</dt><dd data-growth-detail-target>不适用</dd></div></dl></div>
+                <div class="growth-detail-actions"><button class="button primary block-button" type="button" data-growth-restore disabled><i data-lucide="history"></i><span>恢复到此版本</span></button><small>恢复会创建一个新的当前版本，不覆盖历史。</small></div>
               </aside>
             </div>
           </div>
@@ -414,6 +698,11 @@
             <aside class="inspector-pane audit-detail is-empty">
               <div class="inspector-header"><div><span>事件详情</span><strong data-audit-detail-title>尚未选择事件</strong></div><span class="badge neutral" data-audit-detail-status>无事件</span></div>
               <div class="trace-id"><span>追踪 ID</span><code>暂无</code><button class="icon-button quiet" aria-label="复制追踪 ID" title="复制追踪 ID" disabled><i data-lucide="copy"></i></button></div>
+              <div class="inspector-section audit-trace-panel" data-audit-trace-panel>
+                <div class="audit-trace-heading"><h3>Trace 链</h3><button class="button secondary small" type="button" data-audit-trace-load disabled><i data-lucide="scan-search"></i><span>查询并验证</span></button></div>
+                <p data-audit-trace-status role="status" aria-live="polite">选择带有原生追踪 ID 的事件后，可以读取完整链路。</p>
+                <ol class="audit-trace-events" data-audit-trace-events></ol>
+              </div>
               <div class="inspector-section"><h3>执行上下文</h3><dl data-audit-context></dl></div>
               <div class="inspector-section"><h3>权限与资源</h3><div class="scope-list white" data-audit-scopes></div></div>
               <div class="inspector-section"><h3 data-audit-result-heading>事件结果</h3><div class="diff-summary" data-audit-metrics></div><button class="button secondary block-button" data-audit-detail-action disabled>没有事件详情</button></div>
@@ -435,14 +724,26 @@
               <button data-setting="connectors" role="tab"><i data-lucide="network"></i>连接器</button>
               <button data-setting="permissions" role="tab"><i data-lucide="shield-check"></i>权限</button>
               <button data-setting="automation" role="tab"><i data-lucide="calendar-clock"></i>自动化</button>
+              <button data-setting="skills" role="tab"><i data-lucide="blocks"></i>Skills</button>
               <button data-setting="appearance" role="tab"><i data-lucide="palette"></i>外观</button>
               <button data-setting="shortcuts" role="tab"><i data-lucide="keyboard"></i>快捷键</button>
               <button data-setting="about" role="tab"><i data-lucide="info"></i>关于</button>
             </nav>
             <section class="settings-content">
-              <div class="settings-panel" data-setting-panel="general" role="tabpanel"><div class="settings-panel-heading"><span class="settings-panel-icon"><i data-lucide="sliders-horizontal"></i></span><div><h2>通用</h2><p>设置启动位置和桌面应用行为。</p></div></div><div class="settings-section"><div class="setting-row"><div><strong>启动页面</strong><small>打开 Yunspire 时首先进入的工作区</small></div><label class="settings-select-wrap"><span class="sr-only">启动页面</span><select class="settings-select" data-setting-key="startupPage"><option value="agent">AI助手</option><option value="dashboard">仪表盘</option><option value="capture">采集</option><option value="search">搜索</option><option value="tasks">任务</option></select><i data-lucide="chevron-down"></i></label></div><div class="setting-row"><div><strong>后台启动</strong><small>应用启动后运行定时采集、报告订阅与自动维护服务</small></div><button class="switch on" aria-label="后台启动"></button></div></div></div>
+              <div class="settings-panel" data-setting-panel="general" role="tabpanel"><div class="settings-panel-heading"><span class="settings-panel-icon"><i data-lucide="sliders-horizontal"></i></span><div><h2>通用</h2><p>设置启动位置和桌面应用行为。</p></div></div><div class="settings-section"><div class="setting-row"><div><strong>启动页面</strong><small>打开 Yunspire 时首先进入的工作区</small></div><label class="settings-select-wrap"><span class="sr-only">启动页面</span><select class="settings-select" data-setting-key="startupPage"><option value="dashboard">工作台</option><option value="agent">AI助手</option><option value="capture">采集</option><option value="search">知识库</option><option value="create">创作</option><option value="reports">成长中心</option></select><i data-lucide="chevron-down"></i></label></div><div class="setting-row"><div><strong>后台启动</strong><small>应用启动后运行定时采集、报告订阅与自动维护服务</small></div><button class="switch on" aria-label="后台启动"></button></div></div></div>
               <div class="settings-panel" data-setting-panel="vault" role="tabpanel"><div class="settings-panel-heading"><span class="settings-panel-icon"><i data-lucide="database"></i></span><div><h2>Obsidian 知识库</h2><p>发现并配置本机全部 Vault，分别决定访问方式，并选择当前查询与写入的知识库。</p></div><div class="settings-panel-actions"><button class="button primary" data-rescan-vaults><i data-lucide="scan-search"></i>扫描所有库</button></div></div><div class="vault-overview"><span class="vault-icon large"><i data-lucide="database"></i></span><div><span>当前知识库</span><strong data-active-vault-name>正在连接 Obsidian</strong><small class="mono" data-active-vault-path>读取本机配置</small></div><span class="badge neutral" data-vault-connection-status>正在读取</span></div><div class="settings-section vault-management-section"><div class="settings-section-heading"><div><h3>知识库管理</h3><p><span data-vault-count>0</span> 个 Vault 已纳入 Yunspire，可为每个库单独设置访问方式。</p></div></div><div class="vault-config-list" data-vault-config-list></div></div><div class="settings-section"><h3>Obsidian 管理能力</h3><div class="tag-list vault-capabilities"><span>读取笔记</span><span>写入与保存</span><span>新增笔记</span><span>删除与恢复</span><span>文件夹管理</span><span>属性与标签</span><span>附件管理</span><span>双向链接</span><span>查询与批处理</span></div></div><div class="data-layers"><article><span class="layer-index">01</span><div><strong>Obsidian 数据库</strong><small data-obsidian-layer-detail>Markdown、属性、标签、附件、链接与所有 Vault 配置</small></div><b class="badge neutral" data-obsidian-layer-status>正在连接</b></article><article><span class="layer-index">02</span><div><strong>明确数据层</strong><small class="mono">正在读取本地 SQLite 状态</small></div><b class="badge neutral">正在检查</b><button class="button secondary" data-backup-database>备份</button></article><article><span class="layer-index">03</span><div><strong>本地检索层</strong><small>FTS、本地特征向量与 RRF，可从 Obsidian 内容重建</small></div><b class="badge neutral">已启用</b></article></div></div>
-              <div class="settings-panel" data-setting-panel="models" role="tabpanel"><div class="settings-panel-heading"><span class="settings-panel-icon"><i data-lucide="cpu"></i></span><div><h2>API 配置</h2><p>本地多供应商与多模型路由。</p></div><div class="settings-panel-actions"><button type="button" class="button primary" data-add-model-provider><i data-lucide="plus"></i>增加供应商</button></div></div><div class="model-provider-list" data-model-provider-list></div><div class="model-provider-empty" data-model-provider-empty><i data-lucide="server"></i><strong>尚未添加供应商</strong></div></div>
+              <div class="settings-panel" data-setting-panel="models" role="tabpanel">
+                <div class="settings-panel-heading"><span class="settings-panel-icon"><i data-lucide="cpu"></i></span><div><h2>API 配置</h2><p>本地多供应商、多模型用途与神经语义索引。</p></div><div class="settings-panel-actions"><button type="button" class="button primary" data-add-model-provider><i data-lucide="plus"></i>增加供应商</button></div></div>
+                <section class="embedding-index-status" data-embedding-index-status data-state="loading" aria-live="polite">
+                  <header><span class="embedding-index-icon"><i data-lucide="database"></i></span><div><strong>神经语义索引</strong><small data-embedding-index-description>正在读取本机索引状态</small></div><span class="badge neutral" data-embedding-index-badge>读取中</span></header>
+                  <div class="setting-row embedding-consent-row"><div><strong>使用外部神经 Embedding</strong><small>默认关闭。开启即表示你明确同意：搜索查询，以及笔记标题、相对路径、标签、Wiki Links 和最多 24,000 个规范化正文字符，会发送给当前配置的 Embedding 供应商；不会发送 Properties 或 Vault ID。关闭时仅使用本地 FTS 和本地特征向量。</small></div><button type="button" class="switch" data-embedding-consent aria-label="使用外部神经 Embedding" aria-pressed="false"></button></div>
+                  <div class="embedding-index-progress" role="progressbar" aria-label="神经语义索引进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span data-embedding-index-progress></span></div>
+                  <div class="embedding-index-metrics"><div><span>已索引</span><strong data-embedding-index-count>0 / 0</strong></div><div><span>待处理</span><strong data-embedding-index-pending>0</strong></div><div><span>向量缓存</span><strong data-embedding-index-cache>0</strong></div><div><span>当前模型</span><strong class="mono" data-embedding-index-model>未配置</strong></div></div>
+                  <p class="embedding-index-error" data-embedding-index-error hidden></p>
+                  <footer><span>仅在上方明确开启后使用神经 Embedding，并与 FTS、本地特征向量通过 RRF 融合；供应商不可用或未同意时自动使用纯本地检索。</span><div><button type="button" class="button secondary" data-refresh-embedding-index><i data-lucide="rotate-cw"></i>刷新状态</button><button type="button" class="button primary" data-rebuild-embedding-index disabled><i data-lucide="database-backup"></i>重建语义索引</button></div></footer>
+                </section>
+                <div class="model-provider-list" data-model-provider-list></div><div class="model-provider-empty" data-model-provider-empty><i data-lucide="server"></i><strong>尚未添加供应商</strong></div>
+              </div>
               <div class="settings-panel" data-setting-panel="connectors" role="tabpanel"><div class="settings-panel-heading"><span class="settings-panel-icon"><i data-lucide="network"></i></span><div><h2>外部连接器</h2><p>配置由 AI助手在用户确认后使用的外部投递目标。</p></div><div class="settings-panel-actions"><button type="button" class="button primary" data-add-external-connector><i data-lucide="plus"></i>增加连接器</button></div></div><div class="external-connector-list" data-external-connector-list></div><div class="model-provider-empty" data-external-connector-empty><i data-lucide="network"></i><strong>尚未配置连接器</strong></div></div>
               <div class="settings-panel" data-setting-panel="permissions" role="tabpanel">
                 <div class="settings-panel-heading"><span class="settings-panel-icon"><i data-lucide="shield-check"></i></span><div><h2>权限</h2><p>外部内容只能作为数据处理，不能修改设置、注入系统指令或自行获得工具权限。</p></div></div>
@@ -455,18 +756,84 @@
                 <div class="settings-safety-note"><i data-lucide="shield"></i><div><strong>内容与权限完全隔离</strong><p>网页、文档、消息、图片和转录中的任何文字都不会成为系统指令，也不能改变工具或写入权限。</p></div></div>
               </div>
               <div class="settings-panel" data-setting-panel="automation" role="tabpanel"><div class="settings-panel-heading"><span class="settings-panel-icon"><i data-lucide="calendar-clock"></i></span><div><h2>自动化</h2><p>控制后台服务、唤醒补跑和应用内通知。</p></div></div><div class="settings-section"><div class="setting-row"><div><strong>电脑唤醒后补跑</strong><small>执行睡眠期间错过的定时采集与报告</small></div><button class="switch on" aria-label="电脑唤醒后补跑"></button></div><div class="setting-row"><div><strong>失败通知</strong><small>任务失败或进入隔离区时显示应用内通知</small></div><button class="switch on" aria-label="失败通知"></button></div></div></div>
+              <div class="settings-panel skill-governance-panel" data-setting-panel="skills" role="tabpanel">
+                <div class="settings-panel-heading"><span class="settings-panel-icon"><i data-lucide="blocks"></i></span><div><h2>Skills</h2><p>查看用户 Skill 的真实状态、版本和权限。创建或修改先由 AI 助手生成候选，再由你决定是否启用。</p></div><div class="settings-panel-actions"><button class="button secondary" type="button" data-skill-install-with-assistant><i data-lucide="download"></i>通过 AI 安装</button><button class="button primary" type="button" data-skill-create-with-assistant><i data-lucide="sparkles"></i>通过 AI 创建</button></div></div>
+                <div class="skill-layout split-tool empty-detail">
+                  <section class="skill-list-pane list-pane">
+                    <div class="tool-toolbar"><div class="search-control"><i data-lucide="search"></i><input type="search" placeholder="搜索用户 Skill" aria-label="搜索用户 Skill" /></div><span class="toolbar-meta" data-skill-count>显示 0 / 0 个用户 Skill</span></div>
+                    <div class="skill-list"><div class="skill-list-empty"><span class="status-icon"><i data-lucide="blocks"></i></span><strong>尚未安装用户 Skill</strong><button class="button primary small" type="button" data-skill-create-with-assistant><i data-lucide="sparkles"></i>通过 AI 创建</button></div></div>
+                  </section>
+                  <aside class="skill-detail inspector-pane" hidden>
+                    <div class="skill-detail-head"><span class="skill-icon large"><i data-lucide="sparkles"></i></span><div><h2>用户 Skill</h2><p class="mono">user-skill</p></div><span class="badge neutral">已停用</span></div>
+                    <p class="skill-description"></p>
+                    <div class="inspector-section"><h3>技能属性</h3><div class="tag-list"></div></div>
+                    <div class="inspector-section"><h3>路由依据</h3><p class="body-copy"></p><button class="text-button" type="button" data-skill-route-rules aria-expanded="false">查看路由规则</button></div>
+                    <div class="inspector-section"><h3>能力与权限</h3><div class="permission-row"><i data-lucide="folder-search"></i><span><strong>读取知识库</strong><small>按任务上下文限制范围</small></span><b>未声明</b></div><div class="permission-row"><i data-lucide="file-pen"></i><span><strong>写入知识文件</strong><small>变更前执行差异检查</small></span><b>未声明</b></div><div class="permission-row"><i data-lucide="wifi-off"></i><span><strong>访问网络</strong><small>仅限声明并经策略允许</small></span><b>未声明</b></div></div>
+                    <div class="inspector-section"><h3>运行数据</h3><div class="performance-grid"><div><strong>0</strong><span>真实运行</span></div><div><strong>0</strong><span>已验证结果</span></div><div><strong>未运行</strong><span>最近状态</span></div></div></div>
+                    <div class="inspector-section skill-version-section"><div class="skill-version-heading"><h3>版本历史</h3><button class="text-button" type="button" data-skill-refresh-versions>刷新</button></div><div class="skill-version-list" data-skill-version-list><span>选择 Skill 后读取版本</span></div></div>
+                    <div class="detail-actions"><button class="button danger-text-button" type="button" data-custom-skill-delete><i data-lucide="archive"></i>退役</button><button class="button secondary" type="button" data-skill-edit-with-assistant><i data-lucide="message-square"></i>通过 AI 修改</button><button class="button primary" type="button" data-custom-skill-toggle><i data-lucide="shield-check"></i>批准并启用</button></div>
+                  </aside>
+                </div>
+              </div>
               <div class="settings-panel" data-setting-panel="appearance" role="tabpanel"><div class="settings-panel-heading"><span class="settings-panel-icon"><i data-lucide="palette"></i></span><div><h2>外观</h2><p>调整主题、界面密度和字体显示。</p></div></div><div class="settings-section"><h3>主题</h3><div class="theme-options"><button class="selected"><span class="theme-preview light"></span><strong>浅色</strong></button><button><span class="theme-preview dark"></span><strong>深色</strong></button><button><span class="theme-preview system"></span><strong>跟随系统</strong></button></div></div><div class="settings-section"><div class="setting-row"><div><strong>界面密度</strong><small>紧凑模式适合大规模列表与表格</small></div><div class="segmented"><button>舒适</button><button class="active">紧凑</button></div></div><div class="setting-row"><div><strong>正文字号</strong><small>编辑器和长文本阅读字号</small></div><div class="stepper" data-min="12" data-max="24"><button type="button" aria-label="减小正文字号">−</button><span>15</span><button type="button" aria-label="增大正文字号">+</button></div></div><div class="setting-row"><div><strong>减少动态效果</strong><small>降低非必要的过渡动画</small></div><button class="switch" aria-label="减少动态效果"></button></div></div></div>
-          <div class="settings-panel" data-setting-panel="shortcuts" role="tabpanel"><div class="settings-panel-heading"><span class="settings-panel-icon"><i data-lucide="keyboard"></i></span><div><h2>快捷键</h2><p>自定义常用操作，并自动检测冲突。</p></div></div><div class="shortcut-list"><div><span><strong>全局搜索</strong><small>在任意页面搜索知识和命令</small></span><kbd>⌘ K</kbd></div><div><span><strong>新建笔记</strong><small>打开创作工作区</small></span><kbd>⌘ N</kbd></div><div><span><strong>创建采集任务</strong><small>交给AI助手分析并执行</small></span><kbd>⌘ P</kbd></div><div><span><strong>创建定时采集</strong><small>交给AI助手分析并执行</small></span><kbd>⌘ ⇧ P</kbd></div><div><span><strong>AI助手对话</strong><small>在当前上下文中打开AI助手</small></span><kbd>⌘ ⇧ A</kbd></div><div><span><strong>切换侧栏</strong><small>扩大当前工作区</small></span><kbd>⌘ /</kbd></div></div><button class="button secondary">恢复默认快捷键</button></div>
-              <div class="settings-panel" data-setting-panel="about" role="tabpanel"><div class="settings-panel-heading"><span class="settings-panel-icon"><i data-lucide="info"></i></span><div><h2>关于</h2><p>本地优先的 Obsidian 智能知识工作台。</p></div></div><div class="about-product"><img class="about-brand-lockup" src="./assets/brand/yunspire-lockup.jpg" alt="云枢 Yunspire" /><div><strong>Yunspire Desktop</strong><small>版本 0.1.2 · macOS / Windows</small></div></div><div class="settings-section"><div class="setting-row"><div><strong>本地数据</strong><small>知识、任务、技能和操作日志均存储在本机</small></div><span class="badge neutral" data-local-health>等待桌面验证</span></div><div class="setting-row"><div><strong>软件更新</strong><small data-update-status>仅检查 GitHub 正式 Release；安装前先建立数据库与 Vault 保护点</small></div><button class="button secondary" data-check-updates>检查更新</button></div><div class="setting-row"><div><strong>安装前保护点</strong><small>建立 SQLite 在线备份和全部已连接 Obsidian Vault 快照</small></div><button class="button secondary" data-prepare-update>立即备份</button></div><div class="setting-row update-rollback-row"><div><strong>更新回滚</strong><small>回滚前会再建立安全快照；不会删除更新后新增的文件</small></div><label class="settings-select-wrap wide"><span class="sr-only">选择更新保护点</span><select class="settings-select" data-update-backup-select><option value="">正在读取保护点</option></select><i data-lucide="chevron-down"></i></label><button class="button danger" data-rollback-update disabled>回滚</button></div><div class="setting-row"><div><strong>开源许可</strong><small>导出使用的第三方软件与许可证清单</small></div><button class="button secondary" data-export-licenses>导出清单</button></div><div class="setting-row"><div><strong>诊断信息</strong><small>导出不包含知识内容的本地诊断报告</small></div><button class="button secondary" data-export-diagnostics>导出诊断</button></div></div><footer class="about-footer">© 2026 Yunspire · 隐私 · 许可 · 更新日志</footer></div>
+          <div class="settings-panel" data-setting-panel="shortcuts" role="tabpanel"><div class="settings-panel-heading"><span class="settings-panel-icon"><i data-lucide="keyboard"></i></span><div><h2>快捷键</h2><p>点击快捷键框后按下新组合；冲突组合不会保存。</p></div></div><div class="shortcut-list"><div data-shortcut-row="search"><span><strong>全局搜索</strong><small>在任意页面搜索知识和命令</small><small class="shortcut-error" data-shortcut-error hidden></small></span><input readonly data-shortcut-input="search" aria-label="设置全局搜索快捷键"></div><div data-shortcut-row="newNote"><span><strong>新建笔记</strong><small>创建一篇新的本地创作草稿</small><small class="shortcut-error" data-shortcut-error hidden></small></span><input readonly data-shortcut-input="newNote" aria-label="设置新建笔记快捷键"></div><div data-shortcut-row="capture"><span><strong>创建采集任务</strong><small>打开直接采集工作区</small><small class="shortcut-error" data-shortcut-error hidden></small></span><input readonly data-shortcut-input="capture" aria-label="设置创建采集任务快捷键"></div><div data-shortcut-row="scheduledCapture"><span><strong>创建定时采集</strong><small>交给AI助手分析并执行</small><small class="shortcut-error" data-shortcut-error hidden></small></span><input readonly data-shortcut-input="scheduledCapture" aria-label="设置创建定时采集快捷键"></div><div data-shortcut-row="assistant"><span><strong>AI助手对话</strong><small>在当前上下文中打开AI助手</small><small class="shortcut-error" data-shortcut-error hidden></small></span><input readonly data-shortcut-input="assistant" aria-label="设置 AI 助手快捷键"></div></div><button class="button secondary" data-reset-shortcuts>恢复默认快捷键</button></div>
+              <div class="settings-panel" data-setting-panel="about" role="tabpanel"><div class="settings-panel-heading"><span class="settings-panel-icon"><i data-lucide="info"></i></span><div><h2>关于</h2><p>面向个人、本地优先的自成长知识中枢。</p></div></div><div class="about-product"><img class="about-brand-lockup" src="./assets/brand/yunspire-lockup.jpg" alt="云枢 Yunspire" /><div><strong>Yunspire Desktop</strong><small>版本 0.1.2 · macOS / Windows</small></div></div><div class="settings-section"><div class="setting-row"><div><strong>本地数据</strong><small>知识、任务、技能和操作日志均存储在本机</small></div><span class="badge neutral" data-local-health>等待桌面验证</span></div><div class="setting-row"><div><strong>软件更新</strong><small data-update-status>仅检查 GitHub 正式 Release；安装前先建立数据库与 Vault 保护点</small></div><button class="button secondary" data-check-updates>检查更新</button></div><div class="setting-row"><div><strong>安装前保护点</strong><small>建立 SQLite 在线备份和全部已连接 Obsidian Vault 快照</small></div><button class="button secondary" data-prepare-update>立即备份</button></div><div class="setting-row update-rollback-row"><div><strong>更新回滚</strong><small>回滚前会再建立安全快照；不会删除更新后新增的文件</small></div><label class="settings-select-wrap wide"><span class="sr-only">选择更新保护点</span><select class="settings-select" data-update-backup-select><option value="">正在读取保护点</option></select><i data-lucide="chevron-down"></i></label><button class="button danger" data-rollback-update disabled>回滚</button></div><div class="setting-row"><div><strong>开源许可</strong><small>导出使用的第三方软件与许可证清单</small></div><button class="button secondary" data-export-licenses>导出清单</button></div><div class="setting-row"><div><strong>诊断信息</strong><small>导出不包含知识内容的本地诊断报告</small></div><button class="button secondary" data-export-diagnostics>导出诊断</button></div></div><footer class="about-footer">© 2026 Yunspire · 隐私 · 许可 · 更新日志</footer></div>
             </section>
           </div>
         </section>
       </main>
     </section>
 
+    <aside class="r10-assistant-dock" id="r10-assistant-dock" role="dialog" aria-modal="false" aria-labelledby="r10-assistant-dock-title" aria-hidden="true" inert>
+      <header class="r10-assistant-dock-header">
+        <div class="r10-assistant-dock-identity">
+          <span class="r10-assistant-dock-avatar"><i data-lucide="sparkles"></i></span>
+          <div>
+            <strong id="r10-assistant-dock-title">AI 助手</strong>
+            <small data-r10-assistant-status>贴近当前工作，按需出现</small>
+          </div>
+        </div>
+        <div class="r10-assistant-dock-header-actions">
+          <span class="r10-assistant-local-state"><i data-lucide="shield-check"></i>本地上下文</span>
+          <button class="icon-button quiet" type="button" data-r10-assistant-close aria-label="关闭 AI 助手" title="关闭 AI 助手"><i data-lucide="x"></i></button>
+        </div>
+      </header>
+      <div class="r10-assistant-context" aria-label="当前工作上下文">
+        <span class="r10-assistant-context-icon"><i data-lucide="book-open-check"></i></span>
+        <span><small>当前上下文</small><strong data-r10-assistant-context>工作台 · 最近积累</strong></span>
+      </div>
+      <div class="r10-assistant-dock-stream" data-r10-assistant-dock-stream aria-live="polite">
+        <div data-r10-assistant-dock-empty>
+          <div class="r10-assistant-dock-intro">
+            <span class="r10-assistant-dock-intro-icon"><i data-lucide="orbit"></i></span>
+            <strong>从你正在做的事开始</strong>
+            <p data-r10-assistant-intro>我可以帮你找回一篇笔记、梳理已有连接，或把当前思路继续写下去。</p>
+          </div>
+          <div class="r10-assistant-suggestions" aria-label="AI 助手建议动作">
+            <button type="button" data-r10-assistant-suggestion="帮我找出还没有继续整理的知识。"><i data-lucide="history"></i><span>找回最近积累</span><i data-lucide="arrow-up-right"></i></button>
+            <button type="button" data-r10-assistant-suggestion="结合当前知识库，帮我梳理一条值得继续阅读的连接。"><i data-lucide="git-branch"></i><span>梳理一条连接</span><i data-lucide="arrow-up-right"></i></button>
+            <button type="button" data-r10-assistant-suggestion="根据我当前的上下文，给出一个可以继续写下去的起点。"><i data-lucide="square-pen"></i><span>继续一段创作</span><i data-lucide="arrow-up-right"></i></button>
+          </div>
+        </div>
+        <div class="r10-assistant-dock-messages" data-r10-assistant-dock-messages hidden></div>
+      </div>
+      <form class="r10-assistant-dock-composer" data-r10-assistant-dock-form>
+        <label class="sr-only" for="r10-assistant-dock-input">向 AI 助手提问</label>
+        <textarea id="r10-assistant-dock-input" data-r10-assistant-dock-input rows="2" placeholder="问问当前知识，或告诉我下一步……"></textarea>
+        <div class="r10-assistant-dock-composer-footer">
+          <span><i data-lucide="sparkles"></i>建议会保留依据，执行前需要确认</span>
+          <button class="r10-assistant-dock-send" type="submit" aria-label="发送给 AI 助手" title="发送给 AI 助手"><i data-lucide="arrow-up"></i></button>
+        </div>
+      </form>
+      <footer class="r10-assistant-dock-footer">
+        <button type="button" data-r10-assistant-open-full><span>展开完整会话</span><i data-lucide="arrow-up-right"></i></button>
+        <span>当前工作面不会被修改</span>
+      </footer>
+    </aside>
+
     <button class="task-drawer-backdrop" type="button" data-close-drawer tabindex="-1" aria-hidden="true" aria-label="关闭后台任务"></button>
     <aside class="task-drawer" id="task-drawer" role="dialog" aria-modal="true" aria-label="全局任务抽屉" aria-hidden="true" inert>
-      <div class="drawer-header"><div><strong>后台任务</strong><span>没有后台任务</span></div><button class="icon-button quiet" data-close-drawer aria-label="关闭任务抽屉" title="关闭任务抽屉"><i data-lucide="x"></i></button></div>
+      <div class="drawer-header"><div><strong>后台任务</strong><span>没有后台任务</span></div><button class="drawer-hide-button" type="button" data-close-drawer aria-label="隐藏后台任务"><i data-lucide="x"></i><span>隐藏</span></button></div>
       <div class="drawer-section"></div>
       <button class="drawer-footer" data-route-jump="audit">打开操作日志<i data-lucide="arrow-right"></i></button>
     </aside>
@@ -474,13 +841,13 @@
     <div class="modal-backdrop" id="command-modal" role="dialog" aria-modal="true">
       <section class="command-modal">
         <div class="command-input"><i data-lucide="search"></i><input id="command-input" placeholder="搜索知识或输入命令" /><kbd>Esc</kbd></div>
-        <div class="command-results"><div class="command-group-label">快速前往</div><button data-command-assistant="请帮我创建一个新的采集任务。"><i data-lucide="message-square"></i><span><strong>创建采集任务</strong><small>由AI助手分析来源并执行</small></span><kbd>⌘ P</kbd></button><button data-command-route="create"><i data-lucide="square-pen"></i><span><strong>新建笔记</strong><small>在 Obsidian 知识库中创建 Markdown</small></span><kbd>⌘ N</kbd></button><button data-command-route="agent"><i data-lucide="message-square"></i><span><strong>打开AI助手</strong><small>在当前上下文中开始对话</small></span><kbd>⌘ ⇧ A</kbd></button><div class="command-group-label">最近知识</div><div class="command-empty">在桌面应用完成本地搜索后显示真实笔记</div></div>
+        <div class="command-results"><div class="command-group-label">快速前往</div><button data-command-assistant="请帮我创建一个新的采集任务。"><i data-lucide="message-square"></i><span><strong>创建采集任务</strong><small>由AI助手分析来源并执行</small></span><kbd data-shortcut-display="capture">⌘ P</kbd></button><button data-command-route="create" data-command-action="new-note"><i data-lucide="square-pen"></i><span><strong>新建笔记</strong><small>创建新的本地草稿，保存时写入 Obsidian</small></span><kbd data-shortcut-display="newNote">⌘ N</kbd></button><button data-command-route="agent"><i data-lucide="message-square"></i><span><strong>打开AI助手</strong><small>在当前上下文中开始对话</small></span><kbd data-shortcut-display="assistant">⌘ ⇧ A</kbd></button><div class="command-group-label">最近知识</div><div class="command-empty">正在读取最近修改的本机笔记…</div></div>
       </section>
     </div>
 
     <div class="modal-backdrop model-picker-backdrop" id="model-picker-modal" role="dialog" aria-modal="true" aria-labelledby="model-picker-title">
       <section class="model-picker-modal">
-        <div class="modal-header"><div><span class="status-icon jade"><i data-lucide="list-checks"></i></span><span><strong id="model-picker-title">选择模型与用途</strong><small data-model-picker-provider></small></span></div><button class="icon-button quiet" type="button" data-close-model-picker aria-label="关闭模型选择"><i data-lucide="x"></i></button></div>
+        <div class="modal-header"><div><span class="status-icon action"><i data-lucide="list-checks"></i></span><span><strong id="model-picker-title">选择模型与用途</strong><small data-model-picker-provider></small></span></div><button class="icon-button quiet" type="button" data-close-model-picker aria-label="关闭模型选择"><i data-lucide="x"></i></button></div>
         <div class="model-picker-toolbar"><label><i data-lucide="search"></i><input type="search" data-model-picker-search placeholder="搜索模型名称或 ID" autocomplete="off" /></label><span data-model-picker-count>0 个已选</span></div>
         <div class="model-picker-list" data-model-picker-list></div>
         <div class="modal-footer"><button class="button ghost" type="button" data-close-model-picker>取消</button><button class="button primary" type="button" data-confirm-model-picker>确认选择</button></div>
@@ -500,7 +867,7 @@
     </div>
     <div class="modal-backdrop database-recovery-backdrop" id="database-recovery-modal" role="dialog" aria-modal="true" aria-labelledby="database-recovery-title">
       <section class="database-recovery-modal">
-        <div class="modal-header"><div><span class="status-icon jade"><i data-lucide="database-backup"></i></span><span><strong id="database-recovery-title">数据库恢复</strong><small data-database-recovery-status>选择一份本机备份并执行恢复预检</small></span></div><button class="icon-button quiet" type="button" data-close-database-recovery aria-label="关闭数据库恢复"><i data-lucide="x"></i></button></div>
+        <div class="modal-header"><div><span class="status-icon action"><i data-lucide="database-backup"></i></span><span><strong id="database-recovery-title">数据库恢复</strong><small data-database-recovery-status>选择一份本机备份并执行恢复预检</small></span></div><button class="icon-button quiet" type="button" data-close-database-recovery aria-label="关闭数据库恢复"><i data-lucide="x"></i></button></div>
         <div class="database-recovery-body">
           <label><span>本机备份</span><select class="settings-select" data-database-backup-select><option value="">正在读取备份…</option></select></label>
           <div class="database-preflight-result" data-database-preflight-result><i data-lucide="shield-check"></i><span><strong>尚未预检</strong><small>恢复只接受 Yunspire 备份目录中的完整 SQLite 文件。</small></span></div>
@@ -510,7 +877,7 @@
     </div>
     <div class="modal-backdrop capture-auth-backdrop" id="capture-auth-modal" role="dialog" aria-modal="true" aria-labelledby="capture-auth-title">
       <section class="capture-auth-modal">
-        <div class="modal-header"><div><span class="status-icon jade"><i data-lucide="shield-check"></i></span><span><strong id="capture-auth-title">来源授权</strong></span></div><button class="icon-button quiet" data-close-capture-auth aria-label="关闭授权窗口" title="关闭"><i data-lucide="x"></i></button></div>
+        <div class="modal-header"><div><span class="status-icon action"><i data-lucide="shield-check"></i></span><span><strong id="capture-auth-title">来源授权</strong></span></div><button class="icon-button quiet" data-close-capture-auth aria-label="关闭授权窗口" title="关闭"><i data-lucide="x"></i></button></div>
         <div class="capture-auth-body">
           <div class="capture-auth-steps"><div><b>1</b><span><strong>进入平台官方页面</strong><small>由你亲自登录并完成人机验证，云枢不读取账号或密码</small></span><button class="button secondary small" type="button" data-open-official-login><i data-lucide="external-link"></i>打开页面</button></div><div><b>2</b><span><strong>提供临时授权</strong><small>使用平台官方令牌，或从本人合法登录会话导出的临时 Cookie</small></span></div><div><b>3</b><span><strong>限定范围后执行</strong><small>凭据只驻留内存、绑定完整网址，使用一次后立即销毁</small></span></div></div>
           <div class="capture-auth-form">
@@ -528,25 +895,25 @@
       </section>
     </div>
     <div class="modal-backdrop classification-backdrop" id="classification-modal" role="dialog" aria-modal="true" aria-labelledby="classification-title">
-      <section class="classification-popover"><div class="modal-header"><div><span class="status-icon jade"><i data-lucide="tags"></i></span><span><strong id="classification-title">AI助手自动分类</strong><small>依据当前 Obsidian Vault 的目录和内容语义</small></span></div><button class="icon-button quiet" data-close-modal aria-label="关闭"><i data-lucide="x"></i></button></div><div class="classification-body"><div class="auto-classification-status" data-classification-status><i data-lucide="loader-circle"></i><span><strong>正在分析内容与知识库结构</strong><small>读取当前 Vault 的目录、标签、相似笔记和既有归档规则</small></span></div><div class="auto-classification-result" data-classification-result hidden><div class="auto-classification-vault"><span>当前知识库</span><strong data-classification-vault>未选择知识库</strong></div><div class="auto-classification-signals"><span><i data-lucide="folder-search"></i>匹配现有目录</span><span><i data-lucide="link-2"></i>检查关联笔记</span><span><i data-lucide="tags"></i>复用既有标签</span></div><div class="auto-classification-decision"><span>自动分类结果</span><div data-classification-tags></div><small data-classification-reason></small></div><dl><div><dt>关联方式</dt><dd data-classification-mode-result>单个分类</dd></div><div><dt>目标目录</dt><dd data-classification-target>未生成</dd></div><div><dt>置信度</dt><dd data-classification-confidence>未计算</dd></div></dl><div class="data-notice"><i data-lucide="shield-check"></i><span>只有真实分类执行器返回结果后才会应用元数据，不会改变系统指令或权限。</span></div></div></div><div class="modal-footer"><button class="button ghost" data-close-modal>完成</button><button class="button secondary" data-rerun-classification><i data-lucide="rotate-cw"></i>重新分析</button></div></section>
+      <section class="classification-popover"><div class="modal-header"><div><span class="status-icon action"><i data-lucide="tags"></i></span><span><strong id="classification-title">自动分类建议</strong><small>优先使用真实模型回执，不可用时明确降级为本地规则</small></span></div><button class="icon-button quiet" data-close-modal aria-label="关闭"><i data-lucide="x"></i></button></div><div class="classification-body"><div class="auto-classification-status" data-classification-status><i data-lucide="loader-circle"></i><span><strong>正在读取真实分类信号</strong><small>目录、相似笔记和内容信号仅在实际读取成功后提供给模型</small></span></div><div class="auto-classification-result" data-classification-result hidden><div class="auto-classification-vault"><span>当前知识库</span><strong data-classification-vault>未选择知识库</strong></div><div class="auto-classification-signals"><span><i data-lucide="folder-search"></i>目录信号</span><span><i data-lucide="link-2"></i>相似笔记信号</span><span><i data-lucide="tags"></i>来源与标签信号</span></div><div class="auto-classification-decision"><span>自动分类结果</span><div data-classification-tags></div><small data-classification-reason></small></div><dl><div><dt>关联方式</dt><dd data-classification-mode-result>单个分类</dd></div><div><dt>目标目录</dt><dd data-classification-target>未生成</dd></div><div><dt>置信度</dt><dd data-classification-confidence>未计算</dd></div></dl><div class="data-notice"><i data-lucide="shield-check"></i><span>模型结果会保存其 category、confidence 和 evidence；本地规则降级不会显示 AI 置信度。</span></div></div></div><div class="modal-footer"><button class="button ghost" data-close-modal>完成</button><button class="button secondary" data-rerun-classification><i data-lucide="rotate-cw"></i>重新分析</button></div></section>
     </div>
     <div class="modal-backdrop version-history-backdrop" id="version-history-modal" role="dialog" aria-modal="true" aria-labelledby="version-history-title">
       <section class="version-history-modal">
-        <div class="modal-header"><div><span class="status-icon jade"><i data-lucide="history"></i></span><span><strong id="version-history-title">版本历史</strong><small data-version-history-subtitle>本地草稿版本</small></span></div><button class="icon-button quiet" data-close-modal aria-label="关闭版本历史"><i data-lucide="x"></i></button></div>
+        <div class="modal-header"><div><span class="status-icon action"><i data-lucide="history"></i></span><span><strong id="version-history-title">版本历史</strong><small data-version-history-subtitle>本地草稿版本</small></span></div><button class="icon-button quiet" data-close-modal aria-label="关闭版本历史"><i data-lucide="x"></i></button></div>
         <div class="version-history-list" data-version-history-list></div>
         <div class="modal-footer"><button class="button ghost" data-close-modal>关闭</button></div>
       </section>
     </div>
     <div class="modal-backdrop version-history-backdrop" id="capture-history-modal" role="dialog" aria-modal="true" aria-labelledby="capture-history-title">
       <section class="version-history-modal">
-        <div class="modal-header"><div><span class="status-icon jade"><i data-lucide="file-text"></i></span><span><strong id="capture-history-title">采集结果</strong><small data-capture-history-subtitle>真实运行记录</small></span></div><button class="icon-button quiet" data-close-modal aria-label="关闭采集结果"><i data-lucide="x"></i></button></div>
+        <div class="modal-header"><div><span class="status-icon action"><i data-lucide="file-text"></i></span><span><strong id="capture-history-title">采集结果</strong><small data-capture-history-subtitle>真实运行记录</small></span></div><button class="icon-button quiet" data-close-modal aria-label="关闭采集结果"><i data-lucide="x"></i></button></div>
         <div class="version-history-list" data-capture-history-details></div>
         <div class="modal-footer"><button class="button ghost" data-close-modal>关闭</button></div>
       </section>
     </div>
     <div class="modal-backdrop conversation-name-backdrop" id="conversation-name-modal" role="dialog" aria-modal="true" aria-labelledby="conversation-name-title">
       <section class="conversation-name-modal">
-        <div class="modal-header"><div><span class="status-icon jade"><i data-lucide="pencil-line"></i></span><span><strong id="conversation-name-title">自定义对话名称</strong><small>名称会显示在 AI助手的对话列表和页面标题中</small></span></div><button class="icon-button quiet" type="button" data-close-modal aria-label="关闭对话命名"><i data-lucide="x"></i></button></div>
+        <div class="modal-header"><div><span class="status-icon action"><i data-lucide="pencil-line"></i></span><span><strong id="conversation-name-title">自定义对话名称</strong><small>名称会显示在 AI助手的对话列表和页面标题中</small></span></div><button class="icon-button quiet" type="button" data-close-modal aria-label="关闭对话命名"><i data-lucide="x"></i></button></div>
         <form class="conversation-name-form" data-conversation-name-form>
           <label><span>对话名称</span><input data-conversation-name-input maxlength="80" autocomplete="off" required /></label>
           <div class="modal-footer"><button class="button ghost" type="button" data-close-modal>取消</button><button class="button primary" type="submit">保存名称</button></div>
@@ -555,7 +922,7 @@
     </div>
     <div class="modal-backdrop note-viewer-backdrop" id="note-viewer-modal" role="dialog" aria-modal="true" aria-labelledby="note-viewer-title">
       <section class="note-viewer-modal">
-        <header class="note-viewer-header"><div><span class="status-icon jade"><i data-lucide="book-open-check"></i></span><span><strong id="note-viewer-title">尚未读取笔记</strong><small><span data-note-viewer-vault>本机 Obsidian</span> · <span class="mono" data-note-viewer-path>未选择路径</span></small></span></div><div class="note-viewer-status"><span class="badge neutral"><i data-lucide="eye"></i>只读查看</span><button class="icon-button quiet" data-close-modal aria-label="关闭笔记"><i data-lucide="x"></i></button></div></header>
+        <header class="note-viewer-header"><div><span class="status-icon action"><i data-lucide="book-open-check"></i></span><span><strong id="note-viewer-title">尚未读取笔记</strong><small><span data-note-viewer-vault>本机 Obsidian</span> · <span class="mono" data-note-viewer-path>未选择路径</span></small></span></div><div class="note-viewer-status"><span class="badge neutral"><i data-lucide="eye"></i>只读查看</span><button class="icon-button quiet" data-close-modal aria-label="关闭笔记"><i data-lucide="x"></i></button></div></header>
         <div class="note-viewer-body"><aside class="note-viewer-properties"><h3>笔记属性</h3><dl><div><dt>类型</dt><dd data-note-viewer-type>未读取</dd></div><div><dt>作者</dt><dd>未读取</dd></div><div><dt>采集时间</dt><dd>未读取</dd></div><div><dt>状态</dt><dd>未读取</dd></div><div><dt>标签</dt><dd data-note-viewer-tags>未读取</dd></div></dl><div class="readonly-notice"><i data-lucide="shield-check"></i><span><strong>只读模式</strong><small>此处仅显示 Obsidian 笔记内容，不提供编辑、保存或写入能力。</small></span></div></aside><article class="note-document" data-note-viewer-content></article></div>
         <footer class="note-viewer-footer"><span><i data-lucide="database"></i>内容读取自当前 Obsidian Vault</span><div class="note-viewer-actions"><button class="button secondary" data-close-modal>关闭</button><button class="button primary" type="button" data-open-in-obsidian aria-label="在 Obsidian 中打开当前笔记" title="在 Obsidian 中打开"><i data-lucide="external-link"></i>在 Obsidian 中打开</button></div></footer>
       </section>
@@ -572,7 +939,7 @@
             <article><i data-lucide="cpu"></i><span><strong>模型与网络连接</strong><small>仅在实际功能需要时使用你配置的模型供应商、采集来源和外部连接器。</small></span></article>
             <article><i data-lucide="calendar-clock"></i><span><strong>后台任务</strong><small>运行你创建的定时采集、报告和本地维护任务。</small></span></article>
           </div>
-          <div class="application-authorization-os-note"><i data-lucide="info"></i><span><strong>不代替操作系统权限</strong><small>文件、麦克风、屏幕录制等由 macOS、Windows 或 Linux 管理的权限，仍会在使用对应功能时由系统依法单独请求。</small></span></div>
+          <div class="application-authorization-os-note"><i data-lucide="info"></i><span><strong>不代替操作系统权限</strong><small>文件、麦克风、屏幕录制等由 macOS 或 Windows 管理的权限，仍会在使用对应功能时由系统单独请求。</small></span></div>
         </div>
         <footer class="onboarding-actions application-authorization-actions"><button type="button" class="button ghost" data-decline-application-authorization>暂不授权</button><button type="button" class="button ghost" data-close-application-authorization>关闭</button><span></span><button type="button" class="button primary" data-accept-application-authorization>同意并继续</button></footer>
       </section>
@@ -580,25 +947,23 @@
 
     <div class="modal-backdrop onboarding-backdrop" id="onboarding-modal" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" hidden>
       <section class="onboarding-modal">
-        <header class="onboarding-header"><img src="./assets/brand/yunspire-symbol.png" alt="云枢" /><div><span>欢迎使用</span><strong id="onboarding-title">开始认识云枢</strong></div><b data-onboarding-progress>1 / 5</b></header>
+        <header class="onboarding-header"><img src="./assets/brand/yunspire-symbol.png" alt="云枢" /><div><span>欢迎使用</span><strong id="onboarding-title">开始认识云枢</strong></div><b data-onboarding-progress>1 / 3</b></header>
         <div class="onboarding-steps">
-          <article data-onboarding-step="0"><span class="onboarding-feature-icon"><i data-lucide="message-square"></i></span><small>特点 01</small><h2>AI助手统一操作入口</h2><p>在一个对话窗口里交流、分析意图并调用云枢功能，任务会持续运行到产生真实结果。</p></article>
-          <article data-onboarding-step="1" hidden><span class="onboarding-feature-icon"><i data-lucide="database"></i></span><small>特点 02</small><h2>Obsidian 本地知识数据库</h2><p>笔记与附件长期保存在本机 Obsidian Vault，云枢负责读取、整理、写入和维护。</p></article>
-          <article data-onboarding-step="2" hidden><span class="onboarding-feature-icon"><i data-lucide="files"></i></span><small>特点 03</small><h2>多格式内容自动分析</h2><p>链接、文件、文件夹、图片和音视频先由模型理解，再按工作流整理并进入指定知识库。</p></article>
-          <article data-onboarding-step="3" hidden><span class="onboarding-feature-icon"><i data-lucide="calendar-clock"></i></span><small>特点 04</small><h2>定时采集与后台任务</h2><p>通过 AI助手创建定时采集、报告和长期任务，在任务页查看真实进度，在操作日志追踪结果。</p></article>
-          <article data-onboarding-step="4" hidden><span class="onboarding-feature-icon"><i data-lucide="shield-check"></i></span><small>特点 05</small><h2>本地优先，可审计可恢复</h2><p>外部内容始终按不可信数据处理；关键操作保留记录、检查点和恢复路径。</p></article>
+          <article data-onboarding-step="0"><span class="onboarding-feature-icon"><i data-lucide="library-big"></i></span><h2>从你的知识开始</h2><p>选择一个本机 Obsidian Vault。笔记与附件仍由你保管，云枢只在明确操作时读取或写入。</p></article>
+          <article data-onboarding-step="1" hidden><span class="onboarding-feature-icon"><i data-lucide="book-open-check"></i></span><h2>回到上次停下的地方</h2><p>工作台先呈现可以继续的阅读、草稿和需要你判断的本机记录，不用活跃度或指标制造负担。</p></article>
+          <article data-onboarding-step="2" hidden><span class="onboarding-feature-icon"><i data-lucide="sparkles"></i></span><h2>需要时再打开助手</h2><p>助手贴近当前阅读、创作或采集任务工作；重要变化保留依据、确认和恢复路径。</p></article>
         </div>
-        <div class="onboarding-dots" aria-label="引导进度"><i></i><i></i><i></i><i></i><i></i></div>
+        <div class="onboarding-dots" aria-label="引导进度"><i></i><i></i><i></i></div>
         <footer class="onboarding-actions"><button type="button" class="button ghost" data-onboarding-skip>跳过</button><span></span><button type="button" class="button secondary" data-onboarding-previous disabled>上一步</button><button type="button" class="button primary" data-onboarding-next>下一步</button></footer>
       </section>
     </div>
     <div class="modal-backdrop assistant-setup-backdrop" id="assistant-setup-modal" role="dialog" aria-modal="true" aria-labelledby="assistant-setup-title" hidden>
       <section class="assistant-setup-modal">
-        <div class="modal-header"><div><span class="status-icon jade"><i data-lucide="sparkles"></i></span><span><strong id="assistant-setup-title">设置你的 AI助手</strong><small>这些偏好只影响回复方式，不改变系统权限</small></span></div></div>
+        <div class="modal-header"><div><span class="status-icon action"><i data-lucide="sparkles"></i></span><span><strong id="assistant-setup-title">设置你的 AI助手</strong><small>这些偏好只影响回复方式，不改变系统权限</small></span></div></div>
         <form class="assistant-setup-form" data-assistant-setup-form>
           <label><span>助手名称</span><input data-assistant-setup-name maxlength="48" placeholder="AI助手" /></label>
           <label><span>回复语言</span><select class="settings-select" data-assistant-setup-language><option value="简体中文">简体中文</option><option value="繁體中文">繁體中文</option><option value="English">English</option></select></label>
-          <fieldset class="assistant-avatar-field span-2"><legend>助手头像</legend><div class="assistant-avatar-picker" data-assistant-avatar-picker role="radiogroup" aria-label="选择 AI助手 Emoji 头像"><button type="button" data-assistant-avatar="🧭" aria-label="指南针">🧭</button><button type="button" data-assistant-avatar="✨" aria-label="闪光">✨</button><button type="button" data-assistant-avatar="🧠" aria-label="大脑">🧠</button><button type="button" data-assistant-avatar="💡" aria-label="灯泡">💡</button><button type="button" data-assistant-avatar="🗂️" aria-label="资料夹">🗂️</button><button type="button" data-assistant-avatar="📝" aria-label="笔记">📝</button><button type="button" data-assistant-avatar="🔎" aria-label="搜索">🔎</button><button type="button" data-assistant-avatar="📚" aria-label="书籍">📚</button><button type="button" data-assistant-avatar="🧩" aria-label="拼图">🧩</button><button type="button" data-assistant-avatar="⚙️" aria-label="设置">⚙️</button><button type="button" data-assistant-avatar="🌱" aria-label="成长">🌱</button><button type="button" data-assistant-avatar="☁️" aria-label="云">☁️</button></div></fieldset>
+          <fieldset class="assistant-avatar-field span-2"><legend>助手图标</legend><div class="assistant-avatar-picker" data-assistant-avatar-picker role="radiogroup" aria-label="选择 AI助手图标"><button type="button" role="radio" data-assistant-avatar="compass" aria-label="指南针"><i data-lucide="compass"></i></button><button type="button" role="radio" data-assistant-avatar="sparkles" aria-label="星光"><i data-lucide="sparkles"></i></button><button type="button" role="radio" data-assistant-avatar="brain" aria-label="思考"><i data-lucide="brain"></i></button><button type="button" role="radio" data-assistant-avatar="lightbulb" aria-label="灵感"><i data-lucide="lightbulb"></i></button><button type="button" role="radio" data-assistant-avatar="folder-archive" aria-label="资料"><i data-lucide="folder-archive"></i></button><button type="button" role="radio" data-assistant-avatar="notebook-pen" aria-label="笔记"><i data-lucide="notebook-pen"></i></button><button type="button" role="radio" data-assistant-avatar="search" aria-label="搜索"><i data-lucide="search"></i></button><button type="button" role="radio" data-assistant-avatar="library-big" aria-label="知识库"><i data-lucide="library-big"></i></button><button type="button" role="radio" data-assistant-avatar="puzzle" aria-label="连接"><i data-lucide="puzzle"></i></button><button type="button" role="radio" data-assistant-avatar="settings-2" aria-label="偏好"><i data-lucide="settings-2"></i></button><button type="button" role="radio" data-assistant-avatar="orbit" aria-label="成长轨迹"><i data-lucide="orbit"></i></button><button type="button" role="radio" data-assistant-avatar="cloud" aria-label="云枢"><i data-lucide="cloud"></i></button></div></fieldset>
           <label class="span-2"><span>回复风格</span><select class="settings-select" data-assistant-setup-style><option value="清晰、克制、直接">清晰、克制、直接</option><option value="温和、耐心、循序渐进">温和、耐心、循序渐进</option><option value="专业、简洁、偏技术细节">专业、简洁、偏技术细节</option><option value="像项目管家一样主动、结构化">像项目管家一样主动、结构化</option></select></label>
           <label class="span-2"><span>自定义补充</span><textarea data-assistant-setup-custom rows="3" maxlength="240" placeholder="例如：先给结论，再列出依据和下一步动作"></textarea></label>
           <div class="assistant-setup-actions span-2"><button type="button" class="button ghost" data-assistant-setup-skip>稍后设置</button><button type="submit" class="button primary">开始使用</button></div>

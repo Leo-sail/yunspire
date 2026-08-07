@@ -1,0 +1,75 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "template",
+  "catalogVersion": "0.4.0",
+  "id": "data-analysis-report",
+  "version": "1.0.0",
+  "displayName": "数据分析报告",
+  "description": "以问题、数据、分析、可视化和决策建议连接一份分析工作。",
+  "status": "active",
+  "contentType": "paper",
+  "artifactType": "dashboard",
+  "tags": [
+    "论文",
+    "数据分析",
+    "决策",
+    "原创模板",
+    "本地知识库"
+  ],
+  "inputFormats": [
+    "plainText",
+    "markdown",
+    "docx",
+    "xlsx",
+    "pdf",
+    "json",
+    "csv",
+    "tsv"
+  ],
+  "outputFormats": [
+    "markdown",
+    "html",
+    "pdf"
+  ],
+  "entrypoint": "data-analysis-report/template.md",
+  "files": [
+    {
+      "path": "data-analysis-report/template.md",
+      "kind": "markdown",
+      "editable": true,
+      "contentHash": "sha256:d3da4dc8537749f48758fdb86db82779424a0d77a10fc18b5e0e1a99b8b464be"
+    }
+  ],
+  "editableSurfaces": [
+    "content",
+    "data"
+  ],
+  "agentCapabilities": [
+    "creation.generate",
+    "creation.edit"
+  ],
+  "sandbox": {
+    "network": false,
+    "shell": false,
+    "vaultWrite": false,
+    "allowTopNavigation": false,
+    "allowPopups": false,
+    "allowExternalScripts": false
+  },
+  "compatibility": {
+    "minRuntimeVersion": "0.1.2",
+    "previewMode": "sandboxedIframe"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This template is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire template manifest and Markdown entrypoint; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

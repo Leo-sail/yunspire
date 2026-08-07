@@ -32,6 +32,8 @@
 # Dependencies and generated output
 /node_modules/
 /dist/
+/storybook-static/
+/desktop-ui/generated/
 /src-tauri/target/
 /src-tauri/gen/
 /release/

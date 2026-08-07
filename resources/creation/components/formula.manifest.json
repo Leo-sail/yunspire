@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "component",
+  "catalogVersion": "0.4.0",
+  "id": "formula",
+  "version": "1.0.0",
+  "displayName": "公式卡",
+  "description": "集中展示公式、变量定义和代入示例，适合教学或论文。",
+  "status": "active",
+  "category": "information",
+  "legacyIds": [],
+  "blockKind": "container",
+  "slots": [
+    {
+      "id": "body",
+      "kind": "richText",
+      "required": true,
+      "maxLength": 4000
+    }
+  ],
+  "semantics": {
+    "role": "figure",
+    "ariaLabel": "公式卡",
+    "markdownFallback": "paragraphs"
+  },
+  "constraints": {
+    "minItems": 1,
+    "maxItems": 1,
+    "allowNestedComponents": false,
+    "spanLeaf": true,
+    "allowScripts": false,
+    "allowExternalStyles": false
+  },
+  "templateMarkdown": "### 公式卡\n\n**公式表达：** [填写基于本地知识库的内容]\n\n**变量定义：** [填写基于本地知识库的内容]\n\n**限制条件：** [填写基于本地知识库的内容]\n\n**来源：** [[替换为实际笔记标题]]",
+  "renderers": {
+    "markdown": "creation.component.formula.markdown.v1",
+    "html": "creation.component.formula.html.v1",
+    "wechatRichText": "creation.component.formula.wechat.v1"
+  },
+  "compatibility": {
+    "targets": [
+      "markdown",
+      "html",
+      "wechatRichText"
+    ],
+    "minRuntimeVersion": "0.1.2"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This component is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire component manifest and Markdown block; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

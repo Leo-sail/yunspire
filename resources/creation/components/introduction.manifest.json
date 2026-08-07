@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "component",
+  "catalogVersion": "0.4.0",
+  "id": "introduction",
+  "version": "1.0.0",
+  "displayName": "引言组件",
+  "description": "交代研究背景、文章范围和读者进入正文前需要知道的边界。",
+  "status": "active",
+  "category": "structure",
+  "legacyIds": [],
+  "blockKind": "container",
+  "slots": [
+    {
+      "id": "body",
+      "kind": "richText",
+      "required": true,
+      "maxLength": 4000
+    }
+  ],
+  "semantics": {
+    "role": "note",
+    "ariaLabel": "引言组件",
+    "markdownFallback": "paragraphs"
+  },
+  "constraints": {
+    "minItems": 1,
+    "maxItems": 1,
+    "allowNestedComponents": false,
+    "spanLeaf": true,
+    "allowScripts": false,
+    "allowExternalStyles": false
+  },
+  "templateMarkdown": "### 引言组件\n\n**讨论背景：** [填写基于本地知识库的内容]\n\n**覆盖范围：** [填写基于本地知识库的内容]\n\n**阅读提示：** [填写基于本地知识库的内容]\n\n**来源：** [[替换为实际笔记标题]]",
+  "renderers": {
+    "markdown": "creation.component.introduction.markdown.v1",
+    "html": "creation.component.introduction.html.v1",
+    "wechatRichText": "creation.component.introduction.wechat.v1"
+  },
+  "compatibility": {
+    "targets": [
+      "markdown",
+      "html",
+      "wechatRichText"
+    ],
+    "minRuntimeVersion": "0.1.2"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This component is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire component manifest and Markdown block; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}
