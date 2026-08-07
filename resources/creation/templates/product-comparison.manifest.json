@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "template",
+  "catalogVersion": "0.4.0",
+  "id": "product-comparison",
+  "version": "1.0.0",
+  "displayName": "产品对比",
+  "description": "用统一标准比较产品能力、成本和适用场景，避免只看功能列表。",
+  "status": "active",
+  "contentType": "article",
+  "artifactType": "presentation",
+  "tags": [
+    "产品",
+    "对比",
+    "评测",
+    "原创模板",
+    "本地知识库"
+  ],
+  "inputFormats": [
+    "plainText",
+    "markdown",
+    "docx",
+    "pdf"
+  ],
+  "outputFormats": [
+    "markdown",
+    "html"
+  ],
+  "entrypoint": "product-comparison/template.md",
+  "files": [
+    {
+      "path": "product-comparison/template.md",
+      "kind": "markdown",
+      "editable": true,
+      "contentHash": "sha256:830daa7959979a85d6d2a36597b8a31cd4036a9eb94309d291fbb72dd0e3e486"
+    }
+  ],
+  "editableSurfaces": [
+    "content"
+  ],
+  "agentCapabilities": [
+    "creation.generate",
+    "creation.edit"
+  ],
+  "sandbox": {
+    "network": false,
+    "shell": false,
+    "vaultWrite": false,
+    "allowTopNavigation": false,
+    "allowPopups": false,
+    "allowExternalScripts": false
+  },
+  "compatibility": {
+    "minRuntimeVersion": "0.1.2",
+    "previewMode": "sandboxedIframe"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This template is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire template manifest and Markdown entrypoint; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

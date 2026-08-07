@@ -1,0 +1,132 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "theme",
+  "catalogVersion": "0.4.0",
+  "id": "coral-brief",
+  "version": "1.0.0",
+  "displayName": "珊简·简报",
+  "description": "面向管理简报和结论先行的业务摘要，以温和珊红建立清晰层级、稳定阅读节奏和可复用的原创排版规则。",
+  "status": "active",
+  "category": "report",
+  "tags": [
+    "简报",
+    "温和珊红",
+    "多端候选"
+  ],
+  "legacyIds": [],
+  "palette": {
+    "accent": "#b44744",
+    "accentSoft": "#f6e9e9",
+    "text": "#3b2928",
+    "muted": "#8d8382",
+    "border": "#f0dada",
+    "quote": "#faf2f2",
+    "heading": "#6f2524",
+    "background": "#fdfafa"
+  },
+  "typography": {
+    "defaultFamily": "sans",
+    "fallbackStack": "-apple-system,BlinkMacSystemFont,\"PingFang SC\",\"Microsoft YaHei\",sans-serif",
+    "baseSize": 15,
+    "lineHeight": 1.65,
+    "headingWeight": 700,
+    "bodyWeight": 400
+  },
+  "spacing": {
+    "paragraph": 12,
+    "section": 24,
+    "pageX": 18,
+    "pageY": 20
+  },
+  "features": {
+    "autoNumbering": true,
+    "keywordUnderline": false,
+    "tableOfContents": true,
+    "introduction": false,
+    "signature": false,
+    "spanLeaf": false,
+    "cjkSpacing": true,
+    "externalLinkFootnotes": true
+  },
+  "supportedComponentIds": [
+    "lead",
+    "quote",
+    "notice",
+    "steps",
+    "metrics",
+    "compare",
+    "dialogue",
+    "timeline",
+    "divider",
+    "cta",
+    "outline",
+    "abstract",
+    "key-points",
+    "contents",
+    "introduction",
+    "conclusion",
+    "section-summary",
+    "executive-summary",
+    "premise",
+    "definition",
+    "context",
+    "evidence",
+    "source-note",
+    "fact-check",
+    "warning",
+    "tip",
+    "example",
+    "case-study",
+    "faq",
+    "checklist",
+    "decision-matrix",
+    "pros-cons",
+    "before-after",
+    "process",
+    "milestone",
+    "schedule",
+    "roadmap",
+    "chronology",
+    "interview",
+    "debate",
+    "testimonial",
+    "figure",
+    "image-gallery",
+    "cover-card",
+    "infographic",
+    "video-card",
+    "data-table",
+    "formula",
+    "code-snippet",
+    "footnotes",
+    "author-signature",
+    "related-reading",
+    "next-steps"
+  ],
+  "renderers": {
+    "markdown": "creation.theme.coral-brief.markdown.v1",
+    "html": "creation.theme.coral-brief.html.v1",
+    "wechatRichText": "creation.theme.coral-brief.wechat.v1"
+  },
+  "compatibility": {
+    "targets": [
+      "markdown",
+      "html",
+      "wechatRichText"
+    ],
+    "wechatCertification": "candidate",
+    "minRuntimeVersion": "0.1.2"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This theme is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire theme manifest and rendering tokens; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

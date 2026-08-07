@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "template",
+  "catalogVersion": "0.4.0",
+  "id": "wechat-case-study",
+  "version": "1.0.0",
+  "displayName": "公众号案例",
+  "description": "用故事开场、证据展开和复盘收束，呈现一次真实实践。",
+  "status": "active",
+  "contentType": "wechat",
+  "artifactType": "wechatArticle",
+  "tags": [
+    "公众号",
+    "案例",
+    "复盘",
+    "原创模板",
+    "本地知识库"
+  ],
+  "inputFormats": [
+    "plainText",
+    "markdown",
+    "docx",
+    "pdf"
+  ],
+  "outputFormats": [
+    "markdown",
+    "html"
+  ],
+  "entrypoint": "wechat-case-study/template.md",
+  "files": [
+    {
+      "path": "wechat-case-study/template.md",
+      "kind": "markdown",
+      "editable": true,
+      "contentHash": "sha256:967f8aa633b0a9495d27b00f5a39994b3d47d81cf1d99853d92ad9d86923f1a8"
+    }
+  ],
+  "editableSurfaces": [
+    "content"
+  ],
+  "agentCapabilities": [
+    "creation.generate",
+    "creation.edit"
+  ],
+  "sandbox": {
+    "network": false,
+    "shell": false,
+    "vaultWrite": false,
+    "allowTopNavigation": false,
+    "allowPopups": false,
+    "allowExternalScripts": false
+  },
+  "compatibility": {
+    "minRuntimeVersion": "0.1.2",
+    "previewMode": "sandboxedIframe"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This template is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire template manifest and Markdown entrypoint; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

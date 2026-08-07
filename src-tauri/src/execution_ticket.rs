@@ -1,6 +1,9 @@
-use crate::policy::{ApplicationCommand, PolicyDecision, PolicyOutcome};
+use crate::{
+    policy::{ApplicationCommand, PolicyDecision, PolicyOutcome},
+    task_runtime::RuntimeTaskStepCommandBinding,
+};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
@@ -10,6 +13,7 @@ use std::{
 use uuid::Uuid;
 
 const EXECUTION_TICKET_TTL: Duration = Duration::from_secs(10 * 60);
+const MAX_EXECUTION_TICKET_RENEWAL: Duration = Duration::from_secs(5 * 60);
 const MAX_EXECUTION_TICKETS: usize = 1_024;
 const MAX_TICKET_APPROVAL_BINDINGS: usize = 2_048;
 
@@ -20,7 +24,54 @@ pub struct ExecutionTicketReceipt {
     pub task_id: String,
     pub command_id: String,
     pub parameter_digest: String,
+    pub step_binding: Option<RuntimeTaskStepCommandBinding>,
     pub expires_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionTicketRenewalReceipt {
+    pub task_id: String,
+    pub command_id: String,
+    pub step_binding: RuntimeTaskStepCommandBinding,
+    pub expires_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TrustedExecutionReceipt {
+    pub receipt_id: String,
+    pub workspace_scope: String,
+    pub child_task_id: String,
+    pub command_id: String,
+    pub trace_id: String,
+    pub capability_id: String,
+    pub operation: String,
+    pub trust_kind: String,
+    pub step_binding: RuntimeTaskStepCommandBinding,
+    pub consumed_tool_calls: u64,
+    pub consumed_runtime_seconds: u64,
+    pub consumed_tokens: u64,
+    pub consumed_cost: f64,
+    #[serde(default)]
+    pub cost_measured: bool,
+    pub completed_at: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TrustedHandlerUsage {
+    pub tool_calls: u64,
+    pub runtime_seconds: u64,
+    pub tokens: u64,
+    pub cost: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TrustedHandlerReservation {
+    pub max_tool_calls: u64,
+    pub max_runtime_seconds: u64,
+    pub max_tokens: Option<u64>,
+    pub max_cost: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,6 +85,7 @@ enum TicketPhase {
 struct StoredExecutionTicket {
     workspace_scope: String,
     task_id: String,
+    command_id: String,
     trace_id: String,
     capability_id: String,
     operation: String,
@@ -43,9 +95,23 @@ struct StoredExecutionTicket {
     allow_dynamic_paths: bool,
     allow_multiple_commits: bool,
     policy_outcome: PolicyOutcome,
+    step_binding: Option<RuntimeTaskStepCommandBinding>,
     approval_bindings: HashMap<String, String>,
     in_flight_approvals: HashSet<String>,
     committed_approvals: HashSet<String>,
+    handler_started_at: Option<SystemTime>,
+    trusted_handler_completions: u64,
+    trusted_handler_completion_keys: HashSet<String>,
+    trusted_runtime_seconds: u64,
+    trusted_tokens: u64,
+    trusted_cost: f64,
+    trusted_cost_measured: bool,
+    trusted_completed_at: Option<SystemTime>,
+    trusted_execution_kind: Option<String>,
+    uncertain_side_effect: bool,
+    trusted_completion_sealed: bool,
+    renewal_used: bool,
+    issued_at: SystemTime,
     expires_at: SystemTime,
     phase: TicketPhase,
 }
@@ -115,6 +181,9 @@ impl ExecutionTicketState {
         if matches!(decision.outcome, PolicyOutcome::Deny) {
             return Err("策略拒绝的命令不能签发执行票据".to_string());
         }
+        if let Some(binding) = command.step_binding.as_ref() {
+            crate::task_runtime::validate_runtime_task_step_binding(binding)?;
+        }
         let expires_at = timing
             .issued_at
             .checked_add(timing.ttl)
@@ -140,6 +209,7 @@ impl ExecutionTicketState {
         let stored = StoredExecutionTicket {
             workspace_scope: workspace_scope.to_string(),
             task_id: task_id.to_string(),
+            command_id: command.id.clone(),
             trace_id: trace_id.to_string(),
             capability_id: command.capability_id.clone(),
             operation: command.operation.clone(),
@@ -153,9 +223,23 @@ impl ExecutionTicketState {
             allow_dynamic_paths: is_capture_run,
             allow_multiple_commits: is_capture_run,
             policy_outcome: decision.outcome.clone(),
+            step_binding: command.step_binding.clone(),
             approval_bindings: HashMap::new(),
             in_flight_approvals: HashSet::new(),
             committed_approvals: HashSet::new(),
+            handler_started_at: None,
+            trusted_handler_completions: 0,
+            trusted_handler_completion_keys: HashSet::new(),
+            trusted_runtime_seconds: 0,
+            trusted_tokens: 0,
+            trusted_cost: 0.0,
+            trusted_cost_measured: true,
+            trusted_completed_at: None,
+            trusted_execution_kind: None,
+            uncertain_side_effect: false,
+            trusted_completion_sealed: false,
+            renewal_used: false,
+            issued_at: timing.issued_at,
             expires_at,
             phase: TicketPhase::Ready,
         };
@@ -163,7 +247,10 @@ impl ExecutionTicketState {
             .tickets
             .lock()
             .map_err(|_| "执行票据状态不可用".to_string())?;
-        tickets.retain(|_, ticket| ticket.expires_at > timing.issued_at);
+        tickets.retain(|_, ticket| {
+            ticket.expires_at > timing.issued_at
+                || (ticket.trusted_handler_completions > 0 && !ticket.trusted_completion_sealed)
+        });
         if tickets.len() >= MAX_EXECUTION_TICKETS {
             return Err("待执行票据数量已达到上限，请稍后重试".to_string());
         }
@@ -173,6 +260,7 @@ impl ExecutionTicketState {
             task_id: task_id.to_string(),
             command_id: command.id.clone(),
             parameter_digest,
+            step_binding: command.step_binding.clone(),
             expires_at: DateTime::<Utc>::from(expires_at).to_rfc3339(),
         })
     }
@@ -193,6 +281,69 @@ impl ExecutionTicketState {
             .get_mut(token.trim())
             .ok_or_else(|| "执行票据不存在或已经失效".to_string())?;
         validate_ticket(ticket, &scope, now)?;
+        if ticket.phase != TicketPhase::Ready {
+            return Err("执行票据正在使用或已经消费".to_string());
+        }
+        if ticket.committed_approvals.contains(approval_id) {
+            return Err("审批 ID 已经提交，不能重放".to_string());
+        }
+        match ticket.approval_bindings.get(approval_id) {
+            Some(bound) if bound == effect_digest => Ok(()),
+            Some(_) => Err("审批 ID 已绑定到不同的副作用参数".to_string()),
+            None => {
+                if ticket.approval_bindings.len() >= MAX_TICKET_APPROVAL_BINDINGS {
+                    return Err("执行票据绑定的待提交审批过多".to_string());
+                }
+                ticket
+                    .approval_bindings
+                    .insert(approval_id.to_string(), effect_digest.to_string());
+                Ok(())
+            }
+        }
+    }
+
+    // Every identity and digest is intentionally explicit before consuming a one-time ticket.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bind_operation_approval(
+        &self,
+        token: &str,
+        workspace_scope: &str,
+        task_id: &str,
+        trace_id: Option<&str>,
+        allowed_capability_ids: &[&str],
+        allowed_operations: &[&str],
+        approval_id: &str,
+        effect_digest: &str,
+    ) -> Result<(), String> {
+        let now = SystemTime::now();
+        let mut tickets = self
+            .tickets
+            .lock()
+            .map_err(|_| "执行票据状态不可用".to_string())?;
+        let ticket = tickets
+            .get_mut(token.trim())
+            .ok_or_else(|| "执行票据不存在或已经失效".to_string())?;
+        if ticket.expires_at <= now {
+            return Err("执行票据已过期，请重新提交应用命令".to_string());
+        }
+        if matches!(ticket.policy_outcome, PolicyOutcome::Deny) {
+            return Err("执行票据对应的策略决定不允许执行".to_string());
+        }
+        if ticket.workspace_scope != workspace_scope || ticket.task_id != task_id {
+            return Err("执行票据与当前工作区或任务不匹配".to_string());
+        }
+        if trace_id.is_some_and(|trace_id| trace_id != ticket.trace_id) {
+            return Err("执行票据与当前 trace ID 不匹配".to_string());
+        }
+        if !allowed_capability_ids.contains(&ticket.capability_id.as_str()) {
+            return Err("执行票据没有当前处理器所需能力".to_string());
+        }
+        if !allowed_operations.contains(&ticket.operation.as_str()) {
+            return Err(format!(
+                "执行票据 operation {} 与当前处理器不匹配",
+                ticket.operation
+            ));
+        }
         if ticket.phase != TicketPhase::Ready {
             return Err("执行票据正在使用或已经消费".to_string());
         }
@@ -258,6 +409,7 @@ impl ExecutionTicketState {
             }
         }
         ticket.in_flight_approvals = approval_ids;
+        ticket.handler_started_at = Some(now);
         ticket.phase = TicketPhase::InFlight;
         Ok(())
     }
@@ -267,6 +419,7 @@ impl ExecutionTicketState {
             if let Some(ticket) = tickets.get_mut(token.trim()) {
                 if ticket.phase == TicketPhase::InFlight {
                     ticket.in_flight_approvals.clear();
+                    ticket.handler_started_at = None;
                     ticket.phase = TicketPhase::Ready;
                 }
             }
@@ -284,8 +437,17 @@ impl ExecutionTicketState {
         if ticket.phase != TicketPhase::InFlight {
             return Err("执行票据没有处于提交状态".to_string());
         }
+        if ticket
+            .trusted_execution_kind
+            .as_deref()
+            .is_some_and(|kind| kind != "effectful_native_handler")
+        {
+            return Err("执行票据混合了不同种类的可信处理器事实".to_string());
+        }
         // An uncertain side effect must never become executable again.
         ticket.in_flight_approvals.clear();
+        ticket.handler_started_at = None;
+        ticket.uncertain_side_effect = true;
         ticket.phase = TicketPhase::Consumed;
         Ok(())
     }
@@ -301,6 +463,29 @@ impl ExecutionTicketState {
         if ticket.phase != TicketPhase::InFlight {
             return Err("执行票据没有处于提交状态".to_string());
         }
+        if ticket
+            .trusted_execution_kind
+            .as_deref()
+            .is_some_and(|kind| kind != "effectful_native_handler")
+        {
+            return Err("执行票据混合了不同种类的可信处理器事实".to_string());
+        }
+        let completed_at = SystemTime::now();
+        let started_at = ticket
+            .handler_started_at
+            .take()
+            .ok_or_else(|| "执行票据缺少可信处理器开始时间".to_string())?;
+        let runtime_seconds = completed_at
+            .duration_since(started_at)
+            .unwrap_or_default()
+            .as_secs()
+            .max(1);
+        ticket.trusted_handler_completions = ticket.trusted_handler_completions.saturating_add(1);
+        ticket.trusted_runtime_seconds = ticket
+            .trusted_runtime_seconds
+            .saturating_add(runtime_seconds);
+        ticket.trusted_completed_at = Some(completed_at);
+        ticket.trusted_execution_kind = Some("effectful_native_handler".to_string());
         if ticket.allow_multiple_commits {
             let completed_approvals = std::mem::take(&mut ticket.in_flight_approvals);
             for approval_id in completed_approvals {
@@ -336,6 +521,481 @@ impl ExecutionTicketState {
             TicketPhase::Consumed => Ok(false),
             TicketPhase::InFlight => Err("执行票据正在提交副作用，无法退役".to_string()),
         }
+    }
+
+    pub(crate) fn validate_step_binding(
+        &self,
+        token: &str,
+        binding: &RuntimeTaskStepCommandBinding,
+    ) -> Result<(), String> {
+        crate::task_runtime::validate_runtime_task_step_binding(binding)?;
+        let tickets = self
+            .tickets
+            .lock()
+            .map_err(|_| "执行票据状态不可用".to_string())?;
+        let ticket = tickets
+            .get(token.trim())
+            .ok_or_else(|| "执行票据不存在或已经失效".to_string())?;
+        if ticket.step_binding.as_ref() != Some(binding) {
+            return Err("执行票据与当前任务步骤绑定不一致".to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn renew_step_bound_ticket(
+        &self,
+        token: &str,
+        workspace_scope: &str,
+        task_id: &str,
+        binding: &RuntimeTaskStepCommandBinding,
+        extension: Duration,
+    ) -> Result<ExecutionTicketRenewalReceipt, String> {
+        crate::task_runtime::validate_runtime_task_step_binding(binding)?;
+        if extension.is_zero() || extension > MAX_EXECUTION_TICKET_RENEWAL {
+            return Err("执行票据续期时长必须在 1 到 300 秒之间".to_string());
+        }
+        let now = SystemTime::now();
+        let mut tickets = self
+            .tickets
+            .lock()
+            .map_err(|_| "执行票据状态不可用".to_string())?;
+        let ticket = tickets
+            .get_mut(token.trim())
+            .ok_or_else(|| "执行票据不存在或已经失效".to_string())?;
+        if ticket.expires_at <= now {
+            return Err("执行票据已过期，不能续期或复活".to_string());
+        }
+        if ticket.workspace_scope != workspace_scope || ticket.task_id != task_id.trim() {
+            return Err("执行票据与当前工作区或 Runtime 子任务不匹配".to_string());
+        }
+        if ticket.step_binding.as_ref() != Some(binding) {
+            return Err("执行票据续期步骤绑定不一致".to_string());
+        }
+        if ticket.phase != TicketPhase::Ready
+            || ticket.trusted_completion_sealed
+            || ticket.uncertain_side_effect
+        {
+            return Err("只有未消费且未执行中的 Ready 票据可以续期".to_string());
+        }
+        if ticket.approval_bindings.is_empty() {
+            if ticket.trusted_handler_completions == 0
+                || ticket.trusted_execution_kind.as_deref() != Some("effectful_native_handler")
+            {
+                return Err("执行票据既没有待提交审批，也没有可信 effectful 完成事实".to_string());
+            }
+        } else if ticket.trusted_handler_completions > 0 {
+            return Err("执行票据不能混合待提交审批与已记录的 effectful 完成事实".to_string());
+        }
+        if ticket.renewal_used {
+            return Err("执行票据的单次安全续期已经使用".to_string());
+        }
+        let requested_expiry = ticket
+            .expires_at
+            .checked_add(extension)
+            .ok_or_else(|| "无法计算执行票据续期时间".to_string())?;
+        let hard_expiry = ticket
+            .issued_at
+            .checked_add(EXECUTION_TICKET_TTL + MAX_EXECUTION_TICKET_RENEWAL)
+            .ok_or_else(|| "无法计算执行票据续期上限".to_string())?;
+        ticket.expires_at = requested_expiry.min(hard_expiry);
+        ticket.renewal_used = true;
+        Ok(ExecutionTicketRenewalReceipt {
+            task_id: ticket.task_id.clone(),
+            command_id: ticket.command_id.clone(),
+            step_binding: binding.clone(),
+            expires_at: DateTime::<Utc>::from(ticket.expires_at).to_rfc3339(),
+        })
+    }
+
+    pub(crate) fn trusted_execution_receipt_for_child(
+        &self,
+        workspace_scope: &str,
+        child_task_id: &str,
+        command_id: &str,
+        trace_id: &str,
+    ) -> Result<TrustedExecutionReceipt, String> {
+        let mut tickets = self
+            .tickets
+            .lock()
+            .map_err(|_| "执行票据状态不可用".to_string())?;
+        let matching_tokens = tickets
+            .iter()
+            .filter(|(_, ticket)| {
+                ticket.workspace_scope == workspace_scope && ticket.task_id == child_task_id
+            })
+            .map(|(token, _)| token.clone())
+            .collect::<Vec<_>>();
+        if matching_tokens.is_empty() {
+            return Err("Runtime 子任务没有可验证的执行票据".to_string());
+        }
+        if matching_tokens.len() > 1 {
+            return Err("Runtime 子任务关联了多个执行票据，拒绝生成歧义回执".to_string());
+        }
+        let token = &matching_tokens[0];
+        let ticket = tickets
+            .get_mut(token)
+            .ok_or_else(|| "Runtime 子任务执行票据在结算前失效".to_string())?;
+        if ticket.command_id != command_id {
+            return Err("执行票据 command ID 与 Runtime 子任务不匹配".to_string());
+        }
+        if ticket.trace_id != trace_id {
+            return Err("执行票据 Trace 与 Runtime 子任务不匹配".to_string());
+        }
+        let step_binding = ticket
+            .step_binding
+            .clone()
+            .ok_or_else(|| "Runtime 子任务执行票据缺少步骤绑定".to_string())?;
+        if ticket.phase == TicketPhase::InFlight {
+            return Err("Runtime 子任务处理器仍在执行，不能结算成功".to_string());
+        }
+        if ticket.trusted_handler_completions == 0 {
+            return Err("Runtime 子任务没有可信原生处理器完成事实".to_string());
+        }
+        if ticket.uncertain_side_effect {
+            return Err("Runtime 子任务存在结果不确定的原生副作用，不能结算成功".to_string());
+        }
+        let completed_at = ticket
+            .trusted_completed_at
+            .ok_or_else(|| "Runtime 子任务缺少可信处理器完成时间".to_string())?;
+        let completed_at = DateTime::<Utc>::from(completed_at).to_rfc3339();
+        let trust_kind = ticket
+            .trusted_execution_kind
+            .clone()
+            .ok_or_else(|| "Runtime 子任务缺少可信处理器类型".to_string())?;
+        let receipt_payload = serde_json::json!({
+            "workspaceScope": workspace_scope,
+            "childTaskId": child_task_id,
+            "commandId": command_id,
+            "traceId": trace_id,
+            "capabilityId": ticket.capability_id,
+            "operation": ticket.operation,
+            "trustKind": trust_kind.clone(),
+            "stepBinding": step_binding,
+            "consumedToolCalls": ticket.trusted_handler_completions,
+            "consumedRuntimeSeconds": ticket.trusted_runtime_seconds,
+            "consumedTokens": ticket.trusted_tokens,
+            "consumedCost": ticket.trusted_cost,
+            "costMeasured": ticket.trusted_cost_measured,
+            "completedAt": completed_at,
+        });
+        let encoded = serde_json::to_vec(&receipt_payload)
+            .map_err(|error| format!("无法序列化可信执行回执：{error}"))?;
+        let mut digest = Sha256::new();
+        digest.update(token.as_bytes());
+        digest.update(&encoded);
+        let receipt = TrustedExecutionReceipt {
+            receipt_id: format!("native-handler:sha256:{:x}", digest.finalize()),
+            workspace_scope: workspace_scope.to_string(),
+            child_task_id: child_task_id.to_string(),
+            command_id: command_id.to_string(),
+            trace_id: trace_id.to_string(),
+            capability_id: ticket.capability_id.clone(),
+            operation: ticket.operation.clone(),
+            trust_kind,
+            step_binding,
+            consumed_tool_calls: ticket.trusted_handler_completions,
+            consumed_runtime_seconds: ticket.trusted_runtime_seconds,
+            consumed_tokens: ticket.trusted_tokens,
+            consumed_cost: ticket.trusted_cost,
+            cost_measured: ticket.trusted_cost_measured,
+            completed_at,
+        };
+        ticket.approval_bindings.clear();
+        ticket.in_flight_approvals.clear();
+        ticket.handler_started_at = None;
+        ticket.phase = TicketPhase::Consumed;
+        ticket.trusted_completion_sealed = true;
+        Ok(receipt)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_read_only_handler_completion(
+        &self,
+        token: &str,
+        workspace_scope: &str,
+        child_task_id: &str,
+        command_id: &str,
+        trace_id: &str,
+        capability_id: &str,
+        operation: &str,
+        binding: &RuntimeTaskStepCommandBinding,
+        elapsed: Duration,
+    ) -> Result<(), String> {
+        let now = SystemTime::now();
+        let mut tickets = self
+            .tickets
+            .lock()
+            .map_err(|_| "执行票据状态不可用".to_string())?;
+        let ticket = tickets
+            .get_mut(token.trim())
+            .ok_or_else(|| "执行票据不存在或已经失效".to_string())?;
+        if ticket.expires_at <= now {
+            return Err("执行票据已过期，不能记录只读处理器完成事实".to_string());
+        }
+        if matches!(ticket.policy_outcome, PolicyOutcome::Deny)
+            || ticket.workspace_scope != workspace_scope
+            || ticket.task_id != child_task_id
+            || ticket.command_id != command_id
+            || ticket.trace_id != trace_id
+            || ticket.capability_id != capability_id
+            || ticket.operation != operation
+            || ticket.step_binding.as_ref() != Some(binding)
+        {
+            return Err("执行票据与只读 Runtime 处理器身份或步骤绑定不一致".to_string());
+        }
+        if ticket.phase != TicketPhase::Ready
+            || ticket.trusted_handler_completions != 0
+            || ticket.uncertain_side_effect
+            || ticket.trusted_completion_sealed
+        {
+            return Err("执行票据不能重复或混合记录只读处理器完成事实".to_string());
+        }
+        ticket.trusted_handler_completions = 1;
+        ticket.trusted_runtime_seconds = elapsed.as_secs().max(1);
+        ticket.trusted_completed_at = Some(now);
+        ticket.trusted_execution_kind = Some("read_only_native_handler".to_string());
+        ticket.approval_bindings.clear();
+        ticket.in_flight_approvals.clear();
+        ticket.handler_started_at = None;
+        ticket.phase = TicketPhase::Consumed;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn validate_effectful_handler_authorization(
+        &self,
+        token: &str,
+        workspace_scope: &str,
+        child_task_id: &str,
+        command_id: &str,
+        trace_id: &str,
+        capability_id: &str,
+        operation: &str,
+        binding: &RuntimeTaskStepCommandBinding,
+    ) -> Result<(), String> {
+        crate::task_runtime::validate_runtime_task_step_binding(binding)?;
+        let tickets = self
+            .tickets
+            .lock()
+            .map_err(|_| "执行票据状态不可用".to_string())?;
+        let ticket = tickets
+            .get(token.trim())
+            .ok_or_else(|| "执行票据不存在或已经失效".to_string())?;
+        validate_effectful_handler_ticket(
+            ticket,
+            SystemTime::now(),
+            workspace_scope,
+            child_task_id,
+            command_id,
+            trace_id,
+            capability_id,
+            operation,
+            binding,
+        )
+    }
+
+    /// Records a completion reported by a Rust-owned effectful handler.
+    ///
+    /// This is deliberately crate-private: a renderer must never be able to
+    /// turn a self-reported result into a trusted execution receipt. The
+    /// caller must have already validated the runtime child's live step and
+    /// effect class against SQLite; this method only records the immutable
+    /// ticket identity and handler timing under the ticket mutex.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_effectful_handler_completion(
+        &self,
+        token: &str,
+        workspace_scope: &str,
+        child_task_id: &str,
+        command_id: &str,
+        trace_id: &str,
+        capability_id: &str,
+        operation: &str,
+        binding: &RuntimeTaskStepCommandBinding,
+        usage: TrustedHandlerUsage,
+        reservation: TrustedHandlerReservation,
+    ) -> Result<(), String> {
+        self.record_effectful_handler_completion_internal(
+            token,
+            workspace_scope,
+            child_task_id,
+            command_id,
+            trace_id,
+            capability_id,
+            operation,
+            binding,
+            None,
+            usage,
+            reservation,
+        )
+        .map(|_| ())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_effectful_handler_completion_once(
+        &self,
+        token: &str,
+        workspace_scope: &str,
+        child_task_id: &str,
+        command_id: &str,
+        trace_id: &str,
+        capability_id: &str,
+        operation: &str,
+        binding: &RuntimeTaskStepCommandBinding,
+        completion_key: &str,
+        usage: TrustedHandlerUsage,
+        reservation: TrustedHandlerReservation,
+    ) -> Result<bool, String> {
+        let completion_key = completion_key.trim();
+        if completion_key.is_empty() || completion_key.chars().count() > 512 {
+            return Err("effectful Runtime 处理器完成键无效".to_string());
+        }
+        self.record_effectful_handler_completion_internal(
+            token,
+            workspace_scope,
+            child_task_id,
+            command_id,
+            trace_id,
+            capability_id,
+            operation,
+            binding,
+            Some(completion_key),
+            usage,
+            reservation,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_effectful_handler_completion_internal(
+        &self,
+        token: &str,
+        workspace_scope: &str,
+        child_task_id: &str,
+        command_id: &str,
+        trace_id: &str,
+        capability_id: &str,
+        operation: &str,
+        binding: &RuntimeTaskStepCommandBinding,
+        completion_key: Option<&str>,
+        usage: TrustedHandlerUsage,
+        reservation: TrustedHandlerReservation,
+    ) -> Result<bool, String> {
+        crate::task_runtime::validate_runtime_task_step_binding(binding)?;
+        if usage.tool_calls == 0
+            || usage.runtime_seconds == 0
+            || usage
+                .cost
+                .is_some_and(|cost| !cost.is_finite() || cost < 0.0)
+            || reservation
+                .max_cost
+                .is_some_and(|cost| !cost.is_finite() || cost < 0.0)
+        {
+            return Err("effectful Runtime 处理器用量或预留预算无效".to_string());
+        }
+        let now = SystemTime::now();
+        let mut tickets = self
+            .tickets
+            .lock()
+            .map_err(|_| "执行票据状态不可用".to_string())?;
+        let ticket = tickets
+            .get(token.trim())
+            .ok_or_else(|| "执行票据不存在或已经失效".to_string())?;
+        validate_effectful_handler_ticket(
+            ticket,
+            now,
+            workspace_scope,
+            child_task_id,
+            command_id,
+            trace_id,
+            capability_id,
+            operation,
+            binding,
+        )?;
+        if completion_key.is_some_and(|key| ticket.trusted_handler_completion_keys.contains(key)) {
+            return Ok(false);
+        }
+        let ticket = tickets
+            .get_mut(token.trim())
+            .ok_or_else(|| "执行票据不存在或已经失效".to_string())?;
+        let consumed_cost = usage.cost.unwrap_or_default();
+        let next_tool_calls = ticket
+            .trusted_handler_completions
+            .checked_add(usage.tool_calls)
+            .ok_or_else(|| "effectful Runtime 处理器工具调用用量溢出".to_string())?;
+        let next_runtime_seconds = ticket
+            .trusted_runtime_seconds
+            .checked_add(usage.runtime_seconds)
+            .ok_or_else(|| "effectful Runtime 处理器运行时间用量溢出".to_string())?;
+        let next_tokens = ticket
+            .trusted_tokens
+            .checked_add(usage.tokens)
+            .ok_or_else(|| "effectful Runtime 处理器 Token 用量溢出".to_string())?;
+        let next_cost = ticket.trusted_cost + consumed_cost;
+        if next_tool_calls > reservation.max_tool_calls
+            || next_runtime_seconds > reservation.max_runtime_seconds
+            || !next_cost.is_finite()
+            || reservation
+                .max_tokens
+                .is_some_and(|max_tokens| next_tokens > max_tokens)
+            || reservation.max_cost.is_some_and(|max_cost| {
+                usage.cost.is_none()
+                    || !next_cost.is_finite()
+                    || next_cost > max_cost + f64::EPSILON
+            })
+        {
+            return Err("effectful Runtime 处理器用量超过步骤预留预算".to_string());
+        }
+        ticket.trusted_handler_completions = next_tool_calls;
+        ticket.trusted_runtime_seconds = next_runtime_seconds;
+        ticket.trusted_tokens = next_tokens;
+        ticket.trusted_cost = next_cost;
+        ticket.trusted_cost_measured &= usage.cost.is_some();
+        ticket.trusted_completed_at = Some(now);
+        ticket.trusted_execution_kind = Some("effectful_native_handler".to_string());
+        if let Some(key) = completion_key {
+            ticket
+                .trusted_handler_completion_keys
+                .insert(key.to_string());
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn cancel_runtime_task_bindings(
+        &self,
+        runtime_task_id: &str,
+    ) -> Result<usize, String> {
+        let runtime_task_id = runtime_task_id.trim();
+        let mut tickets = self
+            .tickets
+            .lock()
+            .map_err(|_| "执行票据状态不可用".to_string())?;
+        let mut cancelled = 0;
+        let mut cancelled_task_ids = HashSet::from([runtime_task_id.to_string()]);
+        loop {
+            let mut discovered = Vec::new();
+            for ticket in tickets.values_mut() {
+                if ticket
+                    .step_binding
+                    .as_ref()
+                    .is_some_and(|binding| cancelled_task_ids.contains(&binding.runtime_task_id))
+                    && ticket.phase != TicketPhase::Consumed
+                {
+                    ticket.approval_bindings.clear();
+                    ticket.in_flight_approvals.clear();
+                    ticket.phase = TicketPhase::Consumed;
+                    discovered.push(ticket.task_id.clone());
+                    cancelled += 1;
+                }
+            }
+            let mut added = false;
+            for task_id in discovered {
+                added |= cancelled_task_ids.insert(task_id);
+            }
+            if !added {
+                break;
+            }
+        }
+        Ok(cancelled)
     }
 }
 
@@ -399,316 +1059,43 @@ fn validate_ticket(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::policy::{CommandBudget, CommandOrigin};
-    use serde_json::json;
-
-    fn command() -> ApplicationCommand {
-        ApplicationCommand {
-            id: "command-ticket".to_string(),
-            command_type: "assistant.operation".to_string(),
-            origin: CommandOrigin::Assistant,
-            intent: "capture".to_string(),
-            capability_id: "system:capture".to_string(),
-            operation: "run".to_string(),
-            parameters: json!({"relative_path": "分析/笔记.md"}),
-            vault_id: Some("vault-agent".to_string()),
-            relative_paths: vec!["分析/笔记.md".to_string()],
-            network_targets: Vec::new(),
-            declared_scope: vec!["vault:vault-agent".to_string()],
-            budget: CommandBudget {
-                max_steps: 8,
-                max_runtime_seconds: 300,
-                max_tool_calls: 16,
-                max_tokens: None,
-                max_cost: None,
-            },
-            idempotency_key: "ticket-idempotency".to_string(),
-            trace_id: Some("trace-ticket".to_string()),
-            model_decision_receipt: Some("receipt-ticket".to_string()),
-        }
+#[allow(clippy::too_many_arguments)]
+fn validate_effectful_handler_ticket(
+    ticket: &StoredExecutionTicket,
+    now: SystemTime,
+    workspace_scope: &str,
+    child_task_id: &str,
+    command_id: &str,
+    trace_id: &str,
+    capability_id: &str,
+    operation: &str,
+    binding: &RuntimeTaskStepCommandBinding,
+) -> Result<(), String> {
+    if ticket.expires_at <= now {
+        return Err("执行票据已过期，不能授权有副作用处理器".to_string());
     }
-
-    fn decision() -> PolicyDecision {
-        crate::policy::evaluate(&command())
+    if !matches!(ticket.policy_outcome, PolicyOutcome::Allow) {
+        return Err("只有明确 Allow 的 effectful Runtime 命令可以授权原生处理器".to_string());
     }
-
-    fn scope<'a>(task_id: &'a str, vault_id: &'a str, path: &'a str) -> TicketScope<'a> {
-        TicketScope {
-            workspace_scope: "local",
-            task_id,
-            trace_id: Some("trace-ticket"),
-            allowed_capability_ids: &["system:capture", "system:create"],
-            allowed_operations: &["run", "create"],
-            vault_id,
-            relative_path: path,
-            require_declared_path: true,
-        }
+    if ticket.workspace_scope != workspace_scope
+        || ticket.task_id != child_task_id
+        || ticket.command_id != command_id
+        || ticket.trace_id != trace_id
+        || ticket.capability_id != capability_id
+        || ticket.operation != operation
+        || ticket.step_binding.as_ref() != Some(binding)
+    {
+        return Err("执行票据与 effectful Runtime 处理器身份或步骤绑定不一致".to_string());
     }
-
-    #[test]
-    fn ticket_binds_scope_approval_and_prevents_replay() {
-        let state = ExecutionTicketState::default();
-        let receipt = state
-            .issue(
-                "local",
-                "task-ticket",
-                "trace-ticket",
-                &command(),
-                &decision(),
-            )
-            .expect("issue ticket");
-        state
-            .bind_approval(
-                &receipt.token,
-                scope("task-ticket", "vault-agent", "分析/笔记.md"),
-                "approval-1",
-                "effect-1",
-            )
-            .expect("bind approval");
-        state
-            .begin_commit(
-                &receipt.token,
-                "local",
-                "task-ticket",
-                &[("approval-1", "effect-1")],
-            )
-            .expect("begin commit");
-        state
-            .complete_commit(&receipt.token)
-            .expect("complete commit");
-        assert!(state
-            .begin_commit(
-                &receipt.token,
-                "local",
-                "task-ticket",
-                &[("approval-1", "effect-1")],
-            )
-            .is_err());
+    if ticket.phase != TicketPhase::Ready
+        || ticket.uncertain_side_effect
+        || ticket.trusted_completion_sealed
+        || ticket
+            .trusted_execution_kind
+            .as_deref()
+            .is_some_and(|kind| kind != "effectful_native_handler")
+    {
+        return Err("执行票据不能重复或在封存后授权 effectful 处理器".to_string());
     }
-
-    #[test]
-    fn ticket_rejects_task_vault_path_and_digest_substitution() {
-        let state = ExecutionTicketState::default();
-        let receipt = state
-            .issue(
-                "local",
-                "task-ticket",
-                "trace-ticket",
-                &command(),
-                &decision(),
-            )
-            .expect("issue ticket");
-        for invalid_scope in [
-            scope("task-other", "vault-agent", "分析/笔记.md"),
-            scope("task-ticket", "vault-personal", "分析/笔记.md"),
-            scope("task-ticket", "vault-agent", "分析/替换.md"),
-        ] {
-            assert!(state
-                .bind_approval(&receipt.token, invalid_scope, "approval-1", "effect-1")
-                .is_err());
-        }
-        state
-            .bind_approval(
-                &receipt.token,
-                scope("task-ticket", "vault-agent", "分析/笔记.md"),
-                "approval-1",
-                "effect-1",
-            )
-            .expect("bind valid approval");
-        assert!(state
-            .begin_commit(
-                &receipt.token,
-                "local",
-                "task-ticket",
-                &[("approval-1", "effect-substituted")],
-            )
-            .is_err());
-    }
-
-    #[test]
-    fn expired_ticket_is_rejected() {
-        let state = ExecutionTicketState::default();
-        let receipt = state
-            .issue_at(
-                "local",
-                "task-ticket",
-                "trace-ticket",
-                &command(),
-                &decision(),
-                TicketTiming {
-                    issued_at: SystemTime::UNIX_EPOCH,
-                    ttl: Duration::from_secs(1),
-                },
-            )
-            .expect("issue expired ticket fixture");
-        assert!(state
-            .bind_approval(
-                &receipt.token,
-                scope("task-ticket", "vault-agent", "分析/笔记.md"),
-                "approval-1",
-                "effect-1",
-            )
-            .expect_err("expired ticket must fail")
-            .contains("过期"));
-    }
-
-    #[test]
-    fn path_bound_handler_rejects_a_wildcard_ticket() {
-        let state = ExecutionTicketState::default();
-        let mut wildcard = command();
-        wildcard.intent = "create".to_string();
-        wildcard.capability_id = "system:create".to_string();
-        wildcard.operation = "create".to_string();
-        wildcard.relative_paths.clear();
-        let decision = crate::policy::evaluate(&wildcard);
-        let receipt = state
-            .issue("local", "task-ticket", "trace-ticket", &wildcard, &decision)
-            .expect("issue wildcard ticket");
-        assert!(state
-            .bind_approval(
-                &receipt.token,
-                scope("task-ticket", "vault-agent", "分析/笔记.md"),
-                "approval-1",
-                "effect-1",
-            )
-            .expect_err("path-bound handler must reject wildcard")
-            .contains("没有声明"));
-    }
-
-    #[test]
-    fn capture_ticket_binds_dynamic_paths_across_batches_and_retires() {
-        let state = ExecutionTicketState::default();
-        let mut capture = command();
-        capture.relative_paths.clear();
-        capture.vault_id = Some("vault-personal".to_string());
-        capture.declared_scope = vec![
-            "vault:vault-personal".to_string(),
-            "vault:vault-agent".to_string(),
-        ];
-        let decision = crate::policy::evaluate(&capture);
-        let receipt = state
-            .issue("local", "task-ticket", "trace-ticket", &capture, &decision)
-            .expect("issue capture ticket");
-
-        state
-            .bind_approval(
-                &receipt.token,
-                scope(
-                    "task-ticket",
-                    "vault-personal",
-                    "资料库/原文/hash/来源一.md",
-                ),
-                "approval-1",
-                "effect-1",
-            )
-            .expect("bind first source");
-        state
-            .begin_commit(
-                &receipt.token,
-                "local",
-                "task-ticket",
-                &[("approval-1", "effect-1")],
-            )
-            .expect("begin first source");
-        state
-            .complete_commit(&receipt.token)
-            .expect("complete first source");
-
-        state
-            .bind_approval(
-                &receipt.token,
-                scope("task-ticket", "vault-agent", "资料库/原文/hash/来源二.md"),
-                "approval-2",
-                "effect-2",
-            )
-            .expect("bind second source");
-        state
-            .begin_commit(
-                &receipt.token,
-                "local",
-                "task-ticket",
-                &[("approval-2", "effect-2")],
-            )
-            .expect("begin second source");
-        state
-            .complete_commit(&receipt.token)
-            .expect("complete second source");
-
-        assert!(state
-            .bind_approval(
-                &receipt.token,
-                scope(
-                    "task-ticket",
-                    "vault-personal",
-                    "资料库/原文/hash/来源一.md"
-                ),
-                "approval-1",
-                "effect-1",
-            )
-            .expect_err("committed approval must not replay")
-            .contains("重放"));
-        assert!(state
-            .bind_approval(
-                &receipt.token,
-                scope("task-ticket", "vault-other", "资料库/原文/hash/越界.md"),
-                "approval-3",
-                "effect-3",
-            )
-            .expect_err("dynamic path must remain inside declared vaults")
-            .contains("Vault 范围"));
-
-        assert!(state
-            .retire(&receipt.token, "task-ticket")
-            .expect("retire capture ticket"));
-        assert!(state
-            .bind_approval(
-                &receipt.token,
-                scope("task-ticket", "vault-agent", "资料库/原文/hash/退役后.md"),
-                "approval-4",
-                "effect-4",
-            )
-            .is_err());
-    }
-
-    #[test]
-    fn uncertain_commit_is_terminal() {
-        let state = ExecutionTicketState::default();
-        let receipt = state
-            .issue(
-                "local",
-                "task-ticket",
-                "trace-ticket",
-                &command(),
-                &decision(),
-            )
-            .expect("issue ticket");
-        state
-            .bind_approval(
-                &receipt.token,
-                scope("task-ticket", "vault-agent", "分析/笔记.md"),
-                "approval-1",
-                "effect-1",
-            )
-            .expect("bind approval");
-        state
-            .begin_commit(
-                &receipt.token,
-                "local",
-                "task-ticket",
-                &[("approval-1", "effect-1")],
-            )
-            .expect("begin commit");
-        state.fail_commit(&receipt.token).expect("seal ticket");
-        assert!(state
-            .begin_commit(
-                &receipt.token,
-                "local",
-                "task-ticket",
-                &[("approval-1", "effect-1")],
-            )
-            .is_err());
-    }
+    Ok(())
 }

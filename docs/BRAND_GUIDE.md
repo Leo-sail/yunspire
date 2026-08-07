@@ -8,9 +8,9 @@
 
 - 中文名：云枢
 - 英文名：Yunspire
-- 产品类别：本地优先的 Obsidian 智能知识工作台
+- 产品类别：面向个人、本地优先的自成长知识中枢
 - 主口号：**让知识流动，让成长发生。**
-- 短定位：**你的本地智能中枢。**
+- 短定位：**自成长的个人知识中枢。**
 
 “云”代表持续流动的信息、灵感与知识；“枢”代表连接、判断、秩序与行动中心。Yunspire 由 Yun 与 Inspire 组合而来，表达“让自己的知识持续启发自己”。
 
@@ -44,22 +44,24 @@
 
 ### 5. 视觉方向
 
-视觉比例：70% 静谧知识工作台、20% 专业控制台效率、10% 空间层次。
+视觉方向是“专业知识工作台 + 温暖知识空间”。知识、文稿、来源和长期变化是视觉主角；界面不使用宣传 Hero、装饰图片、KPI 墙、黑色侧栏或通用后台式卡片堆叠。
 
-界面采用纯净浅色体系与 macOS 材质感：
+现行 R10 调色板：
 
-- 主背景：`#F7F9FB`
+- 应用窗口：`#F9FBFC`
+- 工作面：`#F2F6F8`
 - 主表面：`#FFFFFF`
-- 次级表面：`#F1F4F6`
-- 主文字：`#111820`
-- 次级文字：`#697681`
-- 分隔线：`#DCE2E8`
-- 品牌绿：`#1F8A5B`
-- 信息蓝：`#3678A8`
-- 警告黄：`#B77A13`
-- 错误红：`#B94A48`
+- 纸张表面：`#FFFEFB`
+- 主文字：`#193747`
+- 次级文字：`#4D6573`
+- 分隔线：`#D5E0E6`
+- 钢蓝主动作：`#305D77`
+- 雾蓝选中面：`#DCEAF2`
+- 暖纸成长面：`#F5EEE5`
+- 警告文字：`#765324`
+- 错误文字：`#913C53`
 
-颜色用于状态和层级，不用于大面积装饰。毛玻璃只用于侧栏、浮层、任务抽屉和窗口级材质，正文工作区优先保持清晰、稳定和高对比。
+绿色、青绿、松石绿、薄荷绿、鼠尾草绿和绿色成功态不属于云枢调色板。成功、同步和 AI 使用钢蓝文字、中性状态面、图标与结构表达，颜色不得成为唯一线索。暖纸色只标识长期积累、重访、成长变化和待判断变化，不能充当通用 CTA 或页面底色。正文工作区保持近纸张、高对比和稳定阅读宽度；毛玻璃仅限浮层与窗口级材质。
 
 ### 6. Logo 使用
 
@@ -76,7 +78,7 @@
 
 - 不拉伸、不倾斜、不改变比例。
 - 不叠加高噪声背景、光晕或与品牌无关的渐变。
-- 应用侧栏图标按 macOS 导航尺寸显示，不作为超大装饰。
+- 顶部导航中的品牌符号按紧凑桌面导航尺寸显示，不作为超大装饰。
 - 四周保留至少一个符号内圆直径的安全空间。
 - 小尺寸优先使用 symbol 或 favicon，不压缩完整字标。
 - 第三方不得通过 Logo 暗示商业授权、合作或官方认可。
@@ -85,11 +87,11 @@
 
 一句话介绍：
 
-> 云枢是一款以 Obsidian 为知识底座、由 AI助手统一调度的本地智能工作中枢。
+> 云枢是一款以 Obsidian 为知识底座、面向长期阅读、创作与积累的本地自成长知识中枢。
 
 标准介绍：
 
-> 我为重视知识积累、隐私和长期成长的个人用户设计云枢。它用 Obsidian 保存用户真正拥有的知识，用本地运行时管理任务、模型和自动化，让用户通过自然语言完成采集、搜索、创作、报告、Skill 调用和知识维护。外部内容始终作为不可信数据处理，所有重要操作都保留范围、检查点和结果。
+> 我为重视知识积累、隐私和长期成长的个人用户设计云枢。它用 Obsidian 保存用户真正拥有的知识，把阅读、重访、创作和成长变化组织成可长期停留的桌面空间，并由本地运行时和上下文 AI 协助完成采集、理解、检索、表达与维护。外部内容始终作为不可信数据处理，所有重要变化都保留来源、范围、检查点和恢复路径。
 
 ### 8. 品牌与许可
 
@@ -103,9 +105,9 @@ Yunspire、云枢、Logo、第一方界面和品牌资产均属于本项目的�
 
 - Chinese name: 云枢
 - English name: Yunspire
-- Category: local-first Obsidian intelligent knowledge workspace
+- Category: local-first, self-growing personal knowledge hub
 - Main tagline: **Let knowledge flow and growth follow.**
-- Short position: **Your local intelligence hub.**
+- Short position: **A self-growing personal knowledge hub.**
 
 “Yun” represents continuously flowing information, ideas, and knowledge. “Spire” and the Chinese character “枢” communicate inspiration, connection, judgment, order, and an operational center. I created Yunspire to connect local knowledge, user-selected models, first-party capabilities, and automation so that information becomes durable knowledge after understanding, action, verification, and reflection.
 
@@ -125,34 +127,36 @@ The voice is calm, clear, restrained, and factual. I use concrete outcomes rathe
 
 ### 4. Visual direction
 
-The visual balance is 70% quiet knowledge workspace, 20% professional control-console efficiency, and 10% spatial depth. The palette uses clean light surfaces, restrained macOS material, dark neutral typography, Yunspire green for primary state, blue for information, yellow for warning, and red for errors.
+The visual direction combines a professional knowledge workbench with a warm knowledge space. Knowledge, documents, sources, and long-term changes are the visual subjects. The interface avoids promotional heroes, decorative imagery, KPI walls, black sidebars, and generic admin-card layouts.
 
 | Token | Value |
 | --- | --- |
-| Background | `#F7F9FB` |
+| Window | `#F9FBFC` |
+| Workspace | `#F2F6F8` |
 | Surface | `#FFFFFF` |
-| Secondary surface | `#F1F4F6` |
-| Primary text | `#111820` |
-| Secondary text | `#697681` |
-| Divider | `#DCE2E8` |
-| Yunspire green | `#1F8A5B` |
-| Information blue | `#3678A8` |
-| Warning yellow | `#B77A13` |
-| Error red | `#B94A48` |
+| Paper | `#FFFEFB` |
+| Primary text | `#193747` |
+| Secondary text | `#4D6573` |
+| Divider | `#D5E0E6` |
+| Steel-blue action | `#305D77` |
+| Mist-blue selection | `#DCEAF2` |
+| Warm-memory surface | `#F5EEE5` |
+| Warning text | `#765324` |
+| Error text | `#913C53` |
 
-Color communicates status and hierarchy rather than decoration. Glass material is limited to sidebars, overlays, drawers, and window-level surfaces; primary reading and work areas remain crisp and stable.
+Green, teal, turquoise, mint, sage, and green success states are outside the Yunspire palette. Success, synchronization, and AI use steel-blue text, neutral status surfaces, icons, and structure, never color alone. Warm paper is reserved for accumulated, revisited, reviewable, or pending-decision content and never becomes a generic CTA or page background. Glass material is limited to overlays and window-level surfaces; reading and writing areas remain paper-like, high-contrast, and stable.
 
 ### 5. Logo and copy
 
-Brand assets live in `desktop-ui/assets/brand/`. I do not stretch, skew, recolor, glow, or place them over noisy backgrounds. Sidebar marks follow normal macOS navigation sizing; small contexts use the symbol or favicon instead of compressing the full wordmark. Clear space equals at least one inner-circle diameter of the symbol.
+Brand assets live in `desktop-ui/assets/brand/`. I do not stretch, skew, recolor, glow, or place them over noisy backgrounds. The top-navigation symbol follows compact desktop navigation sizing; small contexts use the symbol or favicon instead of compressing the full wordmark. Clear space equals at least one inner-circle diameter of the symbol.
 
 One-line description:
 
-> Yunspire is a local intelligence workspace that uses Obsidian as its knowledge foundation and one AI Assistant to coordinate models, Skills, and real local work.
+> Yunspire is a local, self-growing knowledge hub built on Obsidian for sustained reading, grounded creation, and long-term accumulation.
 
 Standard description:
 
-> I designed Yunspire for people who care about durable knowledge, privacy, and long-term growth. Obsidian stores user-owned knowledge while a local runtime manages tasks, models, and automation. Natural language connects capture, search, creation, reports, Skills, and knowledge maintenance. Imported content remains untrusted data, and important operations retain scope, checkpoints, and verifiable outcomes.
+> I designed Yunspire for people who care about durable knowledge, privacy, and long-term growth. Obsidian stores user-owned knowledge while the desktop experience organizes reading, revisiting, creation, and review into a space built for long sessions. A local runtime and contextual AI assist capture, understanding, retrieval, expression, and maintenance. Imported content remains untrusted data, and important changes retain provenance, scope, checkpoints, and recovery paths.
 
 ### 6. Brand rights
 

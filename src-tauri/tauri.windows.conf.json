@@ -2,6 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "bundle": {
     "resources": {
+      "../resources/creation/": "creation/",
       "../LICENSE": "legal/LICENSE",
       "../NOTICE": "legal/NOTICE",
       "target/yunspire-licenses/THIRD_PARTY_NOTICES.txt": "legal/THIRD_PARTY_NOTICES.txt",

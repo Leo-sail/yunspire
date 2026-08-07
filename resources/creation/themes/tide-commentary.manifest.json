@@ -1,0 +1,132 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "theme",
+  "catalogVersion": "0.4.0",
+  "id": "tide-commentary",
+  "version": "1.0.0",
+  "displayName": "潮汐·评论",
+  "description": "面向观点表达、趋势判断和公共议题评论，以通透青蓝建立清晰层级、稳定阅读节奏和可复用的原创排版规则。",
+  "status": "active",
+  "category": "commentary",
+  "tags": [
+    "评论",
+    "通透青蓝",
+    "多端候选"
+  ],
+  "legacyIds": [],
+  "palette": {
+    "accent": "#076e7a",
+    "accentSoft": "#e1eeef",
+    "text": "#203438",
+    "muted": "#7e898c",
+    "border": "#cde2e4",
+    "quote": "#eef5f6",
+    "heading": "#07505a",
+    "background": "#f9fbfc"
+  },
+  "typography": {
+    "defaultFamily": "serif",
+    "fallbackStack": "\"Songti SC\",\"STSong\",\"Noto Serif CJK SC\",serif",
+    "baseSize": 17,
+    "lineHeight": 1.86,
+    "headingWeight": 700,
+    "bodyWeight": 400
+  },
+  "spacing": {
+    "paragraph": 18,
+    "section": 34,
+    "pageX": 20,
+    "pageY": 26
+  },
+  "features": {
+    "autoNumbering": false,
+    "keywordUnderline": true,
+    "tableOfContents": false,
+    "introduction": true,
+    "signature": true,
+    "spanLeaf": true,
+    "cjkSpacing": false,
+    "externalLinkFootnotes": true
+  },
+  "supportedComponentIds": [
+    "lead",
+    "quote",
+    "notice",
+    "steps",
+    "metrics",
+    "compare",
+    "dialogue",
+    "timeline",
+    "divider",
+    "cta",
+    "outline",
+    "abstract",
+    "key-points",
+    "contents",
+    "introduction",
+    "conclusion",
+    "section-summary",
+    "executive-summary",
+    "premise",
+    "definition",
+    "context",
+    "evidence",
+    "source-note",
+    "fact-check",
+    "warning",
+    "tip",
+    "example",
+    "case-study",
+    "faq",
+    "checklist",
+    "decision-matrix",
+    "pros-cons",
+    "before-after",
+    "process",
+    "milestone",
+    "schedule",
+    "roadmap",
+    "chronology",
+    "interview",
+    "debate",
+    "testimonial",
+    "figure",
+    "image-gallery",
+    "cover-card",
+    "infographic",
+    "video-card",
+    "data-table",
+    "formula",
+    "code-snippet",
+    "footnotes",
+    "author-signature",
+    "related-reading",
+    "next-steps"
+  ],
+  "renderers": {
+    "markdown": "creation.theme.tide-commentary.markdown.v1",
+    "html": "creation.theme.tide-commentary.html.v1",
+    "wechatRichText": "creation.theme.tide-commentary.wechat.v1"
+  },
+  "compatibility": {
+    "targets": [
+      "markdown",
+      "html",
+      "wechatRichText"
+    ],
+    "wechatCertification": "candidate",
+    "minRuntimeVersion": "0.1.2"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This theme is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire theme manifest and rendering tokens; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

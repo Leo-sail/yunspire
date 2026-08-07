@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "template",
+  "catalogVersion": "0.4.0",
+  "id": "xhs-shopping-guide",
+  "version": "1.0.0",
+  "displayName": "小红书购物指南",
+  "description": "按预算、用途和优先级整理一份不夸大的购买建议。",
+  "status": "active",
+  "contentType": "xiaohongshu",
+  "artifactType": "poster",
+  "tags": [
+    "小红书",
+    "购物",
+    "指南",
+    "原创模板",
+    "本地知识库"
+  ],
+  "inputFormats": [
+    "plainText",
+    "markdown",
+    "image"
+  ],
+  "outputFormats": [
+    "markdown",
+    "html",
+    "png",
+    "jpeg"
+  ],
+  "entrypoint": "xhs-shopping-guide/template.md",
+  "files": [
+    {
+      "path": "xhs-shopping-guide/template.md",
+      "kind": "markdown",
+      "editable": true,
+      "contentHash": "sha256:8f13d6adebe151446808541bfc1888ad0f12b08038bd6fafc75245e488ff57a6"
+    }
+  ],
+  "editableSurfaces": [
+    "content"
+  ],
+  "agentCapabilities": [
+    "creation.generate",
+    "creation.edit"
+  ],
+  "sandbox": {
+    "network": false,
+    "shell": false,
+    "vaultWrite": false,
+    "allowTopNavigation": false,
+    "allowPopups": false,
+    "allowExternalScripts": false
+  },
+  "compatibility": {
+    "minRuntimeVersion": "0.1.2",
+    "previewMode": "sandboxedIframe"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This template is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire template manifest and Markdown entrypoint; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

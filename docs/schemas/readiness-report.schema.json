@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yunspire.local/schemas/readiness-report.schema.json",
+  "title": "CreationReadinessReport",
+  "description": "Deterministic publication-readiness result. Ready means copy/export ready and never claims delivery to a publishing platform.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "documentId",
+    "documentRevision",
+    "target",
+    "status",
+    "publicationClaim",
+    "checks",
+    "blockers",
+    "warnings",
+    "assets",
+    "validation",
+    "generatedAt",
+    "engineVersion"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+    "documentId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+    "documentRevision": { "type": "integer", "minimum": 1 },
+    "target": { "type": "string", "enum": ["wechat", "html", "markdown", "pdf", "image"] },
+    "status": { "type": "string", "enum": ["blocked", "reviewRequired", "readyForExport", "exported"] },
+    "publicationClaim": { "const": "exportOnly" },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/check" }
+    },
+    "blockers": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+    "warnings": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+    "assets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "ready", "uploadRequired", "failed", "missingAlt"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "ready": { "type": "integer", "minimum": 0 },
+        "uploadRequired": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "missingAlt": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaValid", "astValid", "htmlValid", "cjkSpacingValid", "citationsResolved", "titleSelected", "coverReady"],
+      "properties": {
+        "schemaValid": { "type": "boolean" },
+        "astValid": { "type": "boolean" },
+        "htmlValid": { "type": "boolean" },
+        "cjkSpacingValid": { "type": "boolean" },
+        "citationsResolved": { "type": "boolean" },
+        "titleSelected": { "type": "boolean" },
+        "coverReady": { "type": "boolean" }
+      }
+    },
+    "output": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["format", "relativePath", "contentHash"],
+          "properties": {
+            "format": { "type": "string", "enum": ["html", "markdown", "pdf", "png", "jpeg", "zip"] },
+            "relativePath": { "type": "string", "minLength": 1, "maxLength": 2048 },
+            "contentHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+          }
+        }
+      ]
+    },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "engineVersion": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" }
+  },
+  "$defs": {
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "category", "status", "deterministic", "detail", "evidenceRefs"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9._-]{0,99}$" },
+        "category": { "type": "string", "enum": ["content", "structure", "citation", "asset", "layout", "compatibility", "safety", "brand", "export"] },
+        "status": { "type": "string", "enum": ["pass", "warn", "fail", "skip"] },
+        "deterministic": { "type": "boolean" },
+        "detail": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "evidenceRefs": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 500 }, "uniqueItems": true }
+      }
+    }
+  }
+}

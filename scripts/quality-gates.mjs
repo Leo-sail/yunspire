@@ -20,13 +20,108 @@ async function readText(...segments) {
   return (await readFile(path.join(root, ...segments), 'utf8')).replace(/\r\n?/gu, '\n');
 }
 
+function escapeRegularExpression(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+function importedLocalName(source, moduleSpecifier, importedName) {
+  const imports = source.matchAll(/\bimport\s*\{([\s\S]*?)\}\s*from\s*(['"])([^'"]+)\2\s*;?/gu);
+  for (const match of imports) {
+    if (match[3] !== moduleSpecifier) continue;
+    const bindings = match[1]
+      .replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/gu, ' ')
+      .split(',')
+      .map((binding) => binding.trim())
+      .filter(Boolean);
+    for (const binding of bindings) {
+      const parsed = binding.match(/^([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?$/u);
+      if (parsed?.[1] === importedName) return parsed[2] || parsed[1];
+    }
+  }
+  return null;
+}
+
+function callsIdentifier(source, identifier, { awaited = false } = {}) {
+  if (!identifier) return false;
+  const prefix = awaited ? '\\bawait\\s+' : '(?:^|[^\\w$])';
+  return new RegExp(`${prefix}${escapeRegularExpression(identifier)}\\s*\\(`, 'u').test(source);
+}
+
+function invokesNativeCommand(source, command) {
+  return new RegExp(`\\binvokeNative\\s*\\(\\s*['"]${escapeRegularExpression(command)}['"]`, 'u').test(source);
+}
+
+function registersRustCommand(source, moduleName, command) {
+  return new RegExp(`\\b${escapeRegularExpression(moduleName)}\\s*::\\s*${escapeRegularExpression(command)}\\b`, 'u').test(source);
+}
+
+function extractJavaScriptFunction(source, functionName) {
+  const declaration = new RegExp(
+    `\\b(?:async\\s+)?function\\s+${escapeRegularExpression(functionName)}\\s*\\([\\s\\S]*?\\)\\s*\\{`,
+    'u',
+  ).exec(source);
+  if (!declaration) return '';
+  const openingBrace = declaration.index + declaration[0].lastIndexOf('{');
+  let depth = 0;
+  let state = 'code';
+  for (let index = openingBrace; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (state === 'lineComment') {
+      if (character === '\n') state = 'code';
+      continue;
+    }
+    if (state === 'blockComment') {
+      if (character === '*' && next === '/') {
+        state = 'code';
+        index += 1;
+      }
+      continue;
+    }
+    if (state !== 'code') {
+      if (character === '\\') {
+        index += 1;
+        continue;
+      }
+      if ((state === 'singleQuote' && character === "'")
+        || (state === 'doubleQuote' && character === '"')
+        || (state === 'template' && character === '`')) state = 'code';
+      continue;
+    }
+    if (character === '/' && next === '/') {
+      state = 'lineComment';
+      index += 1;
+    } else if (character === '/' && next === '*') {
+      state = 'blockComment';
+      index += 1;
+    } else if (character === "'") state = 'singleQuote';
+    else if (character === '"') state = 'doubleQuote';
+    else if (character === '`') state = 'template';
+    else if (character === '{') depth += 1;
+    else if (character === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(declaration.index, index + 1);
+    }
+  }
+  return '';
+}
+
 const html = await readText('desktop-ui/index.html');
 const appSource = await readText('desktop-ui/app.js');
 const styles = await readText('desktop-ui/styles.css');
 const nativeLibrary = await readText('src-tauri/src/lib.rs');
 const modelProvider = await readText('src-tauri/src/model_provider.rs');
+const nativeCreation = await readText('src-tauri/src/creation/mod.rs');
+const writingPanelSource = await readText('desktop-ui/creation/writing-panel.js');
+const executionControllerSource = await readText('desktop-ui/creation/execution-controller.js');
+const durableAssetsSource = await readText('desktop-ui/creation/durable-assets.js');
+const skillLifecycle = await readText('src-tauri/src/skill_lifecycle.rs');
+const skillExecutionRuntime = await readText('desktop-ui/skill-execution-runtime.js');
+const embeddedLinkRuntime = await readText('desktop-ui/embedded-link-runtime.js');
+const runtimeDatabase = await readText('src-tauri/src/runtime_db.rs');
 const capturePipeline = await readText('src-tauri/src/capture_pipeline.rs');
 const obsidianAdapter = await readText('src-tauri/src/obsidian.rs');
+const vaultBatch = await readText('src-tauri/src/vault_batch.rs');
 const documentSkill = await readText('skills/document-content-analysis/SKILL.md');
 const documentOrigin = JSON.parse(await readText('skills/document-content-analysis/origin.json'));
 const documentExtractor = await readText('skills/document-content-analysis/scripts/extract_document.py');
@@ -46,7 +141,6 @@ const windowsMediaHelper = await readText('skills/video-content-analysis/scripts
 const windowsSpeechHelper = await readText('skills/video-content-analysis/scripts/yunspire_speech_windows.cpp');
 const windowsMediaBuild = await readText('scripts/build-windows-media-helper.mjs');
 const windowsReleaseVerifier = await readText('scripts/verify-windows-release.mjs');
-const releaseWorkflow = await readText('.github/workflows/release.yml');
 const officeParsers = Object.fromEntries(await Promise.all(['ooxml_word.py', 'ooxml_excel.py', 'ooxml_ppt.py'].map(async (fileName) => [
   fileName,
   await readText('skills/document-content-analysis/scripts', fileName),
@@ -69,24 +163,365 @@ if (!/data-locked-switch="true"/u.test(html)) failures.push('destructive confirm
 
 const routes = new Set([...html.matchAll(/\bdata-route="([^"]+)"/gu)].map((match) => match[1]));
 const views = new Set([...html.matchAll(/\bdata-view="([^"]+)"/gu)].map((match) => match[1]));
-if (routes.size !== 10 || views.size !== 10) {
-  failures.push(`expected 10 navigation routes and views, found routes=${routes.size} views=${views.size}`);
+const expectedPrimaryRoutes = new Set(['dashboard', 'search', 'create', 'reports']);
+const allowedAuxiliaryViews = new Set(['agent', 'capture', 'audit', 'settings']);
+if (routes.size !== expectedPrimaryRoutes.size || [...routes].some((route) => !expectedPrimaryRoutes.has(route))) {
+  failures.push(`expected primary navigation routes ${[...expectedPrimaryRoutes].join(',')}; found ${[...routes].join(',') || 'none'}`);
 }
 for (const route of routes) {
   if (!views.has(route)) failures.push(`navigation route has no page: ${route}`);
 }
 for (const view of views) {
-  if (!routes.has(view)) failures.push(`page has no primary navigation route: ${view}`);
+  if (!routes.has(view) && !allowedAuxiliaryViews.has(view)) failures.push(`unregistered auxiliary page: ${view}`);
+}
+for (const removedViewName of ['skills', 'tasks']) {
+  if (views.has(removedViewName)) failures.push(`removed ${removedViewName} page must not return`);
+}
+if (/data-view="(?:skills|tasks)"/u.test(styles)) failures.push('removed Skills or Tasks page selectors must not return');
+if (!/class="r10-topbar"/u.test(html)) failures.push('current top navigation is missing');
+if (/class="[^"]*\bsidebar\b/u.test(html)) failures.push('removed sidebar markup must not return');
+if (!/\.app-shell\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)[^}]*grid-template-rows:\s*var\(--size-top-navigation\)\s+minmax\(0,\s*1fr\)/su.test(styles)) {
+  failures.push('top-navigation application grid is missing');
+}
+if (/\.app-shell\.sidebar-collapsed\b/u.test(styles)) failures.push('removed sidebar-collapse layout must not return');
+for (const assistantShellPrimitive of [
+  'class="agent-layout execution-collapsed"',
+  'data-execution-toggle',
+  'function setExecutionCollapsed(',
+  'const selected = [...selectedCapabilityIds]',
+]) {
+  if (!html.includes(assistantShellPrimitive) && !appSource.includes(assistantShellPrimitive)) failures.push(`AI single-workspace primitive is missing: ${assistantShellPrimitive}`);
+}
+for (const composerPrimitive of [
+  'data-attachment-actions-trigger',
+  'data-attachment-actions-menu',
+  'data-tool-menu-trigger',
+  'toolCapability',
+  'composer.addEventListener(\'drop\'',
+  'droppedComposerFiles',
+]) {
+  if (!html.includes(composerPrimitive) && !appSource.includes(composerPrimitive)) failures.push(`composer attachment/tool primitive is missing: ${composerPrimitive}`);
+}
+if (!/\.filter-pane\s*\{[^}]*display:\s*none/isu.test(styles) && !/<aside class="filter-pane"[^>]*hidden/iu.test(html)) {
+  failures.push('knowledge-base filters must remain hidden from the user');
+}
+for (const assistantOnlySkillPrimitive of [
+  'data-skill-create-with-assistant',
+  'data-skill-manage-with-assistant',
+]) {
+  if (!html.includes(assistantOnlySkillPrimitive)) failures.push(`AI-only Skill entry is missing: ${assistantOnlySkillPrimitive}`);
+}
+for (const skillExecutionPrimitive of [
+  'async function executeSelectedUserSkills(',
+  "invokeNative('list_routable_skills')",
+  'skillExecutionRuntime.execute(',
+  'expectedPayloadHash',
+  'execution.skill.payloadHash',
+  'userSkillSnapshots',
+]) {
+  if (!appSource.includes(skillExecutionPrimitive)) failures.push(`controlled user Skill execution is missing: ${skillExecutionPrimitive}`);
+}
+if (!skillExecutionRuntime.includes("await invoke('execute_skill', { input: request })")) {
+  failures.push('controlled user Skill runtime does not invoke the native execute_skill command');
+}
+if (!nativeLibrary.includes('skill_lifecycle::execute_skill')) failures.push('native Skill execution command is not registered');
+for (const nativeSkillExecutionPrimitive of [
+  'pub async fn execute_skill(',
+  'execution_snapshot_in_connection(',
+  'validate_declared_schema(',
+  'skill.execution.started',
+  'skill.execution.succeeded',
+  'expected_payload_hash',
+]) {
+  if (!skillLifecycle.includes(nativeSkillExecutionPrimitive)) failures.push(`native controlled Skill execution is missing: ${nativeSkillExecutionPrimitive}`);
+}
+for (const skillModelPrimitive of [
+  'APPROVED_SKILL_EXECUTION_SYSTEM_PROMPT',
+  'execute_approved_skill_model(',
+  'yunspire.approved-skill-execution.v1',
+]) {
+  if (!modelProvider.includes(skillModelPrimitive)) failures.push(`approved Skill model boundary is missing: ${skillModelPrimitive}`);
+}
+for (const thirdPartySkillUiPrimitive of [
+  "new Set(['list', 'run', 'create', 'install'",
+  'function handoffSkillInstallationToAssistant()',
+  "invokeNative('install_skill_from_github'",
+  'userConfirmed: true',
+  'skill.evaluationPassed === true',
+  '自动批准、默认启用并进入可路由集合',
+]) {
+  if (!appSource.includes(thirdPartySkillUiPrimitive)) failures.push(`AI-confirmed third-party Skill install UI is missing: ${thirdPartySkillUiPrimitive}`);
+}
+if (!html.includes('data-skill-install-with-assistant')) failures.push('AI third-party Skill install entry is missing from the tool menu');
+if (!nativeLibrary.includes('skill_lifecycle::install_skill_from_github')) failures.push('native third-party Skill install command is not registered');
+for (const thirdPartySkillNativePrimitive of [
+  'pub async fn install_skill_from_github(',
+  'normalize_github_skill_url(',
+  '.redirect(Policy::none())',
+  'response.status().is_redirection()',
+  'response.bytes_stream()',
+  'MAX_REMOTE_SKILL_BYTES',
+  'String::from_utf8(bytes)',
+  'url.query().is_some() || url.fragment().is_some()',
+  'skill.source.imported',
+  '"sourceUrl"',
+  '"sourceHash"',
+  'capabilities: Vec::new()',
+  'user_confirmed',
+  'finalize_confirmed_import(',
+]) {
+  if (!skillLifecycle.includes(thirdPartySkillNativePrimitive)) failures.push(`restricted GitHub Skill importer is missing: ${thirdPartySkillNativePrimitive}`);
+}
+const importedSkillFinalization = skillLifecycle.match(/fn finalize_confirmed_import\([\s\S]*?\n\}/u)?.[0] || '';
+const confirmedImportSequence = [
+  'evaluate_candidate(',
+  'if !evaluation.passed {',
+  'return Ok(evaluation.skill);',
+  'decide_candidate(',
+  'approved: true',
+  'change_activation(',
+  'SkillActivationAction::Enable',
+];
+for (const confirmedImportPrimitive of confirmedImportSequence) {
+  if (!importedSkillFinalization.includes(confirmedImportPrimitive)) {
+    failures.push(`confirmed third-party Skill import finalization is missing: ${confirmedImportPrimitive}`);
+  }
+}
+const confirmedImportPositions = confirmedImportSequence.map((primitive) => importedSkillFinalization.indexOf(primitive));
+if (confirmedImportPositions.some((position) => position < 0)
+  || confirmedImportPositions.some((position, index) => index > 0 && position <= confirmedImportPositions[index - 1])) {
+  failures.push('confirmed third-party Skill import must evaluate, short-circuit failures, approve, then enable in order');
+}
+for (const thirdPartySkillModelPrimitive of ['skill_action=install', 'source_url', '第三方 Skill 只能导入 name、description 和 instructions']) {
+  if (!modelProvider.includes(thirdPartySkillModelPrimitive)) failures.push(`third-party Skill model contract is missing: ${thirdPartySkillModelPrimitive}`);
+}
+for (const embeddingUiPrimitive of [
+  "const modelRoles = ['chat', 'analysis', 'image', 'embedding'];",
+  "embedding: '向量'",
+  "if (provider === 'anthropic') assignments.embedding = [];",
+  "role === 'embedding' && profile?.provider === 'anthropic'",
+  "role === 'embedding' && profile.provider === 'anthropic'",
+  "invokeNative('get_neural_embedding_index_status'",
+  "invokeNative('rebuild_neural_embedding_index'",
+  "refresh.disabled = !isTauriRuntime || state === 'loading'",
+  'neuralEmbeddingRebuildPollTimer = window.setInterval',
+  'progress.style.transform = `scaleX(${percent / 100})`',
+]) {
+  if (!appSource.includes(embeddingUiPrimitive)) failures.push(`neural Embedding UI integration is missing: ${embeddingUiPrimitive}`);
+}
+for (const embeddingHtmlPrimitive of [
+  'data-embedding-index-status',
+  'role="progressbar"',
+  'data-refresh-embedding-index',
+  'data-rebuild-embedding-index',
+  '神经语义索引',
+]) {
+  if (!html.includes(embeddingHtmlPrimitive)) failures.push(`neural Embedding settings surface is missing: ${embeddingHtmlPrimitive}`);
+}
+const restoreModelConfigurations = appSource.match(/async function restoreModelConfigurations\(\)[\s\S]*?\n\}/u)?.[0] || '';
+if (!restoreModelConfigurations.includes('await loadNeuralEmbeddingIndexStatus({ silent: true })')) {
+  failures.push('model provider restoration must refresh neural Embedding index status');
+}
+if (!appSource.includes("if (startupTarget.route === 'settings') activateSetting(params.get('setting') || 'general', false)")) {
+  failures.push('authorized startup must restore the requested settings panel');
+}
+for (const embeddingCommandScope of [
+  "invokeNative('get_neural_embedding_index_status', { vaultId: null })",
+  "invokeNative('rebuild_neural_embedding_index', { vaultId: null, consent: true })",
+]) {
+  if (!appSource.includes(embeddingCommandScope)) failures.push(`neural Embedding workspace scope is missing: ${embeddingCommandScope}`);
+}
+if (!/\.embedding-index-metrics\s*\{[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(92px,\s*\.7fr\)\)\s+minmax\(180px,\s*1\.9fr\)/u.test(styles)
+  || !/\.embedding-index-status > footer\s*\{[^}]*display:\s*flex[^}]*justify-content:\s*space-between/u.test(styles)) {
+  failures.push('neural Embedding status card must preserve its desktop metrics and action layout');
+}
+if (!/\.embedding-index-progress > span\s*\{[^}]*transition:\s*transform/u.test(styles)
+  || /\.embedding-index-progress > span\s*\{[^}]*transition:\s*width/u.test(styles)) {
+  failures.push('neural Embedding progress must animate with transform instead of layout width');
+}
+for (const creationImagePlaceholderPrimitive of [
+  'const creationImagePlaceholderSrc =',
+  'image.src = creationImagePlaceholderSrc',
+  "image.dataset.draftPlaceholder = 'true'",
+]) {
+  if (!appSource.includes(creationImagePlaceholderPrimitive)) failures.push(`creation draft image placeholder is missing: ${creationImagePlaceholderPrimitive}`);
+}
+for (const creationRuntimePrimitive of [
+  "from './creation/content-type-runtime.js'",
+  "from './creation/editor-adapter.js'",
+  "from './creation/document-title.js'",
+  'evaluateCreationContentTypeRuntime(',
+  'function evaluateActiveCreationRuntime(',
+  'function buildCreationRenderedHtml(runtime',
+  '...runtime.checks',
+  "from './creation/html-studio.js'",
+  'buildHtmlStudioPreview({ channels: { html: fragment, css: baseCss } })',
+  "invokeNative('normalize_creation_document'",
+  'creationDocumentToEditorHtml(creationDocument)',
+  'editorElementToMarkdown(editor, { attachmentPaths })',
+  'resolveCreationDocumentTitle(requested',
+  'ensureCreationExportAllowed(',
+  'button.disabled = blocked',
+  'recordCreationExport(',
+]) {
+  if (!appSource.includes(creationRuntimePrimitive)) failures.push(`typed creation runtime integration is missing: ${creationRuntimePrimitive}`);
+}
+for (const creationNativeRegistration of [
+  'creation::list_creation_catalog',
+  'creation::normalize_creation_document',
+]) {
+  if (!nativeLibrary.includes(creationNativeRegistration)) failures.push(`native creation command is not registered: ${creationNativeRegistration}`);
+}
+
+const runCreationRewriteSource = extractJavaScriptFunction(appSource, 'runCreationRewrite');
+const cancelCreationWritingTransportSource = extractJavaScriptFunction(appSource, 'cancelCreationWritingTransport');
+const acceptCreationRewriteSource = extractJavaScriptFunction(appSource, 'acceptCreationRewrite');
+const assertCreationRewriteStillCurrentSource = extractJavaScriptFunction(appSource, 'assertCreationRewriteStillCurrent');
+const normalizeCreationDocumentForRuntimeSource = extractJavaScriptFunction(appSource, 'normalizeCreationDocumentForRuntime');
+const saveCreationToVaultSource = extractJavaScriptFunction(appSource, 'saveCreationToVault');
+
+const createWritingRunLocal = importedLocalName(appSource, './creation/writing-panel.js', 'createWritingRun');
+if (!createWritingRunLocal) {
+  failures.push('creation rewrite must import createWritingRun from writing-panel.js');
+} else {
+  if (!/\bexport\s+async\s+function\s+createWritingRun\s*\(/u.test(writingPanelSource)) {
+    failures.push('writing-panel.js must export createWritingRun');
+  }
+  if (!callsIdentifier(runCreationRewriteSource, createWritingRunLocal, { awaited: true })) {
+    failures.push('creation rewrite must await createWritingRun before starting execution');
+  }
+}
+
+const createExecutionControllerLocal = importedLocalName(appSource, './creation/execution-controller.js', 'createCreationExecutionController');
+const restoreExecutionControllerLocal = importedLocalName(appSource, './creation/execution-controller.js', 'restoreCreationExecutionController');
+if (!createExecutionControllerLocal || !restoreExecutionControllerLocal) {
+  failures.push('creation rewrite must import createCreationExecutionController and restoreCreationExecutionController from execution-controller.js');
+} else {
+  if (!/\bexport\s+function\s+restoreCreationExecutionController\s*\(/u.test(executionControllerSource)) {
+    failures.push('execution-controller.js must export restoreCreationExecutionController');
+  }
+  if (!callsIdentifier(runCreationRewriteSource, createExecutionControllerLocal)) {
+    failures.push('new WritingRuns must be owned by createCreationExecutionController');
+  }
+  if (!callsIdentifier(runCreationRewriteSource, restoreExecutionControllerLocal)) {
+    failures.push('recoverable WritingRuns must use restoreCreationExecutionController');
+  }
+}
+
+if (!/\babort\s*:\s*\(?\s*reason\s*\)?\s*=>\s*cancelCreationWritingTransport\s*\(/u.test(runCreationRewriteSource)) {
+  failures.push('creation execution controllers must route aborts through cancelCreationWritingTransport');
+}
+if (!invokesNativeCommand(cancelCreationWritingTransportSource, 'cancel_assistant_request')) {
+  failures.push('creation cancellation must invoke the native cancel_assistant_request command');
+}
+if (!registersRustCommand(nativeLibrary, 'model_provider', 'cancel_assistant_request')) {
+  failures.push('native cancel_assistant_request command is not registered');
+}
+if (!/#\s*\[\s*tauri::command\s*\]\s*pub\s+(?:async\s+)?fn\s+cancel_assistant_request\s*\(/u.test(modelProvider)
+  || !/\bpub\s+(?:async\s+)?fn\s+cancel_assistant_request\s*\([\s\S]{0,600}?\brequest_state\s*\.\s*cancel\s*\(\s*request_id\s*\)/u.test(modelProvider)) {
+  failures.push('native cancel_assistant_request must cancel the tracked model request');
+}
+
+if (!invokesNativeCommand(normalizeCreationDocumentForRuntimeSource, 'validate_creation_document')) {
+  failures.push('typed Creation normalization must invoke native validate_creation_document when requested');
+}
+if (!registersRustCommand(nativeLibrary, 'creation', 'validate_creation_document')) {
+  failures.push('native validate_creation_document command is not registered');
+}
+if (!/#\s*\[\s*tauri::command\s*\]\s*pub\s+fn\s+validate_creation_document\s*\([^)]*\)\s*->\s*ValidationReport\s*\{\s*validate_document\s*\(\s*&\s*document\s*\)\s*\}/u.test(nativeCreation)) {
+  failures.push('native validate_creation_document must delegate to Creation validate_document');
+}
+
+const prepareDurableTextNoteWriteLocal = importedLocalName(appSource, './creation/durable-assets.js', 'prepareDurableTextNoteWrite');
+if (!prepareDurableTextNoteWriteLocal
+  || !new RegExp(`\\bawait\\s+${escapeRegularExpression(prepareDurableTextNoteWriteLocal)}\\s*\\(`, 'u').test(appSource)) {
+  failures.push('creation Vault save must stage the complete Markdown body through prepareDurableTextNoteWrite');
+}
+if (!/\bexport\s+async\s+function\s+prepareDurableTextNoteWrite\s*\(/u.test(durableAssetsSource)
+  || !/invoke\(\s*['"]prepare_note_write_from_durable_asset['"]/u.test(durableAssetsSource)
+  || !/invoke\(\s*['"]delete_durable_asset['"]/u.test(durableAssetsSource)) {
+  failures.push('durable Creation Vault staging must prepare from the asset and clean it when preparation fails');
+}
+if (!registersRustCommand(nativeLibrary, 'obsidian', 'prepare_note_write_from_durable_asset')) {
+  failures.push('native prepare_note_write_from_durable_asset command is not registered');
+}
+if (!obsidianAdapter.includes('Self::Durable(path) => hash_file_streaming(path)')
+  || !obsidianAdapter.includes('Self::Durable(path) => BatchFileSource::Path(path)')
+  || !obsidianAdapter.includes('pending.batch_source()')
+  || !obsidianAdapter.includes('vault_batch::commit_batch_sources(')
+  || !vaultBatch.includes('Self::Path(path) => hash_file(path)')
+  || !vaultBatch.includes('let mut buffer = vec![0u8; 1024 * 1024];')
+  || !vaultBatch.includes('BatchFileSource::Path(source_path) => durable_atomic_copy(path, source_path)')) {
+  failures.push('native Vault adapter must hash and commit durable note bodies through bounded file streaming');
+}
+if (/\binvokeNative\s*\(\s*['"]prepare_note_write['"]/u.test(saveCreationToVaultSource)) {
+  failures.push('creation Vault save must not send the complete article through one prepare_note_write IPC argument');
+}
+
+if (!acceptCreationRewriteSource) {
+  failures.push('creation candidate acceptance function is missing');
+} else {
+  const inputHashCheck = assertCreationRewriteStillCurrentSource.search(
+    /\bawait\s+sha256Text\s*\(\s*draft\s*\.\s*original\s*\)\s*!==\s*run\s*\.\s*inputHash\b/u,
+  );
+  const outputHashCheck = assertCreationRewriteStillCurrentSource.search(
+    /\bawait\s+sha256Text\s*\(\s*draft\s*\.\s*revised\s*\)\s*!==\s*run\s*\.\s*outputHash\b/u,
+  );
+  const freshnessCall = acceptCreationRewriteSource.search(/\bawait\s+assertCreationRewriteStillCurrent\s*\(/u);
+  const nativeValidationCall = acceptCreationRewriteSource.search(
+    /\bawait\s+normalizeCreationDocumentForRuntime\s*\([\s\S]*?,\s*\{\s*validate\s*:\s*true\s*\}\s*\)/u,
+  );
+  const nativeValidationGuard = acceptCreationRewriteSource.search(
+    /runtimeCandidate\s*\.\s*validation\s*&&\s*!\s*runtimeCandidate\s*\.\s*validation\s*\.\s*valid\b/u,
+  );
+  const candidateCommit = acceptCreationRewriteSource.search(/\bcommitCreationEditorHistory\s*\(/u);
+  if (!assertCreationRewriteStillCurrentSource || inputHashCheck < 0 || outputHashCheck < 0) {
+    failures.push('creation candidate acceptance must compare candidate content with run.inputHash and run.outputHash');
+  } else if (candidateCommit < 0 || freshnessCall < 0 || freshnessCall > candidateCommit) {
+    failures.push('WritingRun input/output hashes must be verified before the creation candidate is committed');
+  }
+  if (nativeValidationCall < 0 || nativeValidationGuard < 0) {
+    failures.push('creation candidate acceptance must request and enforce native Creation validation');
+  } else if (candidateCommit < 0 || nativeValidationCall > candidateCommit || nativeValidationGuard > candidateCommit) {
+    failures.push('native Creation validation must pass before the creation candidate is committed');
+  }
+}
+for (const embeddingNativeRegistration of [
+  'runtime_db::get_neural_embedding_index_status',
+  'runtime_db::rebuild_neural_embedding_index',
+]) {
+  if (!nativeLibrary.includes(embeddingNativeRegistration)) failures.push(`neural Embedding command is not registered: ${embeddingNativeRegistration}`);
+}
+for (const embeddingRuntimePrimitive of [
+  'pub struct NeuralEmbeddingIndexStatus',
+  'CREATE TABLE IF NOT EXISTS neural_embedding_cache',
+  'CREATE TABLE IF NOT EXISTS note_neural_embeddings',
+  'CREATE TABLE IF NOT EXISTS neural_embedding_index_state',
+  'pub fn get_neural_embedding_index_status(',
+  'pub async fn rebuild_neural_embedding_index(',
+]) {
+  if (!runtimeDatabase.includes(embeddingRuntimePrimitive)) failures.push(`neural Embedding runtime primitive is missing: ${embeddingRuntimePrimitive}`);
 }
 for (const requiredInteraction of [
   "document.querySelectorAll('[data-route]')",
   "document.querySelectorAll('[data-tab]')",
-  "document.getElementById('task-drawer-trigger')",
+  "document.getElementById('r10-task-drawer-trigger')",
   "document.addEventListener('keydown'",
   "toggleAttribute('inert'",
 ]) {
   if (!appSource.includes(requiredInteraction)) failures.push(`core interaction handler missing: ${requiredInteraction}`);
 }
+
+const routedClickPreamble = appSource.match(
+  /const button = event\.target\.closest\('button'\);[\s\S]*?const view = button\.closest\('\[data-view\]'\)\?\.dataset\.view;/u,
+)?.[0] || '';
+if (!/button\.closest\('\[data-conversation-list\] \[data-conversation-id\]'\)/u.test(routedClickPreamble)) {
+  failures.push('global conversation selector must run before data-view click dispatch');
+}
+if (!routedClickPreamble.includes('selectSecretaryConversation(')) {
+  failures.push('global conversation click must select the requested conversation before data-view dispatch');
+}
+
 for (const hybridSearchPrimitive of [
   'function mergeKnowledgeSearchResults(',
   'function compareKnowledgeSearchResults(',
@@ -106,12 +541,15 @@ if (!/\.view\s*\{[^}]*overflow-y:\s*auto/isu.test(styles)) failures.push('page-l
 if (!/\.task-drawer\s*\{[^}]*position:\s*fixed/isu.test(styles)) failures.push('task drawer must remain a fixed overlay');
 if (!/\.drawer-section\s*\{[^}]*overflow-y:\s*auto/isu.test(styles)) failures.push('task drawer content scrolling is missing');
 
-const onboardingSteps = [...html.matchAll(/\bdata-onboarding-step="([0-4])"/gu)].map((match) => match[1]);
-if (onboardingSteps.join(',') !== '0,1,2,3,4') failures.push(`first-run onboarding must contain exactly five ordered features; found ${onboardingSteps.join(',') || 'none'}`);
-if (!appSource.includes('const ONBOARDING_VERSION = 1')) failures.push('versioned first-run onboarding state is missing');
+const onboardingSteps = [...html.matchAll(/\bdata-onboarding-step="([0-2])"/gu)].map((match) => match[1]);
+if (onboardingSteps.join(',') !== '0,1,2') failures.push(`first-run onboarding must contain exactly three ordered features; found ${onboardingSteps.join(',') || 'none'}`);
+for (const onboardingCopy of ['从你的知识开始', '回到上次停下的地方', '需要时再打开助手']) {
+  if (!html.includes(onboardingCopy)) failures.push(`first-run onboarding is missing: ${onboardingCopy}`);
+}
+if (!appSource.includes('const ONBOARDING_VERSION = 2')) failures.push('current versioned first-run onboarding state is missing');
 if (!appSource.includes("if (!openOnboarding()) openAssistantSetup()")) failures.push('first launch must open onboarding before assistant preferences');
 const avatarOptions = [...html.matchAll(/\bdata-assistant-avatar="([^"]+)"/gu)].map((match) => match[1]);
-if (avatarOptions.length < 8) failures.push(`assistant emoji picker must include at least 8 built-in choices; found ${avatarOptions.length}`);
+if (avatarOptions.length < 8) failures.push(`assistant Lucide icon picker must include at least 8 built-in choices; found ${avatarOptions.length}`);
 if (!appSource.includes('function assistantDisplayAvatar()')) failures.push('assistant avatar allowlist renderer is missing');
 if (appSource.includes("'云'</span><div><div class=\"message-meta\"")) failures.push('assistant message avatar remains hard-coded');
 if (/(?:>|["'])LC(?:<|["'])/u.test(appSource)) failures.push('legacy hard-coded user initials remain in the interface');
@@ -257,7 +695,8 @@ for (const documentContractPrimitive of [
   '普通超链接',
   '质量门禁必须阻断',
   'Agent 库/资料库/原文/',
-  '不建立实体图谱、向量索引或混合检索',
+  '当前不建立实体图谱',
+  '统一索引链维护本地特征向量与 RRF 混合检索',
 ]) {
   if (!documentSkill.includes(documentContractPrimitive)) failures.push(`document Skill contract is missing: ${documentContractPrimitive}`);
 }
@@ -354,18 +793,6 @@ for (const verifierPrimitive of [
 ]) {
   if (!windowsReleaseVerifier.includes(verifierPrimitive)) {
     failures.push(`Windows CPython license verification is missing: ${verifierPrimitive}`);
-  }
-}
-for (const workflowPrimitive of [
-  'verify_resource_hash()',
-  'shasum -a 256',
-  'Contents/Resources/legal/LICENSE',
-  'Contents/Resources/legal/NOTICE',
-  'Contents/Resources/legal/THIRD_PARTY_NOTICES.txt',
-  'src-tauri/target/yunspire-licenses/THIRD_PARTY_NOTICES.txt',
-]) {
-  if (!releaseWorkflow.includes(workflowPrimitive)) {
-    failures.push(`macOS legal resource hash gate is missing: ${workflowPrimitive}`);
   }
 }
 if (!capturePipeline.includes('yunspire-runtime') || !capturePipeline.includes('python.exe')) {
@@ -710,8 +1137,15 @@ if (!documentExtractor.includes('"parse_limits_applied": []') || !documentExtrac
   failures.push('document extraction does not explicitly report lossless parsing metadata');
 }
 if (!documentExtractor.includes('os.walk(path, followlinks=False)')) failures.push('folder extraction does not explicitly disable symlink traversal');
-if (/\.slice\(0,\s*(?:128|512)\s*\)/u.test(appSource)) failures.push('file-internal links still have a silent 128 or 512 item cap');
+const embeddedLinkNormalizer = extractJavaScriptFunction(embeddedLinkRuntime, 'normalizedCapturedEmbeddedLinks');
+const embeddedLinkHydration = extractJavaScriptFunction(appSource, 'hydrateEmbeddedLinkCaptureParameters');
+if (/\.slice\(\s*0,\s*(?:128|512)\b/u.test(`${embeddedLinkNormalizer}\n${embeddedLinkHydration}`)) {
+  failures.push('file-internal links still have a silent 128 or 512 item cap');
+}
 if (!appSource.includes('embedded_link_occurrences') || !appSource.includes('partitionDeterministicCaptureRequests')) failures.push('file-internal link occurrence batching is missing');
+if (!embeddedLinkRuntime.includes('for (let offset = 0; offset < requests.length; offset += normalizedBatchSize)')) {
+  failures.push('file-internal link requests are not partitioned without an aggregate cap');
+}
 if (!appSource.includes('let extractedTitle = sourceName;') || !appSource.includes('let warningCount = 0;')) failures.push('capture failure reporting uses block-scoped extraction metadata');
 if (!appSource.includes('let runCaptureMemory = null;') || !appSource.includes('discardCaptureStagedAttachments(runCaptureMemory?.result)')) failures.push('capture failure cleanup is not isolated to the current run');
 

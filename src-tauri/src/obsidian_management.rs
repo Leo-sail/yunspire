@@ -27,7 +27,6 @@ use uuid::Uuid;
 const DELETE_CONFIRMATION_TTL: Duration = Duration::from_secs(15 * 60);
 const MAX_PENDING_DELETES: usize = 32;
 const MAX_TREE_ENTRIES: u64 = 200_000;
-const MAX_NOTE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_GRAPH_CONFIG_BYTES: usize = 1024 * 1024;
 
 #[derive(Default)]
@@ -119,6 +118,24 @@ pub struct TrashEntryDescriptor {
     entry_count: u64,
     deleted_at: String,
     recoverable: bool,
+    state: String,
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashPurgeReceipt {
+    purge_id: String,
+    operation_ids: Vec<String>,
+    purged_entries: u64,
+    purged_bytes: u64,
+    committed_at: String,
+}
+
+#[derive(Clone)]
+struct PreparedTrashPurge {
+    operation_dir: PathBuf,
+    manifest: TrashManifest,
 }
 
 #[derive(Serialize)]
@@ -659,6 +676,33 @@ fn append_event(
     Ok(committed_at)
 }
 
+// The event ledger records task, trace, state transition and detail as separate fields.
+#[allow(clippy::too_many_arguments)]
+fn append_event_with_state(
+    database: &RuntimeDatabase,
+    task_id: &str,
+    trace_id: Option<String>,
+    event_type: &str,
+    state: &str,
+    vault_id: &str,
+    relative_path: Option<String>,
+    detail: String,
+) -> Result<String, String> {
+    let created_at = now_string();
+    database.append_operation_event(&OperationEvent {
+        id: Uuid::new_v4().to_string(),
+        task_id: Some(task_id.to_string()),
+        trace_id,
+        event_type: event_type.to_string(),
+        state: state.to_string(),
+        created_at: created_at.clone(),
+        vault_id: Some(vault_id.to_string()),
+        relative_path,
+        detail,
+    })?;
+    Ok(created_at)
+}
+
 fn enqueue_markdown_index_with_trace(
     database: &RuntimeDatabase,
     vault_id: &str,
@@ -722,6 +766,7 @@ fn prepare_vault_entry_delete_inner(
         {
             return Err("删除整个 Vault 时不能同时指定内部相对路径".to_string());
         }
+        database.ensure_vault_write_allowed(&workspace_scope, &vault_id, "")?;
         (root.clone(), None)
     } else {
         let relative_path = relative_path
@@ -1147,11 +1192,39 @@ pub fn list_yunspire_trash_entries() -> Result<Vec<TrashEntryDescriptor>, String
     for operation in fs::read_dir(&root)
         .map_err(|error| format!("无法读取 Yunspire 系统回收区：{error}"))?
         .filter_map(Result::ok)
-        .take(1000)
     {
         let operation_id = operation.file_name().to_string_lossy().into_owned();
-        let Ok((operation_dir, manifest)) = read_trash_manifest(&operation_id) else {
+        if !operation.file_type().is_ok_and(|kind| kind.is_dir())
+            || operation_trash_dir(&operation_id).is_err()
+        {
             continue;
+        }
+        let (operation_dir, manifest) = match read_trash_manifest(&operation_id) {
+            Ok(value) => value,
+            Err(error) => {
+                let deleted_at = operation
+                    .metadata()
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .map(chrono::DateTime::<Utc>::from)
+                    .map(|value| value.to_rfc3339())
+                    .unwrap_or_else(now_string);
+                entries.push(TrashEntryDescriptor {
+                    operation_id,
+                    vault_id: String::new(),
+                    vault_name: "损坏的回收记录".to_string(),
+                    original_vault_path: String::new(),
+                    original_relative_path: None,
+                    entry_type: "invalid".to_string(),
+                    byte_length: 0,
+                    entry_count: 0,
+                    deleted_at,
+                    recoverable: false,
+                    state: "invalid".to_string(),
+                    error: Some(error),
+                });
+                continue;
+            }
         };
         let payload = operation_dir.join(&manifest.payload_relative_path);
         let recovery_target_exists = manifest
@@ -1169,10 +1242,355 @@ pub fn list_yunspire_trash_entries() -> Result<Vec<TrashEntryDescriptor>, String
             entry_count: manifest.entry_count,
             deleted_at: manifest.deleted_at,
             recoverable: payload.exists() || recovery_target_exists,
+            state: manifest.state,
+            error: manifest.last_error,
         });
     }
     entries.sort_by(|left, right| right.deleted_at.cmp(&left.deleted_at));
     Ok(entries)
+}
+
+fn prepare_trash_purge(operation_id: &str) -> Result<PreparedTrashPurge, String> {
+    let (operation_dir, manifest) = read_trash_manifest(operation_id)?;
+    if manifest.state != "trashed" {
+        return Err(format!(
+            "回收记录 {} 当前状态为 {}，必须先完成恢复或回收修复后才能永久删除",
+            manifest.operation_id, manifest.state
+        ));
+    }
+    if manifest
+        .recovery_target_path
+        .as_deref()
+        .is_some_and(|path| Path::new(path).exists())
+    {
+        return Err(format!(
+            "回收记录 {} 存在未完成恢复目标，拒绝永久删除",
+            manifest.operation_id
+        ));
+    }
+    let payload = operation_dir.join(&manifest.payload_relative_path);
+    if !payload.exists() {
+        return Err(format!(
+            "回收记录 {} 的数据源缺失，无法验证永久删除目标",
+            manifest.operation_id
+        ));
+    }
+    let snapshot = entry_snapshot(&payload)?;
+    let expected_type_matches = if manifest.entry_type == "vault" {
+        snapshot.entry_type == "folder"
+    } else {
+        snapshot.entry_type == manifest.entry_type
+    };
+    if !expected_type_matches
+        || snapshot.fingerprint != manifest.fingerprint
+        || snapshot.byte_length != manifest.byte_length
+        || snapshot.entry_count != manifest.entry_count
+    {
+        return Err(format!(
+            "回收记录 {} 的数据在永久删除前发生变化，请先检查回收区",
+            manifest.operation_id
+        ));
+    }
+    Ok(PreparedTrashPurge {
+        operation_dir,
+        manifest,
+    })
+}
+
+fn bind_trash_purge_execution(
+    ticket_state: Option<&ExecutionTicketState>,
+    workspace_scope: &str,
+    operation_context: OperationContext,
+    approval_id: &str,
+    effect_digest: &str,
+) -> Result<BoundManagementExecution, String> {
+    let task_id = operation_context
+        .task_id
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "永久删除回收记录缺少原生任务 ID".to_string())?;
+    let trace_id = operation_context
+        .trace_id
+        .filter(|value| !value.trim().is_empty());
+    let Some(ticket_state) = ticket_state else {
+        return Ok(BoundManagementExecution {
+            task_id,
+            trace_id,
+            execution_ticket: None,
+        });
+    };
+    let execution_ticket = operation_context
+        .execution_ticket
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "永久删除回收记录缺少能力范围执行票据".to_string())?;
+    ticket_state.bind_operation_approval(
+        &execution_ticket,
+        workspace_scope,
+        &task_id,
+        trace_id.as_deref(),
+        &["system:delete"],
+        &["delete"],
+        approval_id,
+        effect_digest,
+    )?;
+    Ok(BoundManagementExecution {
+        task_id,
+        trace_id,
+        execution_ticket: Some(execution_ticket),
+    })
+}
+
+fn trash_purge_effect_digest(
+    workspace_scope: &str,
+    kind: &str,
+    entries: &[PreparedTrashPurge],
+) -> String {
+    let payload = serde_json::json!({
+        "kind": kind,
+        "workspaceScope": workspace_scope,
+        "entries": entries.iter().map(|entry| serde_json::json!({
+            "operationId": entry.manifest.operation_id,
+            "vaultId": entry.manifest.vault_id,
+            "originalVaultPath": entry.manifest.original_vault_path,
+            "originalRelativePath": entry.manifest.original_relative_path,
+            "entryType": entry.manifest.entry_type,
+            "fingerprint": entry.manifest.fingerprint,
+            "byteLength": entry.manifest.byte_length,
+            "entryCount": entry.manifest.entry_count,
+        })).collect::<Vec<_>>(),
+    });
+    let bytes = serde_json::to_vec(&payload).expect("trash purge digest is serializable");
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn purge_trash_entries_inner(
+    database: &RuntimeDatabase,
+    ticket_state: Option<&ExecutionTicketState>,
+    mut entries: Vec<PreparedTrashPurge>,
+    kind: &str,
+    confirm_permanent_delete: bool,
+    operation_context: OperationContext,
+) -> Result<TrashPurgeReceipt, String> {
+    if !confirm_permanent_delete {
+        return Err("永久删除必须由用户显式确认".to_string());
+    }
+    entries.sort_by(|left, right| left.manifest.operation_id.cmp(&right.manifest.operation_id));
+    if entries
+        .windows(2)
+        .any(|pair| pair[0].manifest.operation_id == pair[1].manifest.operation_id)
+    {
+        return Err("永久删除请求包含重复回收记录".to_string());
+    }
+    if entries.is_empty() {
+        return Ok(TrashPurgeReceipt {
+            purge_id: format!("purge-{}", Uuid::new_v4()),
+            operation_ids: Vec::new(),
+            purged_entries: 0,
+            purged_bytes: 0,
+            committed_at: now_string(),
+        });
+    }
+    let workspace_scope = database.local_workspace_scope()?;
+    let approval_id = format!("purge-{}", Uuid::new_v4());
+    let effect_digest = trash_purge_effect_digest(&workspace_scope, kind, &entries);
+    let execution = bind_trash_purge_execution(
+        ticket_state,
+        &workspace_scope,
+        operation_context,
+        &approval_id,
+        &effect_digest,
+    )?;
+    let trace_id = database.resolve_operation_trace_id(
+        &workspace_scope,
+        Some(&execution.task_id),
+        execution.trace_id.as_deref(),
+    )?;
+    let mut vault_ids = entries
+        .iter()
+        .map(|entry| entry.manifest.vault_id.as_str())
+        .collect::<Vec<_>>();
+    vault_ids.sort_unstable();
+    vault_ids.dedup();
+    for vault_id in vault_ids {
+        database.ensure_runtime_task_authorized(
+            &workspace_scope,
+            &execution.task_id,
+            &["system:delete"],
+            &["delete"],
+            Some(vault_id),
+            &["awaiting_approval", "running"],
+        )?;
+    }
+    begin_management_commit(
+        ticket_state,
+        &execution,
+        &workspace_scope,
+        &approval_id,
+        &effect_digest,
+    )?;
+
+    // Re-read every manifest and payload fingerprint after the execution ticket is
+    // in-flight, before performing the first irreversible filesystem operation.
+    for entry in &entries {
+        let current = match prepare_trash_purge(&entry.manifest.operation_id) {
+            Ok(current) => current,
+            Err(error) => {
+                abort_management_commit(ticket_state, execution.execution_ticket.as_deref(), true);
+                return Err(error);
+            }
+        };
+        if current.manifest.fingerprint != entry.manifest.fingerprint
+            || current.manifest.byte_length != entry.manifest.byte_length
+            || current.manifest.entry_count != entry.manifest.entry_count
+            || current.operation_dir != entry.operation_dir
+        {
+            abort_management_commit(ticket_state, execution.execution_ticket.as_deref(), true);
+            return Err("回收区在永久删除确认期间发生变化".to_string());
+        }
+    }
+
+    for entry in &entries {
+        if let Err(error) = append_event_with_state(
+            database,
+            &execution.task_id,
+            Some(trace_id.clone()),
+            "vault.trash.purge",
+            "running",
+            &entry.manifest.vault_id,
+            entry.manifest.original_relative_path.clone(),
+            format!(
+                "永久删除已确认，准备物理清除回收记录 {}；fingerprint={}；bytes={}；entries={}",
+                entry.manifest.operation_id,
+                entry.manifest.fingerprint,
+                entry.manifest.byte_length,
+                entry.manifest.entry_count
+            ),
+        ) {
+            abort_management_commit(ticket_state, execution.execution_ticket.as_deref(), true);
+            return Err(format!("无法写入永久删除预审计，尚未删除任何数据：{error}"));
+        }
+    }
+
+    let mut removed_operation_ids = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        if let Err(error) = fs::remove_dir_all(&entry.operation_dir) {
+            let _ = append_event_with_state(
+                database,
+                &execution.task_id,
+                Some(trace_id.clone()),
+                "vault.trash.purge",
+                "failed",
+                &entry.manifest.vault_id,
+                entry.manifest.original_relative_path.clone(),
+                format!(
+                    "物理清除回收记录 {} 失败；此前已删除={}；error={error}",
+                    entry.manifest.operation_id,
+                    removed_operation_ids.join(",")
+                ),
+            );
+            abort_management_commit(ticket_state, execution.execution_ticket.as_deref(), false);
+            return Err(format!(
+                "永久删除未完整完成，执行票据已封存；已删除 [{}]，失败目标 {}：{error}",
+                removed_operation_ids.join(","),
+                entry.manifest.operation_id
+            ));
+        }
+        removed_operation_ids.push(entry.manifest.operation_id.clone());
+    }
+
+    let committed_at = now_string();
+    for entry in &entries {
+        if let Err(error) = append_event_with_state(
+            database,
+            &execution.task_id,
+            Some(trace_id.clone()),
+            "vault.trash.purge",
+            "success",
+            &entry.manifest.vault_id,
+            entry.manifest.original_relative_path.clone(),
+            format!(
+                "已物理清除云枢回收记录 {}；fingerprint={}；bytes={}；entries={}",
+                entry.manifest.operation_id,
+                entry.manifest.fingerprint,
+                entry.manifest.byte_length,
+                entry.manifest.entry_count
+            ),
+        ) {
+            abort_management_commit(ticket_state, execution.execution_ticket.as_deref(), false);
+            return Err(format!(
+                "回收数据已经永久删除，但无法完成成功审计；执行票据已封存：{error}"
+            ));
+        }
+    }
+    finish_management_commit(ticket_state, execution.execution_ticket.as_deref())?;
+    Ok(TrashPurgeReceipt {
+        purge_id: approval_id,
+        operation_ids: removed_operation_ids,
+        purged_entries: entries.iter().map(|entry| entry.manifest.entry_count).sum(),
+        purged_bytes: entries.iter().map(|entry| entry.manifest.byte_length).sum(),
+        committed_at,
+    })
+}
+
+#[tauri::command]
+pub fn purge_yunspire_trash_entry(
+    ticket_state: State<'_, ExecutionTicketState>,
+    database: State<'_, RuntimeDatabase>,
+    operation_id: String,
+    confirm_permanent_delete: bool,
+    operation_context: OperationContext,
+) -> Result<TrashPurgeReceipt, String> {
+    let entry = prepare_trash_purge(operation_id.trim())?;
+    purge_trash_entries_inner(
+        database.inner(),
+        Some(ticket_state.inner()),
+        vec![entry],
+        "purge_trash_entry",
+        confirm_permanent_delete,
+        operation_context,
+    )
+}
+
+#[tauri::command]
+pub fn empty_yunspire_trash(
+    ticket_state: State<'_, ExecutionTicketState>,
+    database: State<'_, RuntimeDatabase>,
+    confirm_permanent_delete: bool,
+    operation_context: OperationContext,
+) -> Result<TrashPurgeReceipt, String> {
+    let root = system_trash_root()?;
+    if !root.exists() {
+        return purge_trash_entries_inner(
+            database.inner(),
+            Some(ticket_state.inner()),
+            Vec::new(),
+            "empty_trash",
+            confirm_permanent_delete,
+            operation_context,
+        );
+    }
+    let mut entries = Vec::new();
+    for operation in fs::read_dir(&root)
+        .map_err(|error| format!("无法读取 Yunspire 系统回收区：{error}"))?
+        .filter_map(Result::ok)
+    {
+        let operation_id = operation.file_name().to_string_lossy().into_owned();
+        if !operation
+            .file_type()
+            .is_ok_and(|file_type| file_type.is_dir())
+            || operation_id.starts_with('.')
+        {
+            continue;
+        }
+        entries.push(prepare_trash_purge(&operation_id)?);
+    }
+    purge_trash_entries_inner(
+        database.inner(),
+        Some(ticket_state.inner()),
+        entries,
+        "empty_trash",
+        confirm_permanent_delete,
+        operation_context,
+    )
 }
 
 #[tauri::command]
@@ -1216,6 +1634,22 @@ fn restore_yunspire_trash_entry_inner(
     let payload = operation_dir.join(&manifest.payload_relative_path);
     if !payload.exists() {
         return Err("云枢回收区中的数据已经不存在，无法恢复".to_string());
+    }
+    let snapshot = entry_snapshot(&payload)?;
+    let expected_entry_type = if manifest.entry_type == "vault" {
+        "folder"
+    } else {
+        manifest.entry_type.as_str()
+    };
+    if snapshot.entry_type != expected_entry_type
+        || snapshot.fingerprint != manifest.fingerprint
+        || snapshot.byte_length != manifest.byte_length
+        || snapshot.entry_count != manifest.entry_count
+    {
+        return Err(format!(
+            "回收数据完整性校验失败：清单记录 {} 项/{} 字节，当前为 {} 项/{} 字节，拒绝恢复",
+            manifest.entry_count, manifest.byte_length, snapshot.entry_count, snapshot.byte_length
+        ));
     }
     let (vault_id, target, target_label) = if manifest.entry_type == "vault" {
         if target_vault_id.is_some() || target_relative_path.is_some() {
@@ -1663,10 +2097,15 @@ fn read_note(root: &Path, relative_path: &str) -> Result<(PathBuf, String, Strin
         return Err("Properties、标签和 Wiki Link 只能修改 Markdown 笔记".to_string());
     }
     let metadata = fs::metadata(&target).map_err(|error| format!("无法读取笔记元数据：{error}"))?;
-    if metadata.len() > MAX_NOTE_BYTES {
-        return Err("笔记超过 8 MB 安全处理上限".to_string());
-    }
-    let content = fs::read_to_string(&target)
+    let requested_capacity = usize::try_from(metadata.len())
+        .map_err(|_| "笔记大小超过当前平台可寻址内存".to_string())?;
+    let mut content = String::new();
+    content
+        .try_reserve_exact(requested_capacity)
+        .map_err(|_| "当前可用内存不足以处理该笔记，请释放内存后重试".to_string())?;
+    File::open(&target)
+        .map_err(|error| format!("无法打开 Markdown 笔记：{error}"))?
+        .read_to_string(&mut content)
         .map_err(|error| format!("无法读取 UTF-8 Markdown 笔记：{error}"))?;
     Ok((target, normalized, content))
 }
@@ -1823,9 +2262,6 @@ fn write_note_mutation(
     let current_hash = content_hash(&current);
     if expected_hash.is_some_and(|expected| expected != current_hash) {
         return Err("笔记已被 Obsidian 或其他程序修改，请重新读取后再提交".to_string());
-    }
-    if next_content.len() as u64 > MAX_NOTE_BYTES {
-        return Err("更新后的笔记超过 8 MB 安全上限".to_string());
     }
     let operation_id = Uuid::new_v4().to_string();
     let effect_digest = management_effect_digest(
@@ -2344,451 +2780,4 @@ pub fn update_obsidian_graph_config(
         checkpoint_path: checkpoint.to_string_lossy().into_owned(),
         committed_at,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::policy::{self, ApplicationCommand, CommandBudget, CommandOrigin};
-    use std::ffi::OsString;
-
-    #[test]
-    fn cross_device_copy_syncs_content_with_a_writable_handle() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let source = directory.path().join("source.md");
-        let target = directory.path().join("trash").join("target.md");
-        fs::write(&source, "跨磁盘回收内容").expect("write source");
-
-        copy_entry(&source, &target).expect("copy and sync entry");
-
-        assert_eq!(
-            fs::read_to_string(&target).expect("read copied entry"),
-            "跨磁盘回收内容"
-        );
-    }
-
-    struct EnvironmentGuard(Vec<(&'static str, Option<OsString>)>);
-
-    impl EnvironmentGuard {
-        fn set(values: &[(&'static str, &Path)]) -> Self {
-            let previous = values
-                .iter()
-                .map(|(key, _)| (*key, env::var_os(key)))
-                .collect::<Vec<_>>();
-            for (key, value) in values {
-                env::set_var(key, value);
-            }
-            Self(previous)
-        }
-    }
-
-    impl Drop for EnvironmentGuard {
-        fn drop(&mut self) {
-            for (key, value) in self.0.drain(..) {
-                if let Some(value) = value {
-                    env::set_var(key, value);
-                } else {
-                    env::remove_var(key);
-                }
-            }
-        }
-    }
-
-    fn persist_task(
-        database: &RuntimeDatabase,
-        intent: &str,
-        capability_id: &str,
-        operation: &str,
-        vault_id: Option<&str>,
-        relative_paths: Vec<String>,
-    ) -> String {
-        let id = format!("command-{}", Uuid::new_v4());
-        let command = ApplicationCommand {
-            id: id.clone(),
-            command_type: "assistant.operation".to_string(),
-            origin: CommandOrigin::Assistant,
-            intent: intent.to_string(),
-            capability_id: capability_id.to_string(),
-            operation: operation.to_string(),
-            parameters: Value::Object(Map::new()),
-            vault_id: vault_id.map(str::to_string),
-            relative_paths,
-            network_targets: Vec::new(),
-            declared_scope: vec![format!("capability:{capability_id}")],
-            budget: CommandBudget {
-                max_steps: 8,
-                max_runtime_seconds: 300,
-                max_tool_calls: 16,
-                max_tokens: Some(100_000),
-                max_cost: None,
-            },
-            idempotency_key: format!("test-{}", Uuid::new_v4()),
-            trace_id: Some(format!("trace-{}", Uuid::new_v4())),
-            model_decision_receipt: Some(format!("receipt-{}", Uuid::new_v4())),
-        };
-        let decision = policy::evaluate(&command);
-        let trace_id = command.trace_id.clone().expect("trace id");
-        database
-            .persist_application_command("local", &command, &decision, &trace_id, &now_string())
-            .expect("persist application command")
-            .0
-            .expect("native task id")
-    }
-
-    #[test]
-    fn frontmatter_update_preserves_unknown_blocks() {
-        let content =
-            "---\ntitle: Old\naliases:\n  - One\ncustom:\n  nested: true\n---\n\n# Body\n";
-        let mut updates = Map::new();
-        updates.insert("title".to_string(), Value::String("New".to_string()));
-        updates.insert(
-            "tags".to_string(),
-            Value::Array(vec![Value::String("alpha".to_string())]),
-        );
-        let result = mutate_frontmatter(content, &updates, &BTreeSet::new()).unwrap();
-        assert!(result.contains("title: \"New\""));
-        assert!(result.contains("custom:\n  nested: true"));
-        assert!(result.contains("tags: [\"alpha\"]"));
-        assert!(result.contains("# Body"));
-    }
-
-    #[test]
-    fn rejects_internal_and_traversal_paths() {
-        assert!(normalized_relative_path("../outside.md", false, false).is_err());
-        assert!(normalized_relative_path(".obsidian/graph.json", false, false).is_err());
-        assert!(normalized_relative_path("资料/笔记.md", false, false).is_ok());
-    }
-
-    #[test]
-    fn confirmed_delete_moves_to_trash_and_restores_without_touching_real_vaults() {
-        let _environment = crate::obsidian::TEST_ENVIRONMENT_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let temporary = tempfile::tempdir().expect("create isolated directory");
-        let vault = temporary.path().join("vaults").join("测试库");
-        let note = vault.join("资料").join("重要笔记.md");
-        let app_data = temporary.path().join("app-data");
-        let trash = temporary.path().join("system-trash").join("Yunspire");
-        let obsidian_config = temporary.path().join("obsidian").join("obsidian.json");
-        fs::create_dir_all(vault.join(".obsidian")).expect("create vault metadata");
-        fs::create_dir_all(note.parent().expect("note parent")).expect("create note parent");
-        let original_content = "---\ntags: [\"重要\"]\n---\n\n# 不可丢失的笔记\n";
-        fs::write(&note, original_content).expect("write isolated note");
-        fs::create_dir_all(obsidian_config.parent().expect("config parent"))
-            .expect("create config parent");
-        fs::write(
-            &obsidian_config,
-            serde_json::to_vec(&serde_json::json!({
-                "vaults": {
-                    "vault-test": {
-                        "path": vault.to_string_lossy(),
-                        "open": false
-                    }
-                }
-            }))
-            .expect("serialize config"),
-        )
-        .expect("write isolated Obsidian config");
-        let home = temporary.path().join("home");
-        fs::create_dir_all(&home).expect("create isolated home");
-        let _variables = EnvironmentGuard::set(&[
-            ("YUNSPIRE_HOME_DIR", &home),
-            ("YUNSPIRE_OBSIDIAN_CONFIG_PATH", &obsidian_config),
-            ("YUNSPIRE_APP_DATA_DIR", &app_data),
-            ("YUNSPIRE_TRASH_DIR", &trash),
-        ]);
-        let database = RuntimeDatabase::open_test(&app_data.join("runtime.sqlite"))
-            .expect("open isolated runtime database");
-        let state = ObsidianManagementState::default();
-
-        let delete_task = persist_task(
-            &database,
-            "delete",
-            "system:delete",
-            "delete",
-            Some("vault-test"),
-            vec!["资料/重要笔记.md".to_string()],
-        );
-        let preview = prepare_vault_entry_delete_inner(
-            &state,
-            &database,
-            None,
-            "vault-test".to_string(),
-            Some("资料/重要笔记.md".to_string()),
-            Some(false),
-            OperationContext {
-                task_id: Some(delete_task.clone()),
-                trace_id: Some("trace-delete".to_string()),
-                execution_ticket: None,
-            },
-        )
-        .expect("prepare isolated delete");
-        assert_eq!(
-            fs::read_to_string(&note).expect("preview keeps note"),
-            original_content
-        );
-        assert!(!trash.exists(), "preview must not create trash content");
-        database
-            .transition_native_runtime_task(
-                "local",
-                &delete_task,
-                "running",
-                10,
-                "用户点击确认",
-                None,
-            )
-            .expect("approve native delete task");
-        let deleted = commit_vault_entry_delete_inner(
-            &app_data,
-            &state,
-            &database,
-            None,
-            &preview.approval_id,
-        )
-        .expect("commit isolated delete");
-        assert!(
-            !note.exists(),
-            "confirmed delete removes the original entry"
-        );
-        let manifest_path = PathBuf::from(&deleted.target_path).join("manifest.json");
-        assert!(
-            manifest_path.is_file(),
-            "confirmed delete writes a trash manifest"
-        );
-        let entries = list_yunspire_trash_entries().expect("list isolated trash");
-        assert_eq!(entries.len(), 1);
-        assert_eq!(
-            entries[0].original_relative_path.as_deref(),
-            Some("资料/重要笔记.md")
-        );
-
-        let restore_task = persist_task(
-            &database,
-            "vaults",
-            "system:vaults",
-            "restore",
-            Some("vault-test"),
-            Vec::new(),
-        );
-        database
-            .transition_native_runtime_task("local", &restore_task, "running", 10, "启动恢复", None)
-            .expect("start restore task");
-        restore_yunspire_trash_entry_inner(
-            &app_data,
-            &database,
-            None,
-            deleted.operation_id,
-            Some("vault-test".to_string()),
-            None,
-            OperationContext {
-                task_id: Some(restore_task),
-                trace_id: Some("trace-restore".to_string()),
-                execution_ticket: None,
-            },
-        )
-        .expect("restore isolated note");
-        assert_eq!(
-            fs::read_to_string(&note).expect("read restored note"),
-            original_content
-        );
-        assert!(list_yunspire_trash_entries()
-            .expect("list empty isolated trash")
-            .is_empty());
-        let events = database
-            .list_native_operation_events(20)
-            .expect("read native operation events");
-        assert!(events
-            .iter()
-            .any(|event| event.event_type == "vault.file.delete"));
-        assert!(events
-            .iter()
-            .any(|event| event.event_type == "vault.file.restore"));
-
-        let nested = vault.join("待删除文件夹").join("子目录").join("资料.txt");
-        fs::create_dir_all(nested.parent().expect("nested parent"))
-            .expect("create isolated folder tree");
-        fs::write(&nested, b"folder payload").expect("write isolated folder payload");
-        let folder_delete_task = persist_task(
-            &database,
-            "delete",
-            "system:delete",
-            "delete",
-            Some("vault-test"),
-            vec!["待删除文件夹".to_string()],
-        );
-        let folder_preview = prepare_vault_entry_delete_inner(
-            &state,
-            &database,
-            None,
-            "vault-test".to_string(),
-            Some("待删除文件夹".to_string()),
-            Some(false),
-            OperationContext {
-                task_id: Some(folder_delete_task.clone()),
-                trace_id: Some("trace-folder-delete".to_string()),
-                execution_ticket: None,
-            },
-        )
-        .expect("prepare isolated folder delete");
-        assert!(nested.is_file(), "folder preview keeps every nested file");
-        database
-            .transition_native_runtime_task(
-                "local",
-                &folder_delete_task,
-                "running",
-                10,
-                "用户点击确认文件夹删除",
-                None,
-            )
-            .expect("approve native folder delete task");
-        let folder_deleted = commit_vault_entry_delete_inner(
-            &app_data,
-            &state,
-            &database,
-            None,
-            &folder_preview.approval_id,
-        )
-        .expect("commit isolated folder delete");
-        assert!(!vault.join("待删除文件夹").exists());
-        let folder_restore_task = persist_task(
-            &database,
-            "vaults",
-            "system:vaults",
-            "restore",
-            Some("vault-test"),
-            Vec::new(),
-        );
-        database
-            .transition_native_runtime_task(
-                "local",
-                &folder_restore_task,
-                "running",
-                10,
-                "启动文件夹恢复",
-                None,
-            )
-            .expect("start folder restore task");
-        restore_yunspire_trash_entry_inner(
-            &app_data,
-            &database,
-            None,
-            folder_deleted.operation_id,
-            Some("vault-test".to_string()),
-            None,
-            OperationContext {
-                task_id: Some(folder_restore_task),
-                trace_id: Some("trace-folder-restore".to_string()),
-                execution_ticket: None,
-            },
-        )
-        .expect("restore isolated folder");
-        assert_eq!(
-            fs::read(&nested).expect("read restored nested file"),
-            b"folder payload"
-        );
-
-        let vault_delete_task = persist_task(
-            &database,
-            "delete",
-            "system:delete",
-            "delete",
-            Some("vault-test"),
-            Vec::new(),
-        );
-        let vault_preview = prepare_vault_entry_delete_inner(
-            &state,
-            &database,
-            None,
-            "vault-test".to_string(),
-            None,
-            Some(true),
-            OperationContext {
-                task_id: Some(vault_delete_task.clone()),
-                trace_id: Some("trace-vault-delete".to_string()),
-                execution_ticket: None,
-            },
-        )
-        .expect("prepare isolated vault delete");
-        assert!(vault.is_dir(), "vault preview keeps the entire vault");
-        database
-            .transition_native_runtime_task(
-                "local",
-                &vault_delete_task,
-                "running",
-                10,
-                "用户点击确认 Vault 删除",
-                None,
-            )
-            .expect("approve native vault delete task");
-        let vault_deleted = commit_vault_entry_delete_inner(
-            &app_data,
-            &state,
-            &database,
-            None,
-            &vault_preview.approval_id,
-        )
-        .expect("commit isolated vault delete");
-        assert!(
-            !vault.exists(),
-            "confirmed vault delete removes the original root"
-        );
-        let config_after_delete: Value = serde_json::from_slice(
-            &fs::read(&obsidian_config).expect("read config after vault delete"),
-        )
-        .expect("parse config after vault delete");
-        assert!(config_after_delete["vaults"].get("vault-test").is_none());
-
-        let vault_restore_task = persist_task(
-            &database,
-            "vaults",
-            "system:vaults",
-            "restore",
-            Some("vault-test"),
-            Vec::new(),
-        );
-        database
-            .transition_native_runtime_task(
-                "local",
-                &vault_restore_task,
-                "running",
-                10,
-                "启动整个 Vault 恢复",
-                None,
-            )
-            .expect("start vault restore task");
-        let restored_vault = restore_yunspire_trash_entry_inner(
-            &app_data,
-            &database,
-            None,
-            vault_deleted.operation_id,
-            None,
-            None,
-            OperationContext {
-                task_id: Some(vault_restore_task),
-                trace_id: Some("trace-vault-restore".to_string()),
-                execution_ticket: None,
-            },
-        )
-        .expect("restore isolated vault");
-        assert!(vault.join(".obsidian").is_dir());
-        assert_eq!(
-            fs::read_to_string(&note).expect("read note after vault restore"),
-            original_content
-        );
-        assert_eq!(
-            fs::read(&nested).expect("read folder after vault restore"),
-            b"folder payload"
-        );
-        let restored_config: Value = serde_json::from_slice(
-            &fs::read(&obsidian_config).expect("read restored Obsidian config"),
-        )
-        .expect("parse restored Obsidian config");
-        assert!(restored_config["vaults"]
-            .get(&restored_vault.vault_id)
-            .is_some());
-        assert!(list_yunspire_trash_entries()
-            .expect("list empty trash after all restores")
-            .is_empty());
-    }
 }

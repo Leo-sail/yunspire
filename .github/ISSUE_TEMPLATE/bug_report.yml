@@ -19,7 +19,7 @@ body:
     id: environment
     attributes:
       label: 环境 / Environment
-      description: macOS 版本、芯片、Obsidian 版本 / macOS version, chip, and Obsidian version
+      description: macOS 或 Windows 版本、芯片或架构、Obsidian 版本 / macOS or Windows version, chip or architecture, and Obsidian version
     validations:
       required: true
   - type: textarea

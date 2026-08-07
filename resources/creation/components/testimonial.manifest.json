@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "component",
+  "catalogVersion": "0.4.0",
+  "id": "testimonial",
+  "version": "1.0.0",
+  "displayName": "用户证言",
+  "description": "保留用户反馈的原意，同时标出采集背景和隐私处理。",
+  "status": "active",
+  "category": "conversation",
+  "legacyIds": [],
+  "blockKind": "container",
+  "slots": [
+    {
+      "id": "body",
+      "kind": "richText",
+      "required": true,
+      "maxLength": 4000
+    }
+  ],
+  "semantics": {
+    "role": "blockquote",
+    "ariaLabel": "用户证言",
+    "markdownFallback": "blockquote"
+  },
+  "constraints": {
+    "minItems": 1,
+    "maxItems": 1,
+    "allowNestedComponents": false,
+    "spanLeaf": true,
+    "allowScripts": false,
+    "allowExternalStyles": false
+  },
+  "templateMarkdown": "> “在这里填写用户原话。”\n>\n> — 使用场景\n\n**授权说明：** [补充可核验信息]",
+  "renderers": {
+    "markdown": "creation.component.testimonial.markdown.v1",
+    "html": "creation.component.testimonial.html.v1",
+    "wechatRichText": "creation.component.testimonial.wechat.v1"
+  },
+  "compatibility": {
+    "targets": [
+      "markdown",
+      "html",
+      "wechatRichText"
+    ],
+    "minRuntimeVersion": "0.1.2"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This component is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire component manifest and Markdown block; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

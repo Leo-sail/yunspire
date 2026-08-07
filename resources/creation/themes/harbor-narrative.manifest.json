@@ -1,0 +1,132 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "theme",
+  "catalogVersion": "0.4.0",
+  "id": "harbor-narrative",
+  "version": "1.0.0",
+  "displayName": "海岬·叙事",
+  "description": "面向人物故事和有情节推进的深度长文，以清澈海蓝建立清晰层级、稳定阅读节奏和可复用的原创排版规则。",
+  "status": "active",
+  "category": "longform",
+  "tags": [
+    "叙事",
+    "清澈海蓝",
+    "多端候选"
+  ],
+  "legacyIds": [],
+  "palette": {
+    "accent": "#2e69aa",
+    "accentSoft": "#e6edf5",
+    "text": "#203040",
+    "muted": "#7e8790",
+    "border": "#d5e1ee",
+    "quote": "#f0f5f9",
+    "heading": "#10253a",
+    "background": "#fafbfd"
+  },
+  "typography": {
+    "defaultFamily": "serif",
+    "fallbackStack": "\"Songti SC\",\"STSong\",\"Noto Serif CJK SC\",serif",
+    "baseSize": 17,
+    "lineHeight": 1.95,
+    "headingWeight": 700,
+    "bodyWeight": 400
+  },
+  "spacing": {
+    "paragraph": 20,
+    "section": 40,
+    "pageX": 22,
+    "pageY": 30
+  },
+  "features": {
+    "autoNumbering": false,
+    "keywordUnderline": false,
+    "tableOfContents": false,
+    "introduction": true,
+    "signature": true,
+    "spanLeaf": true,
+    "cjkSpacing": true,
+    "externalLinkFootnotes": false
+  },
+  "supportedComponentIds": [
+    "lead",
+    "quote",
+    "notice",
+    "steps",
+    "metrics",
+    "compare",
+    "dialogue",
+    "timeline",
+    "divider",
+    "cta",
+    "outline",
+    "abstract",
+    "key-points",
+    "contents",
+    "introduction",
+    "conclusion",
+    "section-summary",
+    "executive-summary",
+    "premise",
+    "definition",
+    "context",
+    "evidence",
+    "source-note",
+    "fact-check",
+    "warning",
+    "tip",
+    "example",
+    "case-study",
+    "faq",
+    "checklist",
+    "decision-matrix",
+    "pros-cons",
+    "before-after",
+    "process",
+    "milestone",
+    "schedule",
+    "roadmap",
+    "chronology",
+    "interview",
+    "debate",
+    "testimonial",
+    "figure",
+    "image-gallery",
+    "cover-card",
+    "infographic",
+    "video-card",
+    "data-table",
+    "formula",
+    "code-snippet",
+    "footnotes",
+    "author-signature",
+    "related-reading",
+    "next-steps"
+  ],
+  "renderers": {
+    "markdown": "creation.theme.harbor-narrative.markdown.v1",
+    "html": "creation.theme.harbor-narrative.html.v1",
+    "wechatRichText": "creation.theme.harbor-narrative.wechat.v1"
+  },
+  "compatibility": {
+    "targets": [
+      "markdown",
+      "html",
+      "wechatRichText"
+    ],
+    "wechatCertification": "candidate",
+    "minRuntimeVersion": "0.1.2"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "This theme is an original Yunspire project asset. External repositories informed capability research only; no upstream code, prompt, template, wording, or visual asset is included."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire theme manifest and rendering tokens; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

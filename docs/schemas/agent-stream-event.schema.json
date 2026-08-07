@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yunspire.local/schemas/agent-stream-event.schema.json",
+  "title": "CreationAgentStreamEvent",
+  "description": "Ordered event envelope for allowlisted local creation.generate and creation.edit streams.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "streamId", "eventId", "sequence", "timestamp", "operationId", "capability", "eventType", "payload"],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "streamId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+    "eventId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "operationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+    "capability": { "type": "string", "enum": ["creation.generate", "creation.edit"] },
+    "eventType": { "type": "string", "enum": ["streamStarted", "contentDelta", "contentSnapshot", "progress", "artifact", "diagnostic", "streamCompleted", "streamFailed", "streamCancelled", "heartbeat"] },
+    "payload": { "type": "object" }
+  },
+  "allOf": [
+    { "$ref": "#/$defs/startedCondition" },
+    { "$ref": "#/$defs/deltaCondition" },
+    { "$ref": "#/$defs/snapshotCondition" },
+    { "$ref": "#/$defs/progressCondition" },
+    { "$ref": "#/$defs/artifactCondition" },
+    { "$ref": "#/$defs/diagnosticCondition" },
+    { "$ref": "#/$defs/completedCondition" },
+    { "$ref": "#/$defs/failedCondition" },
+    { "$ref": "#/$defs/cancelledCondition" },
+    { "$ref": "#/$defs/heartbeatCondition" }
+  ],
+  "$defs": {
+    "startedCondition": {
+      "if": { "type": "object", "properties": { "eventType": { "const": "streamStarted" } }, "required": ["eventType"] },
+      "then": { "type": "object", "properties": { "payload": { "$ref": "#/$defs/startedPayload" } } }
+    },
+    "deltaCondition": {
+      "if": { "type": "object", "properties": { "eventType": { "const": "contentDelta" } }, "required": ["eventType"] },
+      "then": { "type": "object", "properties": { "payload": { "$ref": "#/$defs/contentPayload" } } }
+    },
+    "snapshotCondition": {
+      "if": { "type": "object", "properties": { "eventType": { "const": "contentSnapshot" } }, "required": ["eventType"] },
+      "then": { "type": "object", "properties": { "payload": { "$ref": "#/$defs/contentPayload" } } }
+    },
+    "progressCondition": {
+      "if": { "type": "object", "properties": { "eventType": { "const": "progress" } }, "required": ["eventType"] },
+      "then": { "type": "object", "properties": { "payload": { "$ref": "#/$defs/progressPayload" } } }
+    },
+    "artifactCondition": {
+      "if": { "type": "object", "properties": { "eventType": { "const": "artifact" } }, "required": ["eventType"] },
+      "then": { "type": "object", "properties": { "payload": { "$ref": "#/$defs/artifactPayload" } } }
+    },
+    "diagnosticCondition": {
+      "if": { "type": "object", "properties": { "eventType": { "const": "diagnostic" } }, "required": ["eventType"] },
+      "then": { "type": "object", "properties": { "payload": { "$ref": "#/$defs/diagnosticPayload" } } }
+    },
+    "completedCondition": {
+      "if": { "type": "object", "properties": { "eventType": { "const": "streamCompleted" } }, "required": ["eventType"] },
+      "then": { "type": "object", "properties": { "payload": { "$ref": "#/$defs/completedPayload" } } }
+    },
+    "failedCondition": {
+      "if": { "type": "object", "properties": { "eventType": { "const": "streamFailed" } }, "required": ["eventType"] },
+      "then": { "type": "object", "properties": { "payload": { "$ref": "#/$defs/failedPayload" } } }
+    },
+    "cancelledCondition": {
+      "if": { "type": "object", "properties": { "eventType": { "const": "streamCancelled" } }, "required": ["eventType"] },
+      "then": { "type": "object", "properties": { "payload": { "$ref": "#/$defs/cancelledPayload" } } }
+    },
+    "heartbeatCondition": {
+      "if": { "type": "object", "properties": { "eventType": { "const": "heartbeat" } }, "required": ["eventType"] },
+      "then": { "type": "object", "properties": { "payload": { "$ref": "#/$defs/heartbeatPayload" } } }
+    },
+    "startedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agentId", "protocolVersion"],
+      "properties": {
+        "agentId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "protocolVersion": { "const": "1.0" }
+      }
+    },
+    "contentPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channel", "content"],
+      "properties": {
+        "channel": { "type": "string", "enum": ["html", "css", "javascript", "text"] },
+        "content": { "type": "string", "maxLength": 1048576 },
+        "replaceFrom": { "type": ["integer", "null"], "minimum": 0 },
+        "replaceTo": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "progressPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "percent", "message"],
+      "properties": {
+        "stage": { "type": "string", "pattern": "^[a-z][a-z0-9._-]{0,79}$" },
+        "percent": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "message": { "type": "string", "maxLength": 1000 }
+      }
+    },
+    "artifactPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactId", "kind", "relativePath", "contentHash"],
+      "properties": {
+        "artifactId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+        "kind": { "type": "string", "enum": ["html", "css", "javascript", "image", "data", "archive", "report"] },
+        "relativePath": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "contentHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+      }
+    },
+    "diagnosticPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9._-]{0,99}$" },
+        "severity": { "type": "string", "enum": ["info", "warning", "error"] },
+        "message": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "file": { "type": ["string", "null"], "maxLength": 2048 },
+        "line": { "type": ["integer", "null"], "minimum": 1 },
+        "column": { "type": ["integer", "null"], "minimum": 1 }
+      }
+    },
+    "completedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resultId", "artifactIds", "readinessReportId"],
+      "properties": {
+        "resultId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+        "artifactIds": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" }, "uniqueItems": true },
+        "readinessReportId": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" }
+      }
+    },
+    "failedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9._-]{0,99}$" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "retryable": { "type": "boolean" }
+      }
+    },
+    "cancelledPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason"],
+      "properties": {
+        "reason": { "type": "string", "minLength": 1, "maxLength": 1000 }
+      }
+    },
+    "heartbeatPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["elapsedMs"],
+      "properties": {
+        "elapsedMs": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

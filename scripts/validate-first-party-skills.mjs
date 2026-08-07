@@ -90,9 +90,9 @@ for (const entry of skillDirectories) {
 }
 
 const productionHtml = await readFile(join(desktopRoot, "desktop-ui", "index.html"), "utf8");
-const skillView = productionHtml.match(/<section class="view" data-view="skills">([\s\S]*?)<section class="view" data-view="tasks">/)?.[1] || "";
-if (!skillView || /<button class="skill-list-row\b/.test(skillView)) {
-  throw new Error("技能页面禁止静态展示系统 Skill；列表只能由用户 Skill 数据动态生成");
+const skillPanel = productionHtml.match(/<div class="settings-panel skill-governance-panel" data-setting-panel="skills"[^>]*>([\s\S]*?)<div class="settings-panel" data-setting-panel="appearance"[^>]*>/)?.[1] || "";
+if (!skillPanel || !/class="skill-list"/.test(skillPanel) || /<button class="skill-list-row\b/.test(skillPanel)) {
+  throw new Error("Skills 面板禁止静态展示系统 Skill；列表只能由用户 Skill 数据动态生成");
 }
 
 console.log(`FIRST_PARTY_SKILLS_OK ${skillDirectories.length}`);

@@ -4,7 +4,7 @@
   "title": "MemoryReflectionJob",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "idempotencyKey", "scope", "sourceDocIds", "sourceContentHash", "metrics", "state", "attemptCount", "createdAt", "updatedAt"],
+  "required": ["id", "idempotencyKey", "scope", "sourceDocIds", "sourceContentHash", "sourceSnapshot", "sourceSnapshotHash", "metrics", "state", "attemptCount", "claimedBy", "leaseExpiresAtMs", "createdAt", "updatedAt"],
   "properties": {
     "id": { "type": "string", "minLength": 1, "maxLength": 160 },
     "idempotencyKey": { "type": "string", "minLength": 1, "maxLength": 200 },
@@ -23,11 +23,19 @@
     },
     "sourceDocIds": { "type": "array", "minItems": 1, "maxItems": 256, "items": { "type": "string", "minLength": 1, "maxLength": 200 } },
     "sourceContentHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "sourceSnapshot": {
+      "type": "object",
+      "description": "Immutable, canonical replay envelope. Skill effect ids and their structured evidence are frozen here; claim tokens are never included."
+    },
+    "sourceSnapshotHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
     "metrics": { "type": "object", "additionalProperties": true },
     "state": { "type": "string", "enum": ["queued", "running", "awaiting_review", "completed", "failed", "cancelled"] },
     "proposalMemoryId": { "type": ["string", "null"], "maxLength": 160 },
+    "optimizationCandidateId": { "type": ["string", "null"], "maxLength": 160 },
     "attemptCount": { "type": "integer", "minimum": 0 },
     "lastError": { "type": ["string", "null"], "maxLength": 2000 },
+    "claimedBy": { "type": ["string", "null"], "maxLength": 160 },
+    "leaseExpiresAtMs": { "type": ["integer", "null"], "minimum": 0 },
     "createdAt": { "type": "string", "format": "date-time" },
     "updatedAt": { "type": "string", "format": "date-time" }
   }

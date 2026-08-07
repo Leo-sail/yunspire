@@ -66,11 +66,11 @@ AI助手是云枢的自然语言入口。它负责正常对话、理解目标、
 - **Office 文件**：把 Word 图片与段落/表格位置、Excel 公式与工作表/单元格/图片锚点、PowerPoint 文字与图片/表格/层级关系一同交给分析模型；空间位置是证据，不是未经验证的语义事实。内嵌与本地化图片按 `asset_id` 去重，每个出现位置保留 `reference_id`，逐图分析必须绑定二者。任一必需 story、工作表、幻灯片、Drawing、图片关系或位置证据不完整时，必须停止并返回具体错误。
 - **外链图片**：只对网页正文图片、Markdown 图片语法和 OOXML 图片关系执行受控本地化，逐跳校验公网地址与重定向、响应类型和真实图片格式，流式暂存并哈希后回填原位。任一步失败都要指出具体图片和位置，并阻断双库入库；普通链接不得自动访问。模型分析不得改写原件；临时派生图必须绑定原图/派生哈希、字节数、`asset_id` 和允许的 `reference_id`，并逐批提交释放。
 - **文件内链接**：普通链接先作为不可信来源数据保留；只有用户明确要求采集具体链接时，才建立新的采集任务。外链图片的窄范围本地化不能成为自动打开普通网址的理由。
-- **定时采集**：根据自然语言生成确定计划，通过本地 Scheduler 创建或修改；采集页只展示。
+- **直接采集与定时采集**：用户可从全局采集动作提交链接、文本、文件或文件夹；定时计划仍由自然语言生成并通过本地 Scheduler 创建或修改，采集工作区展示真实阶段、计划、历史与结果。
 - **创作**：生成或修改 Markdown，选择目标 Vault，检查冲突并原子写入。
 - **报告**：汇总真实本地数据，先保存 Obsidian，再处理已配置投递。
 - **知识维护**：检查标签、Properties、链接、重复项和目录结构，建立检查点后修改。
-- **Skill**：创建、编辑、校验、试运行、启停用户 Skill；系统 Skill 后台运行。
+- **Skill**：创建、编辑、校验和试运行用户 Skill；工作台 Skills 面板由用户查看权限、效果和版本，并执行启停、退役或恢复；系统 Skill 只在后台运行。
 - **任务控制**：读取、暂停、恢复、取消或重试真实任务状态。
 - **设置请求**：只说明操作路径，由用户手动打开设置。
 
@@ -99,7 +99,7 @@ AI助手是云枢的自然语言入口。它负责正常对话、理解目标、
 → Skill/工具执行
 → 检查点与提交
 → 真实结果验证
-→ 当前对话、任务、仪表盘和操作日志同步
+→ 当前上下文、工作台、后台任务和操作记录同步
 ```
 
 ---
@@ -130,7 +130,7 @@ The AI Assistant is Yunspire's natural-language entry point. It provides normal 
 
 ### 3. Conversation contract
 
-The Assistant supports multi-turn conversation, combined text-and-attachment requests, editable conversation names, a built-in Emoji avatar, structured Markdown rendering, real slash-command discovery, `/clear`, token-aware context compression, and resumable choice prompts. Compression must preserve unfinished objectives, choices, constraints, file references, and task IDs. New images receive one persisted visual analysis; ordinary history reuses that record without original bytes, and only an explicit filename, ordinal, or multi-image reference triggers another visual pass. User files enter through a chunked local channel without a per-file or per-selection total size rejection, while model requests remain batched. Requests execute FIFO within one conversation and concurrently across conversations; a cancellation token spans conversation, analysis, and follow-on execution and stops new calls once observed.
+The Assistant supports multi-turn conversation, combined text-and-attachment requests, editable conversation names, a built-in Lucide icon, structured Markdown rendering, real slash-command discovery, `/clear`, token-aware context compression, and resumable choice prompts. Compression must preserve unfinished objectives, choices, constraints, file references, and task IDs. New images receive one persisted visual analysis; ordinary history reuses that record without original bytes, and only an explicit filename, ordinal, or multi-image reference triggers another visual pass. User files enter through a chunked local channel without a per-file or per-selection total size rejection, while model requests remain batched. Requests execute FIFO within one conversation and concurrently across conversations; a cancellation token spans conversation, analysis, and follow-on execution and stops new calls once observed.
 
 ### 4. Routing contract
 
@@ -143,11 +143,11 @@ Conversation uses a selected conversation model; content understanding uses an a
 - Office analysis carries Word story/table/image locations, Excel worksheet/cell/formula/drawing anchors, and PowerPoint text/image/table/layer geometry into the configured model. Spatial proximity is evidence, not an asserted semantic fact. Assets deduplicate by `asset_id`; every occurrence keeps a `reference_id`; image observations bind both. An incomplete required story, worksheet, slide, Drawing, image relationship, or placement stops ingestion with precise evidence.
 - Only deterministic webpage-body images, Markdown image syntax, and OOXML image relationships enter controlled external-image localization. The localizer validates public addresses and every redirect, response type, and actual image format, streams and hashes the asset, and restores it at the original location. Any failure identifies the image and position and blocks complete ingestion. Analysis never rewrites originals; temporary derivatives bind original/analysis hashes, byte lengths, asset ID, and allowed reference IDs and are released after each request batch.
 - Ordinary embedded links remain untrusted, inert source data until an explicit user request creates a separate link-capture task. Image localization never broadens that rule.
-- Scheduled capture is created or modified from model-analyzed natural language; the Capture page is observational.
+- Direct Capture accepts user-submitted links, text, files, or folders from the global action. Scheduled capture is created or modified from model-analyzed natural language; the Capture workspace shows real stages, schedules, history, and outcomes.
 - Creation selects a real Vault, checks conflicts, and atomically writes Markdown and assets.
 - Reports use real local data and save to Obsidian before any configured delivery.
 - Knowledge maintenance changes tags, Properties, links, duplicates, and folders only after checkpoints.
-- User Skills can be created, edited, validated, trial-run, enabled, disabled, or deleted; system Skills remain in the background.
+- User Skills can be created, edited, validated, and trial-run through the Assistant. Users inspect permissions, effects, and versions and perform activation, retirement, or restoration in the Workbench Skills panel; system Skills remain in the background.
 - Task controls operate on real persisted task state.
 - Settings requests receive guidance only; the user opens Settings manually.
 
@@ -168,5 +168,5 @@ user objective
 → Skill/tool execution
 → checkpoint and commit
 → verified result
-→ synchronized conversation, Tasks, Dashboard, and Operation Log
+→ synchronized context, Workbench, background tasks, and Operation Log
 ```

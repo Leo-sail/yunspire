@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yunspire.local/schemas/writing-run.schema.json",
+  "title": "WritingRun",
+  "description": "Auditable analysis or rewrite run with bounded scope, protected facts, citation routing, iteration limits, and evaluation gates.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "documentId",
+    "documentRevision",
+    "state",
+    "action",
+    "scope",
+    "selection",
+    "scenePackId",
+    "patternId",
+    "voiceId",
+    "purposePresetId",
+    "brandProfileId",
+    "iteration",
+    "maxIterations",
+    "policy",
+    "inputHash",
+    "outputHash",
+    "factLedger",
+    "citationRouting",
+    "annotations",
+    "evaluation",
+    "startedAt",
+    "completedAt"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+    "documentId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+    "documentRevision": { "type": "integer", "minimum": 1 },
+    "state": { "type": "string", "enum": ["queued", "running", "awaitingReview", "succeeded", "failed", "cancelled"] },
+    "action": { "type": "string", "enum": ["annotate", "rewrite"] },
+    "scope": { "type": "string", "enum": ["structural", "bounded", "in_place"] },
+    "selection": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/selection" }
+      ]
+    },
+    "scenePackId": { "type": ["string", "null"], "pattern": "^[a-z][a-z0-9-]{0,79}$" },
+    "patternId": { "type": ["string", "null"], "pattern": "^[a-z][a-z0-9-]{0,79}$" },
+    "voiceId": { "type": ["string", "null"], "pattern": "^[a-z][a-z0-9-]{0,79}$" },
+    "purposePresetId": { "type": ["string", "null"], "pattern": "^[a-z][a-z0-9-]{0,79}$" },
+    "brandProfileId": { "type": ["string", "null"], "pattern": "^[a-z][a-z0-9-]{0,79}$" },
+    "iteration": { "type": "integer", "minimum": 1, "maximum": 3 },
+    "maxIterations": { "type": "integer", "minimum": 1, "maximum": 3 },
+    "policy": { "$ref": "#/$defs/policy" },
+    "inputHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "outputHash": { "type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$" },
+    "factLedger": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/fact" }
+    },
+    "citationRouting": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/citationRoute" }
+    },
+    "annotations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/annotation" }
+    },
+    "evaluation": { "$ref": "#/$defs/evaluation" },
+    "reportArtifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["format", "relativePath"],
+        "properties": {
+          "format": { "type": "string", "enum": ["json", "markdown", "sarif"] },
+          "relativePath": { "type": "string", "minLength": 1, "maxLength": 2048 },
+          "contentHash": { "type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$" }
+        }
+      }
+    },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "completedAt": { "type": ["string", "null"], "format": "date-time" },
+    "failureReason": { "type": ["string", "null"], "maxLength": 4000 }
+  },
+  "allOf": [
+    {
+      "if": { "type": "object", "properties": { "scope": { "const": "bounded" } }, "required": ["scope"] },
+      "then": { "type": "object", "properties": { "selection": { "$ref": "#/$defs/selection" } } }
+    },
+    {
+      "if": { "type": "object", "properties": { "action": { "const": "annotate" } }, "required": ["action"] },
+      "then": { "type": "object", "properties": { "policy": { "type": "object", "properties": { "allowTextChanges": { "const": false } } } } }
+    }
+  ],
+  "$defs": {
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "selectedHash"],
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 1 },
+        "selectedHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowTextChanges", "preserveFacts", "preserveRelations", "preserveNumbers", "preserveCitations", "allowUnsupportedClaims"],
+      "properties": {
+        "allowTextChanges": { "type": "boolean" },
+        "preserveFacts": { "type": "boolean" },
+        "preserveRelations": { "type": "boolean" },
+        "preserveNumbers": { "type": "boolean" },
+        "preserveCitations": { "type": "boolean" },
+        "allowUnsupportedClaims": { "const": false }
+      }
+    },
+    "fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "subject", "predicate", "object", "status", "protected", "evidenceRefIds"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+        "subject": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "predicate": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "object": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "qualifiers": { "type": "object", "additionalProperties": { "oneOf": [{ "type": "string" }, { "type": "number" }, { "type": "boolean" }, { "type": "null" }] }, "maxProperties": 40 },
+        "status": { "type": "string", "enum": ["sourced", "unsourced", "inferred", "conflicted"] },
+        "protected": { "type": "boolean" },
+        "evidenceRefIds": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 160 }, "uniqueItems": true }
+      }
+    },
+    "citationRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claimId", "claim", "route", "sourceRefIds"],
+      "properties": {
+        "claimId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+        "claim": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "route": { "type": "string", "enum": ["cited", "needsSource", "labelAsInference", "remove", "reviewConflict"] },
+        "sourceRefIds": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 160 }, "uniqueItems": true },
+        "reason": { "type": ["string", "null"], "maxLength": 1000 }
+      }
+    },
+    "annotation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "code", "severity", "message", "range"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9._-]{0,99}$" },
+        "severity": { "type": "string", "enum": ["info", "warning", "error"] },
+        "message": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "range": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["start", "end"],
+          "properties": {
+            "start": { "type": "integer", "minimum": 0 },
+            "end": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "suggestion": { "type": ["string", "null"], "maxLength": 4000 }
+      }
+    },
+    "evaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "gates", "score"],
+      "properties": {
+        "status": { "type": "string", "enum": ["pending", "passed", "failed"] },
+        "gates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "status", "deterministic", "detail"],
+            "properties": {
+              "id": { "type": "string", "pattern": "^[a-z][a-z0-9._-]{0,99}$" },
+              "status": { "type": "string", "enum": ["pass", "warn", "fail", "skip"] },
+              "deterministic": { "type": "boolean" },
+              "detail": { "type": "string", "maxLength": 2000 }
+            }
+          }
+        },
+        "score": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    }
+  }
+}

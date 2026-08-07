@@ -1,0 +1,132 @@
+{
+  "schemaVersion": "1.0",
+  "manifestType": "theme",
+  "catalogVersion": "0.4.0",
+  "id": "jade",
+  "version": "1.1.0",
+  "displayName": "青序主题",
+  "description": "为教程与清单提供清爽青绿色层级和易扫描正文节奏的兼容主题。",
+  "status": "active",
+  "category": "tutorial",
+  "tags": [
+    "教程",
+    "清单",
+    "青绿"
+  ],
+  "legacyIds": [],
+  "palette": {
+    "accent": "#0f766e",
+    "accentSoft": "#ecf7f5",
+    "text": "#23312f",
+    "muted": "#61706d",
+    "border": "#d6e5e1",
+    "quote": "#f1f8f6",
+    "heading": "#153f3a",
+    "background": "#ffffff"
+  },
+  "typography": {
+    "defaultFamily": "sans",
+    "fallbackStack": "-apple-system,BlinkMacSystemFont,\"PingFang SC\",\"Microsoft YaHei\",sans-serif",
+    "baseSize": 16,
+    "lineHeight": 1.8,
+    "headingWeight": 700,
+    "bodyWeight": 400
+  },
+  "spacing": {
+    "paragraph": 16,
+    "section": 32,
+    "pageX": 18,
+    "pageY": 24
+  },
+  "features": {
+    "autoNumbering": false,
+    "keywordUnderline": false,
+    "tableOfContents": false,
+    "introduction": false,
+    "signature": false,
+    "spanLeaf": true,
+    "cjkSpacing": false,
+    "externalLinkFootnotes": false
+  },
+  "supportedComponentIds": [
+    "lead",
+    "quote",
+    "notice",
+    "steps",
+    "metrics",
+    "compare",
+    "dialogue",
+    "timeline",
+    "divider",
+    "cta",
+    "outline",
+    "abstract",
+    "key-points",
+    "contents",
+    "introduction",
+    "conclusion",
+    "section-summary",
+    "executive-summary",
+    "premise",
+    "definition",
+    "context",
+    "evidence",
+    "source-note",
+    "fact-check",
+    "warning",
+    "tip",
+    "example",
+    "case-study",
+    "faq",
+    "checklist",
+    "decision-matrix",
+    "pros-cons",
+    "before-after",
+    "process",
+    "milestone",
+    "schedule",
+    "roadmap",
+    "chronology",
+    "interview",
+    "debate",
+    "testimonial",
+    "figure",
+    "image-gallery",
+    "cover-card",
+    "infographic",
+    "video-card",
+    "data-table",
+    "formula",
+    "code-snippet",
+    "footnotes",
+    "author-signature",
+    "related-reading",
+    "next-steps"
+  ],
+  "renderers": {
+    "markdown": "creation.theme.jade.markdown.v1",
+    "html": "creation.theme.jade.html.v1",
+    "wechatRichText": "creation.theme.jade.wechat.v1"
+  },
+  "compatibility": {
+    "targets": [
+      "markdown",
+      "html",
+      "wechatRichText"
+    ],
+    "wechatCertification": "legacyCompatible",
+    "minRuntimeVersion": "0.1.2"
+  },
+  "source": {
+    "policy": "yunspire_first_party",
+    "authoredBy": "Yunspire",
+    "repository": "https://github.com/Leo-sail/yunspire",
+    "upstreamCodeCopied": false,
+    "researchBoundary": "Migrated from the existing Yunspire creation renderer and expanded only with original first-party metadata. External repositories informed capability research only."
+  },
+  "license": {
+    "scope": "yunspire_first_party_project_asset",
+    "notice": "Original Yunspire theme manifest and rendering tokens; use is governed by the repository LICENSE.",
+    "thirdPartyAssets": []
+  }
+}

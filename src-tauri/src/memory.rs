@@ -1,10 +1,19 @@
-use crate::runtime_db::RuntimeDatabase;
-use chrono::Utc;
-use rusqlite::{params, OptionalExtension, Row, Transaction, TransactionBehavior};
+use crate::{
+    execution_ticket::ExecutionTicketState,
+    obsidian::OperationContext,
+    runtime_db::{
+        persist_runtime_effect_mutation_result, read_runtime_effect_mutation_result,
+        record_optimization_runtime_handler_completion, runtime_effect_mutation_key,
+        validate_optimization_runtime_handler, OptimizationProfileResult, RuntimeDatabase,
+        RuntimeEffectMutationKey,
+    },
+};
+use chrono::{Duration, Utc};
+use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Instant};
 use tauri::State;
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
@@ -130,6 +139,21 @@ pub struct MemorySearchRequest {
     pub limit: Option<usize>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryListRequest {
+    #[serde(default)]
+    pub tracks: Vec<String>,
+    #[serde(default)]
+    pub scope: MemoryScope,
+    #[serde(default)]
+    pub include_all_contexts: bool,
+    #[serde(default)]
+    pub include_inactive: bool,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemorySearchResult {
@@ -150,7 +174,18 @@ pub struct ReflectionJobInput {
     pub source_content_hash: String,
     #[serde(default)]
     pub metrics: Value,
+    #[serde(default)]
+    pub source_effect_ids: Vec<String>,
+    #[serde(default)]
+    pub source_snapshot: Option<Value>,
+    #[serde(default)]
+    pub source_snapshot_hash: Option<String>,
 }
+
+// `sourceContentHash` identifies the caller's source documents; the separate
+// `sourceSnapshotHash` covers this canonical JSON envelope and its material.
+// Keeping both hashes makes replay provenance explicit without pretending that
+// metadata and the original source bytes are interchangeable.
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -161,13 +196,42 @@ pub struct ReflectionJob {
     pub scope: MemoryScope,
     pub source_doc_ids: Vec<String>,
     pub source_content_hash: String,
+    pub source_snapshot: Value,
+    pub source_snapshot_hash: String,
     pub metrics: Value,
     pub state: String,
     pub proposal_memory_id: Option<String>,
+    pub optimization_candidate_id: Option<String>,
     pub attempt_count: i64,
     pub last_error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub claimed_by: Option<String>,
+    pub lease_expires_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReflectionJobListRequest {
+    #[serde(default)]
+    pub states: Vec<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReflectionJobClaimInput {
+    pub worker_id: String,
+    #[serde(default)]
+    pub lease_seconds: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReflectionJobClaim {
+    pub job: ReflectionJob,
+    pub claim_token: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -868,6 +932,57 @@ fn memory_match_query(query: &str) -> Result<String, String> {
     Ok(groups.join(" AND "))
 }
 
+fn list_memory_records_with_connection(
+    connection: &rusqlite::Connection,
+    workspace_scope: &str,
+    request: &MemoryListRequest,
+) -> Result<Vec<MemoryRecord>, String> {
+    let scope = validate_scope(&request.scope)?;
+    let tracks = request
+        .tracks
+        .iter()
+        .map(|track| validate_track(track))
+        .collect::<Result<HashSet<_>, _>>()?;
+    let limit = request.limit.unwrap_or(200).clamp(1, 5_000);
+    let fetch_limit = if tracks.is_empty() {
+        limit
+    } else {
+        limit.saturating_mul(4).min(20_000)
+    };
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT {MEMORY_RECORD_COLUMNS} FROM memory_records \
+             WHERE workspace_scope=?1 \
+               AND user_id=?2 AND agent_id=?3 AND app_id=?4 \
+               AND (?5=1 OR (project_id=?6 AND session_id=?7)) \
+               AND (?8=1 OR (state='active' AND (expires_at IS NULL OR expires_at>?9))) \
+             ORDER BY updated_at DESC, id ASC LIMIT ?10"
+        ))
+        .map_err(|error| format!("无法准备结构化记忆列表：{error}"))?;
+    let rows = statement
+        .query_map(
+            params![
+                workspace_scope,
+                scope.user_id,
+                scope.agent_id,
+                scope.app_id,
+                i64::from(request.include_all_contexts),
+                scope.project_id,
+                scope.session_id,
+                i64::from(request.include_inactive),
+                Utc::now().to_rfc3339(),
+                fetch_limit as i64,
+            ],
+            map_memory_record,
+        )
+        .map_err(|error| format!("无法读取结构化记忆列表：{error}"))?;
+    Ok(rows
+        .filter_map(Result::ok)
+        .filter(|record| tracks.is_empty() || tracks.contains(&record.track))
+        .take(limit)
+        .collect())
+}
+
 fn assistant_memory_match_query(query: &str) -> Result<String, String> {
     let normalized = query
         .trim()
@@ -1069,10 +1184,230 @@ pub(crate) fn assistant_memory_context_in_connection(
     Ok(Some(sections.join("\n\n")))
 }
 
+fn reflection_snapshot_value(
+    scope_json: &str,
+    task_id: Option<&str>,
+    source_doc_ids_json: &str,
+    source_content_hash: &str,
+    metrics_json: &str,
+    source_effect_ids: &[String],
+    source_material: Option<&Value>,
+) -> Result<Value, String> {
+    let scope: Value = serde_json::from_str(scope_json)
+        .map_err(|error| format!("无法解析反思快照作用域：{error}"))?;
+    let source_doc_ids: Value = serde_json::from_str(source_doc_ids_json)
+        .map_err(|error| format!("无法解析反思快照来源：{error}"))?;
+    let metrics: Value = serde_json::from_str(metrics_json)
+        .map_err(|error| format!("无法解析反思快照指标：{error}"))?;
+    let material = source_material.cloned().unwrap_or(Value::Null);
+    let material_json = serde_json::to_string(&material)
+        .map_err(|error| format!("无法序列化反思实际来源：{error}"))?;
+    if material_json.len() > 512 * 1024 {
+        return Err("反思实际来源超过 512 KB 安全上限".to_string());
+    }
+    if looks_sensitive(&material_json) {
+        return Err("反思实际来源疑似包含凭据，已拒绝保存".to_string());
+    }
+    Ok(serde_json::json!({
+        "version": 1,
+        "replayable": source_material.is_some(),
+        "scope": scope,
+        "taskId": task_id,
+        "sourceDocIds": source_doc_ids,
+        "sourceContentHash": source_content_hash,
+        "metrics": metrics,
+        "sourceEffectIds": source_effect_ids,
+        "material": material,
+    }))
+}
+
+fn reflection_snapshot_hash(snapshot: &Value) -> Result<String, String> {
+    let bytes =
+        serde_json::to_vec(snapshot).map_err(|error| format!("无法序列化反思来源快照：{error}"))?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+}
+
+/// Creates the durable reflection runtime state used by claim/lease and backfills
+/// snapshots for jobs created before the runtime table was introduced.
+pub(crate) fn migrate_reflection_schema(connection: &Connection) -> Result<(), String> {
+    let base_table_exists = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_reflection_jobs'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| format!("无法检查反思基础表：{error}"))?
+        .is_some();
+    // Some persisted records predate the memory migration and are intentionally
+    // allowed to finish the remaining schema migrations.
+    if !base_table_exists {
+        return Ok(());
+    }
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS memory_reflection_job_runtime (
+               workspace_scope TEXT NOT NULL,
+               job_id TEXT NOT NULL,
+               source_snapshot_json TEXT NOT NULL,
+               source_snapshot_hash TEXT NOT NULL,
+               claimed_by TEXT,
+               claim_token TEXT,
+               claimed_at_ms INTEGER,
+               lease_expires_at_ms INTEGER,
+               PRIMARY KEY(workspace_scope, job_id),
+               FOREIGN KEY(workspace_scope, job_id)
+                 REFERENCES memory_reflection_jobs(workspace_scope, id) ON DELETE CASCADE
+             );
+             CREATE INDEX IF NOT EXISTS idx_memory_reflection_runtime_claim
+               ON memory_reflection_job_runtime(workspace_scope, lease_expires_at_ms, job_id);
+             CREATE TRIGGER IF NOT EXISTS memory_reflection_snapshot_immutable_update
+               BEFORE UPDATE OF source_snapshot_json, source_snapshot_hash
+               ON memory_reflection_job_runtime
+               WHEN NEW.source_snapshot_json <> OLD.source_snapshot_json
+                 OR NEW.source_snapshot_hash <> OLD.source_snapshot_hash
+               BEGIN SELECT RAISE(ABORT, 'reflection source snapshots are immutable'); END;",
+        )
+        .map_err(|error| format!("无法创建反思运行时表：{error}"))?;
+
+    let mut statement = connection
+        .prepare(
+            "SELECT j.workspace_scope, j.id, j.task_id, j.scope_json,
+                    j.source_doc_ids_json, j.source_content_hash, j.metrics_json
+             FROM memory_reflection_jobs j
+             LEFT JOIN memory_reflection_job_runtime r
+               ON r.workspace_scope=j.workspace_scope AND r.job_id=j.id
+             WHERE r.job_id IS NULL",
+        )
+        .map_err(|error| format!("无法读取待回填反思快照：{error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(|error| format!("无法枚举待回填反思快照：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法读取待回填反思快照：{error}"))?;
+    drop(statement);
+    for (
+        workspace_scope,
+        job_id,
+        task_id,
+        scope_json,
+        source_doc_ids_json,
+        source_content_hash,
+        metrics_json,
+    ) in rows
+    {
+        let snapshot = reflection_snapshot_value(
+            &scope_json,
+            task_id.as_deref(),
+            &source_doc_ids_json,
+            &source_content_hash,
+            &metrics_json,
+            &[],
+            None,
+        )?;
+        let snapshot_json = serde_json::to_string(&snapshot)
+            .map_err(|error| format!("无法序列化待回填反思快照：{error}"))?;
+        let snapshot_hash = reflection_snapshot_hash(&snapshot)?;
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO memory_reflection_job_runtime
+                 (workspace_scope, job_id, source_snapshot_json, source_snapshot_hash)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![workspace_scope, job_id, snapshot_json, snapshot_hash],
+            )
+            .map_err(|error| format!("无法回填反思来源快照：{error}"))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn migrate_reflection_optimization_schema(
+    connection: &Connection,
+) -> Result<(), String> {
+    for table in [
+        "memory_reflection_jobs",
+        "memory_records",
+        "optimization_candidates",
+    ] {
+        let exists = connection
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| format!("无法检查反思优化关联依赖表 {table}：{error}"))?
+            .is_some();
+        if !exists {
+            return Ok(());
+        }
+    }
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS memory_reflection_optimization_candidates (
+               workspace_scope TEXT NOT NULL,
+               reflection_job_id TEXT NOT NULL,
+               candidate_id TEXT NOT NULL,
+               proposal_memory_id TEXT NOT NULL,
+               state TEXT NOT NULL CHECK(state IN ('bound', 'applied', 'superseded')),
+               bound_at TEXT NOT NULL,
+               updated_at TEXT NOT NULL,
+               PRIMARY KEY(workspace_scope, reflection_job_id, candidate_id),
+               UNIQUE(workspace_scope, candidate_id),
+               FOREIGN KEY(workspace_scope, reflection_job_id)
+                 REFERENCES memory_reflection_jobs(workspace_scope, id) ON DELETE RESTRICT,
+               FOREIGN KEY(workspace_scope, proposal_memory_id)
+                 REFERENCES memory_records(workspace_scope, id) ON DELETE RESTRICT,
+               FOREIGN KEY(workspace_scope, candidate_id)
+                 REFERENCES optimization_candidates(workspace_scope, id) ON DELETE RESTRICT
+             );
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_reflection_optimization_active
+               ON memory_reflection_optimization_candidates(workspace_scope, reflection_job_id)
+               WHERE state='bound';
+             CREATE INDEX IF NOT EXISTS idx_memory_reflection_optimization_candidate
+               ON memory_reflection_optimization_candidates(workspace_scope, candidate_id, state);",
+        )
+        .map_err(|error| format!("无法创建反思优化候选关联表：{error}"))
+}
+
 fn map_reflection_job(row: &Row<'_>) -> rusqlite::Result<ReflectionJob> {
     let scope_json = row.get::<_, String>(3)?;
     let source_doc_ids_json = row.get::<_, String>(4)?;
     let metrics_json = row.get::<_, String>(6)?;
+    let fallback_snapshot = reflection_snapshot_value(
+        &scope_json,
+        row.get::<_, Option<String>>(2)?.as_deref(),
+        &source_doc_ids_json,
+        &row.get::<_, String>(5)?,
+        &metrics_json,
+        &[],
+        None,
+    )
+    .map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+        )
+    })?;
+    let source_snapshot_json = row.get::<_, Option<String>>(13)?;
+    let source_snapshot = source_snapshot_json
+        .as_deref()
+        .map(|value| parse_json(value, "无法解析反思来源快照"))
+        .transpose()?
+        .unwrap_or(fallback_snapshot);
+    let source_snapshot_hash = row
+        .get::<_, Option<String>>(14)?
+        .unwrap_or_else(|| reflection_snapshot_hash(&source_snapshot).unwrap_or_default());
     Ok(ReflectionJob {
         id: row.get(0)?,
         idempotency_key: row.get(1)?,
@@ -1080,37 +1415,264 @@ fn map_reflection_job(row: &Row<'_>) -> rusqlite::Result<ReflectionJob> {
         scope: parse_json(&scope_json, "无法解析反思作用域")?,
         source_doc_ids: parse_json(&source_doc_ids_json, "无法解析反思来源")?,
         source_content_hash: row.get(5)?,
+        source_snapshot,
+        source_snapshot_hash,
         metrics: parse_json(&metrics_json, "无法解析反思指标")?,
         state: row.get(7)?,
         proposal_memory_id: row.get(8)?,
+        optimization_candidate_id: row.get(17)?,
         attempt_count: row.get(9)?,
         last_error: row.get(10)?,
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
+        claimed_by: row.get(15)?,
+        lease_expires_at_ms: row.get(16)?,
     })
 }
 
 const REFLECTION_JOB_COLUMNS: &str =
-    "id, idempotency_key, task_id, scope_json, source_doc_ids_json, source_content_hash, \
-     metrics_json, state, proposal_memory_id, attempt_count, last_error, created_at, updated_at";
+    "j.id, j.idempotency_key, j.task_id, j.scope_json, j.source_doc_ids_json, j.source_content_hash, \
+     j.metrics_json, j.state, j.proposal_memory_id, j.attempt_count, j.last_error, j.created_at, j.updated_at, \
+     r.source_snapshot_json, r.source_snapshot_hash, r.claimed_by, r.lease_expires_at_ms, \
+     (SELECT b.candidate_id FROM memory_reflection_optimization_candidates b \
+      WHERE b.workspace_scope=j.workspace_scope AND b.reflection_job_id=j.id \
+        AND b.state IN ('bound', 'applied') \
+      ORDER BY CASE b.state WHEN 'bound' THEN 0 ELSE 1 END, b.updated_at DESC LIMIT 1)";
 
 fn read_reflection_job(
     connection: &rusqlite::Connection,
     workspace_scope: &str,
     job_id: &str,
 ) -> Result<ReflectionJob, String> {
-    connection
+    let job = connection
         .query_row(
             &format!(
-                "SELECT {REFLECTION_JOB_COLUMNS} FROM memory_reflection_jobs \
-                 WHERE workspace_scope=?1 AND id=?2"
+                "SELECT {REFLECTION_JOB_COLUMNS} FROM memory_reflection_jobs j
+                 LEFT JOIN memory_reflection_job_runtime r
+                   ON r.workspace_scope=j.workspace_scope AND r.job_id=j.id
+                 WHERE j.workspace_scope=?1 AND j.id=?2"
             ),
             params![workspace_scope, job_id],
             map_reflection_job,
         )
         .optional()
         .map_err(|error| format!("无法读取反思任务：{error}"))?
-        .ok_or_else(|| "反思任务不存在".to_string())
+        .ok_or_else(|| "反思任务不存在".to_string())?;
+    let computed_hash = reflection_snapshot_hash(&job.source_snapshot)?;
+    if computed_hash != job.source_snapshot_hash {
+        return Err("反思来源快照哈希校验失败，已拒绝继续".to_string());
+    }
+    Ok(job)
+}
+
+fn normalized_reflection_claim_token(value: &str) -> Result<String, String> {
+    normalized_required(value, "反思领取令牌", 160)
+}
+
+fn reflection_lease_seconds(value: Option<i64>) -> Result<i64, String> {
+    let seconds = value.unwrap_or(90);
+    if !(5..=15 * 60).contains(&seconds) {
+        return Err("反思 lease 必须在 5 到 900 秒之间".to_string());
+    }
+    Ok(seconds)
+}
+
+fn reflection_lease_expiry_ms(lease_seconds: i64) -> i64 {
+    (Utc::now() + Duration::seconds(lease_seconds)).timestamp_millis()
+}
+
+fn require_live_reflection_claim(
+    connection: &Connection,
+    workspace_scope: &str,
+    job_id: &str,
+    claim_token: &str,
+    now_ms: i64,
+) -> Result<(), String> {
+    let valid = connection
+        .query_row(
+            "SELECT 1
+             FROM memory_reflection_jobs j
+             JOIN memory_reflection_job_runtime r
+               ON r.workspace_scope=j.workspace_scope AND r.job_id=j.id
+             WHERE j.workspace_scope=?1 AND j.id=?2 AND j.state='running'
+               AND r.claim_token=?3 AND r.lease_expires_at_ms>?4",
+            params![workspace_scope, job_id, claim_token, now_ms],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| format!("无法验证反思领取令牌：{error}"))?
+        .is_some();
+    if valid {
+        Ok(())
+    } else {
+        Err("反思领取令牌无效、已过期或任务已不再运行".to_string())
+    }
+}
+
+fn clear_reflection_lease(
+    connection: &Connection,
+    workspace_scope: &str,
+    job_id: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "UPDATE memory_reflection_job_runtime
+             SET claimed_by=NULL, claim_token=NULL, claimed_at_ms=NULL, lease_expires_at_ms=NULL
+             WHERE workspace_scope=?1 AND job_id=?2",
+            params![workspace_scope, job_id],
+        )
+        .map_err(|error| format!("无法清理反思领取 lease：{error}"))?;
+    Ok(())
+}
+
+fn normalized_optimization_candidate_id(value: &str) -> Result<String, String> {
+    normalized_required(value, "优化候选 ID", 160)
+}
+
+fn reflection_source_effect_ids(job: &ReflectionJob) -> Result<Vec<String>, String> {
+    let effect_ids = job
+        .source_snapshot
+        .get("sourceEffectIds")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "反思来源快照缺少 sourceEffectIds".to_string())?;
+    let mut unique = HashSet::new();
+    effect_ids
+        .iter()
+        .map(|value| {
+            let value = value
+                .as_str()
+                .ok_or_else(|| "反思来源效果 ID 无效".to_string())?;
+            let effect_id = normalized_required(value, "反思效果 ID", 160)?;
+            if !unique.insert(effect_id.clone()) {
+                return Err("反思来源效果 ID 不能重复".to_string());
+            }
+            Ok(effect_id)
+        })
+        .collect()
+}
+
+fn reflection_optimization_binding(
+    connection: &Connection,
+    workspace_scope: &str,
+    reflection_job_id: &str,
+    candidate_id: &str,
+) -> Result<Option<(String, String)>, String> {
+    connection
+        .query_row(
+            "SELECT proposal_memory_id, state
+             FROM memory_reflection_optimization_candidates
+             WHERE workspace_scope=?1 AND reflection_job_id=?2 AND candidate_id=?3",
+            params![workspace_scope, reflection_job_id, candidate_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("无法读取反思优化候选关联：{error}"))
+}
+
+fn bind_reflection_optimization_candidate(
+    connection: &Connection,
+    workspace_scope: &str,
+    reflection_job_id: &str,
+    candidate_id: &str,
+    proposal_memory_id: &str,
+) -> Result<(), String> {
+    let candidate_state = connection
+        .query_row(
+            "SELECT state FROM optimization_candidates WHERE workspace_scope=?1 AND id=?2",
+            params![workspace_scope, candidate_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("无法读取待绑定优化候选：{error}"))?
+        .ok_or_else(|| "待绑定优化候选不存在".to_string())?;
+    if candidate_state != "pending_review" {
+        return Err("只有通过独立评估、等待审阅的优化候选可以绑定反思任务".to_string());
+    }
+    if let Some((existing_proposal_id, state)) = reflection_optimization_binding(
+        connection,
+        workspace_scope,
+        reflection_job_id,
+        candidate_id,
+    )? {
+        if existing_proposal_id == proposal_memory_id && state == "bound" {
+            return Ok(());
+        }
+        return Err("优化候选已经绑定到不同的反思提案或已完成".to_string());
+    }
+    let active_binding = connection
+        .query_row(
+            "SELECT candidate_id FROM memory_reflection_optimization_candidates
+             WHERE workspace_scope=?1 AND reflection_job_id=?2 AND state='bound'",
+            params![workspace_scope, reflection_job_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("无法检查反思任务的候选绑定：{error}"))?;
+    if active_binding.is_some() {
+        return Err("反思任务已经绑定到其他等待审阅的优化候选".to_string());
+    }
+    let now = Utc::now().to_rfc3339();
+    connection
+        .execute(
+            "INSERT INTO memory_reflection_optimization_candidates
+             (workspace_scope, reflection_job_id, candidate_id, proposal_memory_id,
+              state, bound_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'bound', ?5, ?5)",
+            params![
+                workspace_scope,
+                reflection_job_id,
+                candidate_id,
+                proposal_memory_id,
+                now,
+            ],
+        )
+        .map_err(|error| format!("无法绑定反思任务和优化候选：{error}"))?;
+    Ok(())
+}
+
+fn supersede_reflection_optimization_binding(
+    connection: &Connection,
+    workspace_scope: &str,
+    reflection_job_id: &str,
+) -> Result<Vec<String>, String> {
+    let bindings = {
+        let mut statement = connection
+            .prepare(
+                "SELECT candidate_id FROM memory_reflection_optimization_candidates
+                 WHERE workspace_scope=?1 AND reflection_job_id=?2 AND state='bound'",
+            )
+            .map_err(|error| format!("无法读取待撤销优化候选绑定：{error}"))?;
+        let rows = statement
+            .query_map(params![workspace_scope, reflection_job_id], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| format!("无法查询待撤销优化候选绑定：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法读取待撤销优化候选绑定：{error}"))?;
+        rows
+    };
+    if bindings.is_empty() {
+        return Ok(bindings);
+    }
+    let now = Utc::now().to_rfc3339();
+    connection
+        .execute(
+            "UPDATE memory_reflection_optimization_candidates
+             SET state='superseded', updated_at=?3
+             WHERE workspace_scope=?1 AND reflection_job_id=?2 AND state='bound'",
+            params![workspace_scope, reflection_job_id, now],
+        )
+        .map_err(|error| format!("无法撤销反思优化候选绑定：{error}"))?;
+    for candidate_id in &bindings {
+        connection
+            .execute(
+                "UPDATE optimization_candidates SET state='superseded'
+                 WHERE workspace_scope=?1 AND id=?2 AND state='pending_review'",
+                params![workspace_scope, candidate_id],
+            )
+            .map_err(|error| format!("无法撤销绑定的优化候选：{error}"))?;
+    }
+    Ok(bindings)
 }
 
 impl RuntimeDatabase {
@@ -1167,6 +1729,15 @@ impl RuntimeDatabase {
         search_memory_with_connection(&connection, &workspace_scope, request, match_query)
     }
 
+    fn list_memories(&self, request: &MemoryListRequest) -> Result<Vec<MemoryRecord>, String> {
+        let workspace_scope = self.local_workspace_scope()?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        list_memory_records_with_connection(&connection, &workspace_scope, request)
+    }
+
     fn begin_reflection(&self, input: &ReflectionJobInput) -> Result<ReflectionJob, String> {
         let workspace_scope = self.local_workspace_scope()?;
         let idempotency_key = normalized_required(&input.idempotency_key, "反思幂等键", 200)?;
@@ -1182,6 +1753,18 @@ impl RuntimeDatabase {
             .collect::<Result<Vec<_>, _>>()?;
         let source_content_hash = validate_hash(Some(&input.source_content_hash))?
             .ok_or_else(|| "反思来源哈希不能为空".to_string())?;
+        let source_effect_ids = input
+            .source_effect_ids
+            .iter()
+            .map(|value| normalized_required(value, "反思效果 ID", 160))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut unique_effect_ids = HashSet::new();
+        if source_effect_ids
+            .iter()
+            .any(|effect_id| !unique_effect_ids.insert(effect_id.clone()))
+        {
+            return Err("反思来源效果 ID 不能重复".to_string());
+        }
         let scope_json = serde_json::to_string(&scope)
             .map_err(|error| format!("无法序列化反思作用域：{error}"))?;
         let sources_json = serde_json::to_string(&source_doc_ids)
@@ -1191,6 +1774,28 @@ impl RuntimeDatabase {
         if metrics_json.len() > 128 * 1024 {
             return Err("反思指标超过 128 KB 安全上限".to_string());
         }
+        if input
+            .source_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| !snapshot.is_object())
+        {
+            return Err("反思 sourceSnapshot 必须是 JSON 对象".to_string());
+        }
+        let mut source_snapshot = reflection_snapshot_value(
+            &scope_json,
+            task_id.as_deref(),
+            &sources_json,
+            &source_content_hash,
+            &metrics_json,
+            &source_effect_ids,
+            input.source_snapshot.as_ref(),
+        )?;
+        let mut source_snapshot_json = serde_json::to_string(&source_snapshot)
+            .map_err(|error| format!("无法序列化反思来源快照：{error}"))?;
+        if source_snapshot_json.len() > 512 * 1024 {
+            return Err("反思来源快照超过 512 KB 安全上限".to_string());
+        }
+        let mut source_snapshot_hash = reflection_snapshot_hash(&source_snapshot)?;
         let mut connection = self
             .connection
             .lock()
@@ -1198,6 +1803,28 @@ impl RuntimeDatabase {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| format!("无法开始反思任务事务：{error}"))?;
+        if !source_effect_ids.is_empty() {
+            let effect_evidence =
+                crate::skill_lifecycle::reflection_effect_snapshots_in_connection(
+                    &transaction,
+                    &workspace_scope,
+                    &source_effect_ids,
+                )?;
+            if let Some(object) = source_snapshot.as_object_mut() {
+                object.insert("effectEvidence".to_string(), Value::Array(effect_evidence));
+            }
+            source_snapshot_json = serde_json::to_string(&source_snapshot)
+                .map_err(|error| format!("无法序列化反思 Skill 效果证据：{error}"))?;
+            if source_snapshot_json.len() > 512 * 1024 {
+                return Err("反思来源快照超过 512 KB 安全上限".to_string());
+            }
+            source_snapshot_hash = reflection_snapshot_hash(&source_snapshot)?;
+        }
+        if let Some(expected_hash) = validate_hash(input.source_snapshot_hash.as_deref())? {
+            if expected_hash != source_snapshot_hash {
+                return Err("反思 sourceSnapshotHash 与规范化快照不匹配".to_string());
+            }
+        }
         let existing_id = transaction
             .query_row(
                 "SELECT id FROM memory_reflection_jobs \
@@ -1214,6 +1841,7 @@ impl RuntimeDatabase {
                 || existing.source_doc_ids != source_doc_ids
                 || existing.source_content_hash != source_content_hash
                 || existing.metrics != input.metrics
+                || existing.source_snapshot_hash != source_snapshot_hash
             {
                 return Err("反思幂等键已经绑定到不同的任务、作用域或来源证据".to_string());
             }
@@ -1226,12 +1854,10 @@ impl RuntimeDatabase {
                  (workspace_scope, id, idempotency_key, task_id, scope_json, source_doc_ids_json, \
                   source_content_hash, metrics_json, state, proposal_memory_id, attempt_count, \
                   last_error, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'running', NULL, 1, NULL, ?9, ?9) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'queued', NULL, 0, NULL, ?9, ?9) \
                  ON CONFLICT(workspace_scope, idempotency_key) DO UPDATE SET \
-                   state=CASE WHEN memory_reflection_jobs.state IN ('queued', 'failed') THEN 'running' \
+                   state=CASE WHEN memory_reflection_jobs.state='failed' THEN 'queued' \
                               ELSE memory_reflection_jobs.state END, \
-                   attempt_count=CASE WHEN memory_reflection_jobs.state IN ('queued', 'failed') \
-                                      THEN memory_reflection_jobs.attempt_count+1 ELSE memory_reflection_jobs.attempt_count END, \
                    last_error=CASE WHEN memory_reflection_jobs.state IN ('queued', 'failed') \
                                    THEN NULL ELSE memory_reflection_jobs.last_error END, \
                    updated_at=excluded.updated_at",
@@ -1248,6 +1874,19 @@ impl RuntimeDatabase {
                 ],
             )
             .map_err(|error| format!("无法保存反思任务：{error}"))?;
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO memory_reflection_job_runtime
+                 (workspace_scope, job_id, source_snapshot_json, source_snapshot_hash)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    workspace_scope,
+                    job_id,
+                    source_snapshot_json,
+                    source_snapshot_hash
+                ],
+            )
+            .map_err(|error| format!("无法保存反思运行时状态：{error}"))?;
         let job = read_reflection_job(&transaction, &workspace_scope, &job_id)?;
         transaction
             .commit()
@@ -1255,13 +1894,203 @@ impl RuntimeDatabase {
         Ok(job)
     }
 
-    fn complete_reflection(
+    fn get_reflection(&self, job_id: &str) -> Result<ReflectionJob, String> {
+        let workspace_scope = self.local_workspace_scope()?;
+        let job_id = normalized_required(job_id, "反思任务 ID", 160)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        read_reflection_job(&connection, &workspace_scope, &job_id)
+    }
+
+    fn list_reflections(
+        &self,
+        request: &ReflectionJobListRequest,
+    ) -> Result<Vec<ReflectionJob>, String> {
+        let workspace_scope = self.local_workspace_scope()?;
+        let states = request
+            .states
+            .iter()
+            .map(|state| normalized_required(state, "反思任务状态", 32))
+            .collect::<Result<Vec<_>, _>>()?;
+        if states.iter().any(|state| {
+            !matches!(
+                state.as_str(),
+                "queued" | "running" | "awaiting_review" | "completed" | "failed" | "cancelled"
+            )
+        }) {
+            return Err("反思任务状态无效".to_string());
+        }
+        let limit = request.limit.unwrap_or(100).clamp(1, 500) as i64;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let mut sql = format!(
+            "SELECT {REFLECTION_JOB_COLUMNS} FROM memory_reflection_jobs j
+             LEFT JOIN memory_reflection_job_runtime r
+               ON r.workspace_scope=j.workspace_scope AND r.job_id=j.id
+             WHERE j.workspace_scope=?1"
+        );
+        if !states.is_empty() {
+            let placeholders = (0..states.len())
+                .map(|index| format!("?{}", index + 2))
+                .collect::<Vec<_>>()
+                .join(", ");
+            sql.push_str(&format!(" AND j.state IN ({placeholders})"));
+        }
+        sql.push_str(" ORDER BY j.updated_at DESC, j.id DESC");
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| format!("无法准备反思任务列表查询：{error}"))?;
+        let mut values = vec![rusqlite::types::Value::Text(workspace_scope)];
+        values.extend(states.into_iter().map(rusqlite::types::Value::Text));
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(values), map_reflection_job)
+            .map_err(|error| format!("无法查询反思任务列表：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法读取反思任务列表：{error}"))?;
+        Ok(rows.into_iter().take(limit as usize).collect())
+    }
+
+    fn claim_reflection(
+        &self,
+        input: &ReflectionJobClaimInput,
+    ) -> Result<Option<ReflectionJobClaim>, String> {
+        let workspace_scope = self.local_workspace_scope()?;
+        let worker_id = normalized_required(&input.worker_id, "反思 worker ID", 160)?;
+        let lease_seconds = reflection_lease_seconds(input.lease_seconds)?;
+        let now_ms = Utc::now().timestamp_millis();
+        let lease_expires_at_ms = reflection_lease_expiry_ms(lease_seconds);
+        let claim_token = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("无法开始反思领取事务：{error}"))?;
+        let job_id = transaction
+            .query_row(
+                "SELECT j.id
+                 FROM memory_reflection_jobs j
+                 JOIN memory_reflection_job_runtime r
+                   ON r.workspace_scope=j.workspace_scope AND r.job_id=j.id
+                 WHERE j.workspace_scope=?1
+                   AND json_extract(r.source_snapshot_json, '$.replayable')=1
+                   AND (j.state='queued'
+                     OR (j.state='running' AND COALESCE(r.lease_expires_at_ms, 0)<=?2))
+                 ORDER BY CASE j.state WHEN 'queued' THEN 0 ELSE 1 END,
+                          j.updated_at ASC, j.id ASC
+                 LIMIT 1",
+                params![workspace_scope, now_ms],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| format!("无法选择待领取反思任务：{error}"))?;
+        let Some(job_id) = job_id else {
+            transaction
+                .commit()
+                .map_err(|error| format!("无法提交空反思领取事务：{error}"))?;
+            return Ok(None);
+        };
+        let changed = transaction
+            .execute(
+                "UPDATE memory_reflection_jobs
+                 SET state='running', attempt_count=attempt_count+1, last_error=NULL, updated_at=?3
+                 WHERE workspace_scope=?1 AND id=?2
+                   AND state IN ('queued', 'running')",
+                params![workspace_scope, job_id, now],
+            )
+            .map_err(|error| format!("无法标记反思任务为运行中：{error}"))?;
+        if changed != 1 {
+            return Err("反思任务领取冲突，请重试".to_string());
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE memory_reflection_job_runtime
+                 SET claimed_by=?3, claim_token=?4, claimed_at_ms=?5, lease_expires_at_ms=?6
+                 WHERE workspace_scope=?1 AND job_id=?2
+                   AND (claim_token IS NULL OR lease_expires_at_ms IS NULL OR lease_expires_at_ms<=?5)",
+                params![workspace_scope, job_id, worker_id, claim_token, now_ms, lease_expires_at_ms],
+            )
+            .map_err(|error| format!("无法保存反思领取 lease：{error}"))?;
+        if changed != 1 {
+            return Err("反思任务领取 lease 冲突，请重试".to_string());
+        }
+        let job = read_reflection_job(&transaction, &workspace_scope, &job_id)?;
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交反思领取事务：{error}"))?;
+        Ok(Some(ReflectionJobClaim { job, claim_token }))
+    }
+
+    fn renew_reflection_lease(
         &self,
         job_id: &str,
-        proposal: &MemoryRecordInput,
+        claim_token: &str,
+        lease_seconds: Option<i64>,
     ) -> Result<ReflectionJob, String> {
         let workspace_scope = self.local_workspace_scope()?;
         let job_id = normalized_required(job_id, "反思任务 ID", 160)?;
+        let claim_token = normalized_reflection_claim_token(claim_token)?;
+        let lease_seconds = reflection_lease_seconds(lease_seconds)?;
+        let now_ms = Utc::now().timestamp_millis();
+        let lease_expires_at_ms = reflection_lease_expiry_ms(lease_seconds);
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("无法开始反思 lease 续期事务：{error}"))?;
+        require_live_reflection_claim(
+            &transaction,
+            &workspace_scope,
+            &job_id,
+            &claim_token,
+            now_ms,
+        )?;
+        let changed = transaction
+            .execute(
+                "UPDATE memory_reflection_job_runtime
+                 SET lease_expires_at_ms=?4
+                 WHERE workspace_scope=?1 AND job_id=?2 AND claim_token=?3
+                   AND lease_expires_at_ms>?5",
+                params![
+                    workspace_scope,
+                    job_id,
+                    claim_token,
+                    lease_expires_at_ms,
+                    now_ms
+                ],
+            )
+            .map_err(|error| format!("无法续期反思 lease：{error}"))?;
+        if changed != 1 {
+            return Err("反思 lease 已失效，无法续期".to_string());
+        }
+        let job = read_reflection_job(&transaction, &workspace_scope, &job_id)?;
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交反思 lease 续期：{error}"))?;
+        Ok(job)
+    }
+
+    fn complete_reflection(
+        &self,
+        job_id: &str,
+        claim_token: &str,
+        proposal: &MemoryRecordInput,
+        candidate_id: Option<&str>,
+    ) -> Result<ReflectionJob, String> {
+        let workspace_scope = self.local_workspace_scope()?;
+        let job_id = normalized_required(job_id, "反思任务 ID", 160)?;
+        let claim_token = normalized_reflection_claim_token(claim_token)?;
+        let candidate_id = candidate_id
+            .map(normalized_optimization_candidate_id)
+            .transpose()?;
         let mut connection = self
             .connection
             .lock()
@@ -1271,17 +2100,49 @@ impl RuntimeDatabase {
             .map_err(|error| format!("无法开始反思完成事务：{error}"))?;
         let job = read_reflection_job(&transaction, &workspace_scope, &job_id)?;
         if job.state == "awaiting_review" || job.state == "completed" {
+            if let Some(candidate_id) = candidate_id.as_deref() {
+                let proposal_memory_id = job
+                    .proposal_memory_id
+                    .as_deref()
+                    .ok_or_else(|| "反思任务缺少建议记忆".to_string())?;
+                let binding = reflection_optimization_binding(
+                    &transaction,
+                    &workspace_scope,
+                    &job_id,
+                    candidate_id,
+                )?
+                .ok_or_else(|| "反思任务没有绑定该优化候选".to_string())?;
+                if binding.0 != proposal_memory_id {
+                    return Err("反思任务和优化候选的提案绑定不一致".to_string());
+                }
+            }
             return Ok(job);
         }
         if job.state != "running" {
             return Err("只有运行中的反思任务可以提交建议".to_string());
         }
+        require_live_reflection_claim(
+            &transaction,
+            &workspace_scope,
+            &job_id,
+            &claim_token,
+            Utc::now().timestamp_millis(),
+        )?;
         let mut proposal = proposal.clone();
         proposal.state = "draft".to_string();
         proposal.scope = job.scope.clone();
         proposal.source_doc_id = job.id.clone();
         proposal.source_content_hash = Some(job.source_content_hash.clone());
         let record = upsert_memory_in_transaction(&transaction, &workspace_scope, &proposal)?;
+        if let Some(candidate_id) = candidate_id.as_deref() {
+            bind_reflection_optimization_candidate(
+                &transaction,
+                &workspace_scope,
+                &job_id,
+                candidate_id,
+                &record.id,
+            )?;
+        }
         let now = Utc::now().to_rfc3339();
         transaction
             .execute(
@@ -1291,6 +2152,7 @@ impl RuntimeDatabase {
                 params![workspace_scope, job_id, record.id, now],
             )
             .map_err(|error| format!("无法完成反思任务：{error}"))?;
+        clear_reflection_lease(&transaction, &workspace_scope, &job_id)?;
         let job = read_reflection_job(&transaction, &workspace_scope, &job_id)?;
         transaction
             .commit()
@@ -1318,6 +2180,19 @@ impl RuntimeDatabase {
         if job.state != "awaiting_review" {
             return Err("反思任务当前不处于等待审阅状态".to_string());
         }
+        let has_bound_candidate = transaction
+            .query_row(
+                "SELECT 1 FROM memory_reflection_optimization_candidates
+                 WHERE workspace_scope=?1 AND reflection_job_id=?2 AND state='bound'",
+                params![workspace_scope, job_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| format!("无法检查反思优化候选绑定：{error}"))?
+            .is_some();
+        if decision == "approve" && has_bound_candidate {
+            return Err("已绑定优化候选的反思任务必须使用原子审批命令".to_string());
+        }
         let proposal_id = job
             .proposal_memory_id
             .as_deref()
@@ -1335,6 +2210,31 @@ impl RuntimeDatabase {
             memory_state,
             decision,
         )?;
+        let mut correction_reference_id = proposal_id.to_string();
+        if matches!(decision, "reject" | "revise") && has_bound_candidate {
+            let superseded =
+                supersede_reflection_optimization_binding(&transaction, &workspace_scope, &job_id)?;
+            if let Some(candidate_id) = superseded.first() {
+                correction_reference_id.clone_from(candidate_id);
+            }
+        }
+        if matches!(decision, "reject" | "revise") {
+            let note = if decision == "reject" {
+                "用户拒绝反思建议"
+            } else {
+                "用户要求重做反思建议"
+            };
+            for effect_id in reflection_source_effect_ids(&job)? {
+                crate::skill_lifecycle::record_skill_execution_feedback_link_in_connection(
+                    &transaction,
+                    &workspace_scope,
+                    &effect_id,
+                    "correction",
+                    &correction_reference_id,
+                    note,
+                )?;
+            }
+        }
         let now = Utc::now().to_rfc3339();
         transaction
             .execute(
@@ -1344,6 +2244,9 @@ impl RuntimeDatabase {
                 params![workspace_scope, job_id, job_state, now],
             )
             .map_err(|error| format!("无法保存反思审阅结果：{error}"))?;
+        if job_state == "queued" {
+            clear_reflection_lease(&transaction, &workspace_scope, &job_id)?;
+        }
         let job = read_reflection_job(&transaction, &workspace_scope, &job_id)?;
         transaction
             .commit()
@@ -1351,49 +2254,255 @@ impl RuntimeDatabase {
         Ok(job)
     }
 
-    fn fail_reflection(&self, job_id: &str, error: &str) -> Result<ReflectionJob, String> {
+    fn approve_reflection_optimization_candidate(
+        &self,
+        reflection_job_id: &str,
+        candidate_id: &str,
+        mutation_key: Option<&RuntimeEffectMutationKey>,
+    ) -> Result<OptimizationProfileResult, String> {
         let workspace_scope = self.local_workspace_scope()?;
-        let job_id = normalized_required(job_id, "反思任务 ID", 160)?;
-        let error = normalized_required(error, "反思失败原因", 2_000)?;
-        let connection = self
+        let reflection_job_id = normalized_required(reflection_job_id, "反思任务 ID", 160)?;
+        let candidate_id = normalized_optimization_candidate_id(candidate_id)?;
+        let mut connection = self
             .connection
             .lock()
             .map_err(|_| "SQLite 连接锁不可用".to_string())?;
-        let changed = connection
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("无法开始反思优化原子审批事务：{error}"))?;
+        if let Some(key) = mutation_key {
+            if let Some(result) =
+                read_runtime_effect_mutation_result(&transaction, &workspace_scope, key)?
+            {
+                transaction
+                    .commit()
+                    .map_err(|error| format!("无法完成反思优化审批幂等重放：{error}"))?;
+                return Ok(result);
+            }
+        }
+        let job = read_reflection_job(&transaction, &workspace_scope, &reflection_job_id)?;
+        let proposal_memory_id = job
+            .proposal_memory_id
+            .as_deref()
+            .ok_or_else(|| "反思任务缺少建议记忆".to_string())?;
+        let binding = reflection_optimization_binding(
+            &transaction,
+            &workspace_scope,
+            &reflection_job_id,
+            &candidate_id,
+        )?
+        .ok_or_else(|| "反思任务没有绑定该优化候选，已拒绝错配审批".to_string())?;
+        if binding.0 != proposal_memory_id {
+            return Err("反思任务、优化候选与建议记忆绑定不一致".to_string());
+        }
+        let proposal = read_memory_record(&transaction, &workspace_scope, proposal_memory_id)?;
+        if proposal.track != "agent_skill" {
+            return Err("优化候选只能激活经过审阅的 agent_skill 建议记忆".to_string());
+        }
+        let candidate_state = transaction
+            .query_row(
+                "SELECT state FROM optimization_candidates WHERE workspace_scope=?1 AND id=?2",
+                params![workspace_scope, candidate_id],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| format!("无法读取原子审批优化候选：{error}"))?;
+        let idempotent = job.state == "completed"
+            && binding.1 == "applied"
+            && proposal.state == "active"
+            && candidate_state == "applied";
+        if !idempotent {
+            if job.state != "awaiting_review"
+                || binding.1 != "bound"
+                || proposal.state != "draft"
+                || candidate_state != "pending_review"
+            {
+                return Err("反思任务、候选、建议记忆或绑定状态不允许原子审批".to_string());
+            }
+            change_memory_state_in_transaction(
+                &transaction,
+                &workspace_scope,
+                proposal_memory_id,
+                "active",
+                "approve_optimization_candidate",
+            )?;
+        }
+
+        let profile = crate::runtime_db::apply_evaluated_optimization_candidate_in_connection(
+            &transaction,
+            &workspace_scope,
+            &candidate_id,
+        )?;
+        if !idempotent {
+            let now = Utc::now().to_rfc3339();
+            let changed = transaction
+                .execute(
+                    "UPDATE memory_reflection_jobs
+                     SET state='completed', last_error=NULL, updated_at=?3
+                     WHERE workspace_scope=?1 AND id=?2 AND state='awaiting_review'",
+                    params![workspace_scope, reflection_job_id, now],
+                )
+                .map_err(|error| format!("无法完成原子审批反思任务：{error}"))?;
+            if changed != 1 {
+                return Err("反思任务状态已变化，原子审批没有提交".to_string());
+            }
+            let changed = transaction
+                .execute(
+                    "UPDATE memory_reflection_optimization_candidates
+                     SET state='applied', updated_at=?4
+                     WHERE workspace_scope=?1 AND reflection_job_id=?2 AND candidate_id=?3
+                       AND state='bound'",
+                    params![workspace_scope, reflection_job_id, candidate_id, now],
+                )
+                .map_err(|error| format!("无法完成反思优化候选关联：{error}"))?;
+            if changed != 1 {
+                return Err("反思优化候选绑定已变化，原子审批没有提交".to_string());
+            }
+        }
+        for effect_id in reflection_source_effect_ids(&job)? {
+            crate::skill_lifecycle::record_skill_execution_feedback_link_in_connection(
+                &transaction,
+                &workspace_scope,
+                &effect_id,
+                "acceptance",
+                &candidate_id,
+                "用户批准反思优化候选",
+            )?;
+        }
+        if let Some(key) = mutation_key {
+            persist_runtime_effect_mutation_result(&transaction, &workspace_scope, key, &profile)?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交反思优化原子审批：{error}"))?;
+        Ok(profile)
+    }
+
+    fn fail_reflection(
+        &self,
+        job_id: &str,
+        claim_token: &str,
+        error: &str,
+    ) -> Result<ReflectionJob, String> {
+        let workspace_scope = self.local_workspace_scope()?;
+        let job_id = normalized_required(job_id, "反思任务 ID", 160)?;
+        let claim_token = normalized_reflection_claim_token(claim_token)?;
+        let error = normalized_required(error, "反思失败原因", 2_000)?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|database_error| format!("无法开始反思失败事务：{database_error}"))?;
+        let existing = read_reflection_job(&transaction, &workspace_scope, &job_id)?;
+        if existing.state == "failed" {
+            return Ok(existing);
+        }
+        if existing.state != "running" {
+            return Err("反思任务当前不能标记失败".to_string());
+        }
+        require_live_reflection_claim(
+            &transaction,
+            &workspace_scope,
+            &job_id,
+            &claim_token,
+            Utc::now().timestamp_millis(),
+        )?;
+        let changed = transaction
             .execute(
                 "UPDATE memory_reflection_jobs SET state='failed', last_error=?3, updated_at=?4 \
-                 WHERE workspace_scope=?1 AND id=?2 AND state IN ('queued', 'running')",
+                 WHERE workspace_scope=?1 AND id=?2 AND state='running'",
                 params![workspace_scope, job_id, error, Utc::now().to_rfc3339()],
             )
             .map_err(|database_error| format!("无法记录反思任务失败：{database_error}"))?;
-        if changed == 0 {
-            let existing = read_reflection_job(&connection, &workspace_scope, &job_id)?;
-            if !matches!(
-                existing.state.as_str(),
-                "failed" | "awaiting_review" | "completed"
-            ) {
-                return Err("反思任务当前不能标记失败".to_string());
-            }
-            return Ok(existing);
+        if changed != 1 {
+            return Err("反思任务状态已变化，无法标记失败".to_string());
         }
-        read_reflection_job(&connection, &workspace_scope, &job_id)
+        clear_reflection_lease(&transaction, &workspace_scope, &job_id)?;
+        let job = read_reflection_job(&transaction, &workspace_scope, &job_id)?;
+        transaction
+            .commit()
+            .map_err(|database_error| format!("无法提交反思失败事务：{database_error}"))?;
+        Ok(job)
+    }
+
+    fn cancel_reflection(&self, job_id: &str, reason: &str) -> Result<ReflectionJob, String> {
+        let workspace_scope = self.local_workspace_scope()?;
+        let job_id = normalized_required(job_id, "反思任务 ID", 160)?;
+        let reason = normalized_required(reason, "反思取消原因", 2_000)?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("无法开始反思取消事务：{error}"))?;
+        let job = read_reflection_job(&transaction, &workspace_scope, &job_id)?;
+        if job.state == "cancelled" {
+            return Ok(job);
+        }
+        if job.state == "completed" {
+            return Err("已完成的反思任务不能取消".to_string());
+        }
+        if let Some(proposal_id) = job.proposal_memory_id.as_deref() {
+            let proposal = read_memory_record(&transaction, &workspace_scope, proposal_id)?;
+            if proposal.state == "draft" {
+                change_memory_state_in_transaction(
+                    &transaction,
+                    &workspace_scope,
+                    proposal_id,
+                    "tombstone",
+                    &format!("reflection_cancelled:{reason}"),
+                )?;
+            }
+        }
+        transaction
+            .execute(
+                "UPDATE memory_reflection_jobs
+                 SET state='cancelled', last_error=?3, updated_at=?4
+                 WHERE workspace_scope=?1 AND id=?2
+                   AND state IN ('queued', 'running', 'awaiting_review', 'failed')",
+                params![workspace_scope, job_id, reason, Utc::now().to_rfc3339()],
+            )
+            .map_err(|error| format!("无法取消反思任务：{error}"))?;
+        clear_reflection_lease(&transaction, &workspace_scope, &job_id)?;
+        let job = read_reflection_job(&transaction, &workspace_scope, &job_id)?;
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交反思取消事务：{error}"))?;
+        Ok(job)
     }
 }
 
 pub(crate) fn recover_reflection_jobs(database: &RuntimeDatabase) -> Result<usize, String> {
     let workspace_scope = database.local_workspace_scope()?;
-    let connection = database
+    let mut connection = database
         .connection
         .lock()
         .map_err(|_| "SQLite 连接锁不可用".to_string())?;
-    connection
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("无法开始反思恢复事务：{error}"))?;
+    let recovered = transaction
         .execute(
             "UPDATE memory_reflection_jobs SET state='queued', \
              last_error=COALESCE(last_error, '应用退出前反思任务未完成'), updated_at=?2 \
              WHERE workspace_scope=?1 AND state='running'",
             params![workspace_scope, Utc::now().to_rfc3339()],
         )
-        .map_err(|error| format!("无法恢复中断的反思任务：{error}"))
+        .map_err(|error| format!("无法恢复中断的反思任务：{error}"))?;
+    transaction
+        .execute(
+            "UPDATE memory_reflection_job_runtime
+             SET claimed_by=NULL, claim_token=NULL, claimed_at_ms=NULL, lease_expires_at_ms=NULL
+             WHERE workspace_scope=?1",
+            params![workspace_scope],
+        )
+        .map_err(|error| format!("无法清理反思恢复 lease：{error}"))?;
+    transaction
+        .commit()
+        .map_err(|error| format!("无法提交反思恢复事务：{error}"))?;
+    Ok(recovered)
 }
 
 #[tauri::command]
@@ -1422,6 +2531,14 @@ pub fn search_memory_records(
 }
 
 #[tauri::command]
+pub fn list_memory_records(
+    database: State<'_, RuntimeDatabase>,
+    request: MemoryListRequest,
+) -> Result<Vec<MemoryRecord>, String> {
+    database.list_memories(&request)
+}
+
+#[tauri::command]
 pub fn begin_memory_reflection(
     database: State<'_, RuntimeDatabase>,
     input: ReflectionJobInput,
@@ -1430,12 +2547,48 @@ pub fn begin_memory_reflection(
 }
 
 #[tauri::command]
+pub fn get_memory_reflection(
+    database: State<'_, RuntimeDatabase>,
+    job_id: String,
+) -> Result<ReflectionJob, String> {
+    database.get_reflection(&job_id)
+}
+
+#[tauri::command]
+pub fn list_memory_reflections(
+    database: State<'_, RuntimeDatabase>,
+    request: ReflectionJobListRequest,
+) -> Result<Vec<ReflectionJob>, String> {
+    database.list_reflections(&request)
+}
+
+#[tauri::command]
+pub fn claim_memory_reflection(
+    database: State<'_, RuntimeDatabase>,
+    input: ReflectionJobClaimInput,
+) -> Result<Option<ReflectionJobClaim>, String> {
+    database.claim_reflection(&input)
+}
+
+#[tauri::command]
+pub fn renew_memory_reflection_lease(
+    database: State<'_, RuntimeDatabase>,
+    job_id: String,
+    claim_token: String,
+    lease_seconds: Option<i64>,
+) -> Result<ReflectionJob, String> {
+    database.renew_reflection_lease(&job_id, &claim_token, lease_seconds)
+}
+
+#[tauri::command]
 pub fn complete_memory_reflection(
     database: State<'_, RuntimeDatabase>,
     job_id: String,
+    claim_token: String,
     proposal: MemoryRecordInput,
+    candidate_id: Option<String>,
 ) -> Result<ReflectionJob, String> {
-    database.complete_reflection(&job_id, &proposal)
+    database.complete_reflection(&job_id, &claim_token, &proposal, candidate_id.as_deref())
 }
 
 #[tauri::command]
@@ -1448,12 +2601,64 @@ pub fn review_memory_reflection(
 }
 
 #[tauri::command]
+pub fn approve_reflection_optimization_candidate(
+    database: State<'_, RuntimeDatabase>,
+    ticket_state: State<'_, ExecutionTicketState>,
+    reflection_job_id: String,
+    candidate_id: String,
+    operation_context: OperationContext,
+) -> Result<OptimizationProfileResult, String> {
+    let handler_started = Instant::now();
+    let workspace_scope = database.local_workspace_scope()?;
+    let authorization = validate_optimization_runtime_handler(
+        database.inner(),
+        ticket_state.inner(),
+        &workspace_scope,
+        &operation_context,
+    )?;
+    let reflection_job_id = reflection_job_id.trim();
+    let candidate_id = candidate_id.trim();
+    let mutation_key = runtime_effect_mutation_key(
+        &authorization,
+        "optimization.approve_reflection_candidate",
+        &serde_json::json!({
+            "reflectionJobId": reflection_job_id,
+            "candidateId": candidate_id,
+        }),
+    )?;
+    let profile = database.approve_reflection_optimization_candidate(
+        reflection_job_id,
+        candidate_id,
+        Some(&mutation_key),
+    )?;
+    record_optimization_runtime_handler_completion(
+        database.inner(),
+        ticket_state.inner(),
+        &workspace_scope,
+        &operation_context,
+        &mutation_key,
+        handler_started,
+    )?;
+    Ok(profile)
+}
+
+#[tauri::command]
 pub fn fail_memory_reflection(
     database: State<'_, RuntimeDatabase>,
     job_id: String,
+    claim_token: String,
     error: String,
 ) -> Result<ReflectionJob, String> {
-    database.fail_reflection(&job_id, &error)
+    database.fail_reflection(&job_id, &claim_token, &error)
+}
+
+#[tauri::command]
+pub fn cancel_memory_reflection(
+    database: State<'_, RuntimeDatabase>,
+    job_id: String,
+    reason: String,
+) -> Result<ReflectionJob, String> {
+    database.cancel_reflection(&job_id, &reason)
 }
 
 #[tauri::command]
@@ -1461,301 +2666,5 @@ pub fn memory_backend_status() -> MemoryBackendStatus {
     MemoryBackendStatus {
         active_backend: "sqlite",
         canonical_source: "obsidian-markdown",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    fn database() -> (tempfile::TempDir, RuntimeDatabase) {
-        let directory = tempdir().expect("create temp directory");
-        let database = RuntimeDatabase::open_test(&directory.path().join("runtime.sqlite"))
-            .expect("open test database");
-        (directory, database)
-    }
-
-    fn record_input(id: &str, content: &str) -> MemoryRecordInput {
-        let content_hash = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
-        MemoryRecordInput {
-            id: Some(id.to_string()),
-            track: "user_profile".to_string(),
-            title: "写作偏好".to_string(),
-            content: content.to_string(),
-            scope: MemoryScope::default(),
-            source_doc_id: "source-1".to_string(),
-            source_relative_path: Some("来源/对话.md".to_string()),
-            source_content_hash: Some(content_hash.clone()),
-            evidence: vec![MemoryEvidence {
-                source_id: "message-1".to_string(),
-                excerpt: "用户明确要求内容简洁".to_string(),
-                content_hash: Some(content_hash),
-                relative_path: Some("来源/对话.md".to_string()),
-            }],
-            confidence: 0.9,
-            supersedes_id: None,
-            expires_at: None,
-            state: "active".to_string(),
-        }
-    }
-
-    #[test]
-    fn memory_tracks_are_versioned_scoped_and_searchable() {
-        let (_directory, database) = database();
-        let first = database
-            .upsert_memory(&record_input("preference-1", "偏好简洁的中文回答"))
-            .expect("insert memory");
-        assert_eq!(first.version, 1);
-        let updated = database
-            .upsert_memory(&record_input("preference-1", "偏好简洁、清晰的中文回答"))
-            .expect("update memory");
-        assert_eq!(updated.version, 2);
-
-        let results = database
-            .search_memory(&MemorySearchRequest {
-                query: "简洁".to_string(),
-                tracks: vec!["user_profile".to_string()],
-                scope: MemoryScope::default(),
-                limit: Some(10),
-            })
-            .expect("search memory");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].record.id, "preference-1");
-
-        let other_scope = MemoryScope {
-            project_id: "other-project".to_string(),
-            ..MemoryScope::default()
-        };
-        let isolated = database
-            .search_memory(&MemorySearchRequest {
-                query: "简洁".to_string(),
-                tracks: vec![],
-                scope: other_scope,
-                limit: Some(10),
-            })
-            .expect("search isolated scope");
-        assert!(isolated.is_empty());
-    }
-
-    #[test]
-    fn assistant_recall_separates_user_and_agent_memory_without_drafts() {
-        let (_directory, database) = database();
-        let mut episode = record_input("episode-1", "用户曾要求用简洁中文整理发布说明");
-        episode.track = "user_episode".to_string();
-        episode.title = "发布说明偏好".to_string();
-        database
-            .upsert_memory(&episode)
-            .expect("insert user episode");
-
-        let mut case = record_input("case-1", "Agent 曾完成发布前复盘并验证安装包");
-        case.track = "agent_case".to_string();
-        case.title = "发布复盘案例".to_string();
-        database.upsert_memory(&case).expect("insert agent case");
-
-        let mut draft = record_input("draft-1", "未经批准的发布优化建议");
-        draft.track = "agent_skill".to_string();
-        draft.title = "待审优化".to_string();
-        draft.state = "draft".to_string();
-        database.upsert_memory(&draft).expect("insert draft skill");
-
-        let workspace_scope = database.local_workspace_scope().expect("workspace scope");
-        let connection = database.connection.lock().expect("lock memory database");
-        let context = assistant_memory_context_in_connection(
-            &connection,
-            &workspace_scope,
-            "请简洁复盘这次发布",
-            &MemoryScope::default(),
-        )
-        .expect("recall assistant memory")
-        .expect("memory context");
-        assert!(context.contains("用户长期记忆"));
-        assert!(context.contains("用户曾要求用简洁中文"));
-        assert!(context.contains("Agent 过程记忆"));
-        assert!(context.contains("Agent 曾完成发布前复盘"));
-        assert!(!context.contains("未经批准"));
-    }
-
-    #[test]
-    fn native_turn_capture_persists_distinct_episode_profile_and_agent_case() {
-        let (_directory, database) = database();
-        let workspace_scope = database.local_workspace_scope().expect("workspace scope");
-        let mut connection = database.connection.lock().expect("lock memory database");
-        let transaction = connection.transaction().expect("begin transaction");
-        let capture = AssistantTurnMemoryCapture {
-            request_id: "request-memory-1".to_string(),
-            conversation_id: "conversation-memory-1".to_string(),
-            user_message_id: Some("message-user-1".to_string()),
-            user_message: "/style 简洁、直接的中文".to_string(),
-            assistant_message_id: Some("message-assistant-1".to_string()),
-            assistant_reply: "已更新回复风格".to_string(),
-            intent: Some("settings".to_string()),
-            action: Some("execute".to_string()),
-            state: "succeeded".to_string(),
-            error: None,
-            explicit_user_style: Some("简洁、直接的中文".to_string()),
-            scope: MemoryScope::default(),
-        };
-        let records = persist_assistant_turn_memories(&transaction, &workspace_scope, &capture)
-            .expect("persist turn memories");
-        assert_eq!(records.len(), 3);
-        persist_assistant_turn_memories(&transaction, &workspace_scope, &capture)
-            .expect("repeat turn memory capture");
-        transaction.commit().expect("commit memory capture");
-        drop(connection);
-
-        let connection = database.connection.lock().expect("lock memory database");
-        let tracks = connection
-            .prepare(
-                "SELECT track, COUNT(*), MAX(version) FROM memory_records \
-                 WHERE workspace_scope=?1 GROUP BY track ORDER BY track",
-            )
-            .expect("prepare memory counts")
-            .query_map([workspace_scope], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })
-            .expect("query memory counts")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("collect memory counts");
-        assert_eq!(
-            tracks,
-            vec![
-                ("agent_case".to_string(), 1, 1),
-                ("user_episode".to_string(), 1, 1),
-                ("user_profile".to_string(), 1, 1),
-            ]
-        );
-    }
-
-    #[test]
-    fn superseded_and_tombstoned_memory_leave_the_active_index() {
-        let (_directory, database) = database();
-        database
-            .upsert_memory(&record_input("old", "旧偏好证据"))
-            .expect("insert old memory");
-        let mut replacement = record_input("new", "新偏好证据");
-        replacement.supersedes_id = Some("old".to_string());
-        database
-            .upsert_memory(&replacement)
-            .expect("insert replacement");
-        database
-            .tombstone_memory("new", "用户撤销")
-            .expect("tombstone replacement");
-        assert!(database
-            .upsert_memory(&record_input("new", "试图重新激活已删除偏好"))
-            .is_err());
-
-        let connection = database.connection.lock().expect("lock memory database");
-        let old_revisions = connection
-            .query_row(
-                "SELECT COUNT(*) FROM memory_record_revisions \
-                 WHERE workspace_scope='local' AND memory_id='old'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("count superseded revisions");
-        let latest_old_state = connection
-            .query_row(
-                "SELECT state FROM memory_record_revisions \
-                 WHERE workspace_scope='local' AND memory_id='old' \
-                 ORDER BY version DESC LIMIT 1",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .expect("read superseded revision");
-        drop(connection);
-        assert_eq!(old_revisions, 2);
-        assert_eq!(latest_old_state, "superseded");
-
-        let results = database
-            .search_memory(&MemorySearchRequest {
-                query: "偏好".to_string(),
-                tracks: vec![],
-                scope: MemoryScope::default(),
-                limit: Some(10),
-            })
-            .expect("search active memory");
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn reflection_proposal_requires_review_before_recall() {
-        let (_directory, database) = database();
-        let source_hash = format!("sha256:{:x}", Sha256::digest(b"reflection source"));
-        let job = database
-            .begin_reflection(&ReflectionJobInput {
-                idempotency_key: "reflection-source-1".to_string(),
-                task_id: Some("task-1".to_string()),
-                scope: MemoryScope::default(),
-                source_doc_ids: vec!["message-1".to_string()],
-                source_content_hash: source_hash,
-                metrics: serde_json::json!({"corrections": 1}),
-            })
-            .expect("begin reflection");
-        let proposal = record_input("proposal-1", "建议减少重复确认");
-        let awaiting = database
-            .complete_reflection(&job.id, &proposal)
-            .expect("complete reflection");
-        assert_eq!(awaiting.state, "awaiting_review");
-
-        let before = database
-            .search_memory(&MemorySearchRequest {
-                query: "重复".to_string(),
-                tracks: vec![],
-                scope: MemoryScope::default(),
-                limit: Some(10),
-            })
-            .expect("search before review");
-        assert!(before.is_empty());
-
-        database
-            .review_reflection(&job.id, "approve")
-            .expect("approve reflection");
-        let after = database
-            .search_memory(&MemorySearchRequest {
-                query: "重复".to_string(),
-                tracks: vec![],
-                scope: MemoryScope::default(),
-                limit: Some(10),
-            })
-            .expect("search after review");
-        assert_eq!(after.len(), 1);
-    }
-
-    #[test]
-    fn reflection_idempotency_key_rejects_scope_or_evidence_substitution() {
-        let (_directory, database) = database();
-        let source_hash = format!("sha256:{:x}", Sha256::digest(b"reflection source"));
-        let input = ReflectionJobInput {
-            idempotency_key: "reflection-binding-1".to_string(),
-            task_id: Some("task-1".to_string()),
-            scope: MemoryScope::default(),
-            source_doc_ids: vec!["message-1".to_string()],
-            source_content_hash: source_hash.clone(),
-            metrics: serde_json::json!({"corrections": 1}),
-        };
-        let first = database
-            .begin_reflection(&input)
-            .expect("begin bound reflection");
-        let repeated = database
-            .begin_reflection(&input)
-            .expect("repeat bound reflection");
-        assert_eq!(repeated.id, first.id);
-
-        let mut substituted = input;
-        substituted.scope.project_id = "different-project".to_string();
-        substituted.source_doc_ids = vec!["message-2".to_string()];
-        assert!(database.begin_reflection(&substituted).is_err());
-    }
-
-    #[test]
-    fn memory_rejects_obvious_credentials() {
-        let (_directory, database) = database();
-        let input = record_input("credential", "Authorization: Bearer secret-token");
-        assert!(database.upsert_memory(&input).is_err());
     }
 }

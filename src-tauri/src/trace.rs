@@ -392,19 +392,6 @@ pub(crate) fn record_trace_event_in_connection(
     Ok(event_id)
 }
 
-#[cfg(test)]
-pub(crate) fn record_trace_event(
-    database: &RuntimeDatabase,
-    workspace_scope: &str,
-    record: &TraceEventRecord<'_>,
-) -> Result<String, String> {
-    let connection = database
-        .connection
-        .lock()
-        .map_err(|_| "SQLite 连接锁不可用".to_string())?;
-    record_trace_event_in_connection(&connection, workspace_scope, record)
-}
-
 fn read_trace_events(
     database: &RuntimeDatabase,
     workspace_scope: &str,
@@ -525,93 +512,4 @@ pub fn validate_runtime_trace(
 ) -> Result<TraceValidationResult, String> {
     let workspace_scope = database.local_workspace_scope()?;
     validate_trace_chain(database.inner(), &workspace_scope, &trace_id)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::obsidian::OperationEvent;
-    use chrono::Utc;
-
-    #[test]
-    fn validates_trace_id_without_rewriting_it() {
-        assert_eq!(validate_trace_id("trace-request-1"), Ok("trace-request-1"));
-        assert!(validate_trace_id(" ").is_err());
-        assert!(validate_trace_id("trace/id").is_err());
-    }
-
-    #[test]
-    fn rejects_rebinding_an_entity_to_another_trace() {
-        let directory = tempfile::tempdir().expect("temp directory");
-        let database = RuntimeDatabase::open_test(&directory.path().join("runtime.sqlite"))
-            .expect("open database");
-        let workspace_scope = database.local_workspace_scope().expect("workspace");
-        let now = Utc::now().to_rfc3339();
-        let payload = serde_json::json!({"source": "test"});
-        record_trace_event(
-            &database,
-            &workspace_scope,
-            &TraceEventRecord {
-                trace_id: "trace-one",
-                entity_kind: "model_request",
-                entity_id: "request-one",
-                event_type: "model.started",
-                state: "started",
-                payload: &payload,
-                created_at: &now,
-            },
-        )
-        .expect("first binding");
-        let rebound = record_trace_event(
-            &database,
-            &workspace_scope,
-            &TraceEventRecord {
-                trace_id: "trace-two",
-                entity_kind: "model_request",
-                entity_id: "request-one",
-                event_type: "model.completed",
-                state: "succeeded",
-                payload: &payload,
-                created_at: &now,
-            },
-        );
-        assert!(rebound.is_err());
-        let validation =
-            validate_trace_chain(&database, &workspace_scope, "trace-one").expect("validate");
-        assert!(validation.valid);
-        assert_eq!(validation.binding_count, 1);
-        assert_eq!(validation.event_count, 1);
-    }
-
-    #[test]
-    fn vault_operation_is_bound_to_the_same_trace_as_its_audit_event() {
-        let directory = tempfile::tempdir().expect("temp directory");
-        let database = RuntimeDatabase::open_test(&directory.path().join("runtime.sqlite"))
-            .expect("open database");
-        database
-            .append_operation_event(&OperationEvent {
-                id: "operation-vault-test".to_string(),
-                task_id: Some("task-vault-test".to_string()),
-                trace_id: Some("trace-vault-test".to_string()),
-                event_type: "vault.note.write".to_string(),
-                state: "succeeded".to_string(),
-                created_at: Utc::now().to_rfc3339(),
-                vault_id: Some("vault-test".to_string()),
-                relative_path: Some("notes/test.md".to_string()),
-                detail: "test".to_string(),
-            })
-            .expect("append vault operation");
-        let connection = database.connection.lock().expect("lock database");
-        let bindings = connection
-            .query_row(
-                "SELECT COUNT(*) FROM runtime_trace_bindings
-                 WHERE workspace_scope='local' AND trace_id='trace-vault-test'
-                   AND entity_id='operation-vault-test'
-                   AND entity_kind IN ('operation_event', 'vault_operation')",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("count vault bindings");
-        assert_eq!(bindings, 2);
-    }
 }

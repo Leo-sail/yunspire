@@ -1,0 +1,281 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yunspire.local/schemas/creation-document.schema.json",
+  "title": "CreationDocumentV2",
+  "description": "Versioned creation document. Markdown remains the canonical body; blocks and receipts are derived, auditable indexes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "revision",
+    "title",
+    "canonicalFormat",
+    "contentType",
+    "canonicalMarkdown",
+    "blocks",
+    "assets",
+    "sourceRefs",
+    "layout",
+    "metadata",
+    "publishing",
+    "provenance",
+    "groundingLedger",
+    "validationReceipt",
+    "readiness"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "2.0" },
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+    "canonicalFormat": { "const": "markdown" },
+    "contentType": { "type": "string", "enum": ["article", "wechat", "xiaohongshu", "contract", "paper"] },
+    "canonicalMarkdown": { "type": "string" },
+    "blocks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/block" }
+    },
+    "assets": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/asset" }
+    },
+    "sourceRefs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/sourceRef" }
+    },
+    "layout": { "$ref": "#/$defs/layout" },
+    "metadata": { "$ref": "#/$defs/metadata" },
+    "publishing": { "$ref": "#/$defs/publishing" },
+    "provenance": { "$ref": "#/$defs/provenance" },
+    "groundingLedger": { "$ref": "#/$defs/groundingLedger" },
+    "validationReceipt": { "$ref": "#/$defs/validationReceipt" },
+    "readiness": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "https://yunspire.local/schemas/readiness-report.schema.json" }
+      ]
+    }
+  },
+  "$defs": {
+    "block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "sourceRange"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+        "kind": {
+          "type": "string",
+          "enum": ["heading", "paragraph", "list", "quote", "code", "table", "image", "component", "divider", "html"]
+        },
+        "level": { "type": ["integer", "null"], "minimum": 1, "maximum": 6 },
+        "componentId": { "type": ["string", "null"], "pattern": "^[a-z][a-z0-9-]{0,79}$" },
+        "assetId": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+        "sourceRange": { "$ref": "#/$defs/sourceRange" },
+        "children": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" }
+        },
+        "textHash": { "type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$" },
+        "attributes": {
+          "type": "object",
+          "additionalProperties": { "oneOf": [{ "type": "string" }, { "type": "number" }, { "type": "boolean" }, { "type": "null" }] },
+          "maxProperties": 40
+        }
+      }
+    },
+    "sourceRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "name", "state"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+        "kind": { "type": "string", "enum": ["image", "video", "audio", "file", "cover", "infographic", "gallery", "longImage"] },
+        "name": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "mimeType": { "type": ["string", "null"], "maxLength": 120 },
+        "relativePath": { "type": ["string", "null"], "maxLength": 2048 },
+        "contentHash": { "type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$" },
+        "alt": { "type": ["string", "null"], "maxLength": 500 },
+        "caption": { "type": ["string", "null"], "maxLength": 1000 },
+        "sourceRefId": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+        "state": { "type": "string", "enum": ["draft", "local", "localized", "upload_required", "ready", "failed"] },
+        "width": { "type": ["integer", "null"], "minimum": 1 },
+        "height": { "type": ["integer", "null"], "minimum": 1 }
+      }
+    },
+    "sourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "ref", "trust"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+        "kind": { "type": "string", "enum": ["vaultNote", "knowledgeRecord", "url", "file", "userInput", "generated"] },
+        "ref": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "vaultId": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+        "relativePath": { "type": ["string", "null"], "maxLength": 2048, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+" },
+        "title": { "type": ["string", "null"], "maxLength": 240 },
+        "excerpt": { "type": ["string", "null"], "maxLength": 4000 },
+        "contentHash": { "type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$" },
+        "excerptHash": { "type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$" },
+        "capturedAt": { "type": ["string", "null"], "format": "date-time" },
+        "trust": { "type": "string", "enum": ["direct", "inferred", "generated", "unverified", "conflicted"] }
+      }
+    },
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["themeId", "themeVersion", "target", "typography", "tokens", "features"],
+      "properties": {
+        "themeId": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,79}$" },
+        "themeVersion": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+        "target": { "type": "string", "enum": ["wechatRichText", "markdown", "html", "multiTarget"] },
+        "typography": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fontFamily", "fontSize", "lineHeight"],
+          "properties": {
+            "fontFamily": { "type": "string", "minLength": 1, "maxLength": 240 },
+            "fontSize": { "type": "integer", "minimum": 10, "maximum": 32 },
+            "lineHeight": { "type": "number", "minimum": 1, "maximum": 3 },
+            "headingScale": { "type": "number", "minimum": 0.5, "maximum": 3 }
+          }
+        },
+        "tokens": {
+          "type": "object",
+          "additionalProperties": { "oneOf": [{ "type": "string" }, { "type": "number" }, { "type": "boolean" }] },
+          "maxProperties": 100
+        },
+        "features": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["autoNumbering", "keywordUnderline", "tableOfContents", "introduction", "signature", "cjkSpacing", "externalLinks"],
+          "properties": {
+            "autoNumbering": { "type": "boolean" },
+            "keywordUnderline": { "type": "boolean" },
+            "tableOfContents": { "type": "boolean" },
+            "introduction": { "type": "boolean" },
+            "signature": { "type": "boolean" },
+            "cjkSpacing": { "type": "boolean" },
+            "externalLinks": { "type": "string", "enum": ["preserve", "footnote", "remove"] }
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["language", "tags", "properties", "wikiLinks"],
+      "properties": {
+        "language": { "type": "string", "pattern": "^[a-z]{2,3}(?:-[A-Z]{2})?$" },
+        "tags": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 120 }, "uniqueItems": true },
+        "properties": { "type": "object", "additionalProperties": { "oneOf": [{ "type": "string" }, { "type": "number" }, { "type": "boolean" }, { "type": "null" }] }, "maxProperties": 100 },
+        "wikiLinks": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 500 }, "uniqueItems": true },
+        "brandProfileId": { "type": ["string", "null"], "pattern": "^[a-z][a-z0-9-]{0,79}$" },
+        "author": { "type": ["string", "null"], "maxLength": 120 }
+      }
+    },
+    "publishing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targets", "status", "titleCandidates", "selectedTitle", "coverAssetId", "infographicAssetIds"],
+      "properties": {
+        "targets": { "type": "array", "minItems": 1, "items": { "type": "string", "enum": ["obsidian", "wechat", "html", "markdown", "pdf", "image"] }, "uniqueItems": true },
+        "status": { "type": "string", "enum": ["draft", "preparing", "readyForExport", "exported", "blocked"] },
+        "titleCandidates": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 240 } },
+        "selectedTitle": { "type": ["string", "null"], "maxLength": 240 },
+        "coverAssetId": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+        "infographicAssetIds": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" }, "uniqueItems": true },
+        "lastExportedAt": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["createdBy", "canonicalAuthority", "sourceIds", "derivation"],
+      "properties": {
+        "createdBy": { "type": "string", "enum": ["user", "assistant", "import", "system"] },
+        "canonicalAuthority": { "const": "obsidianMarkdown" },
+        "sourceIds": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" }, "uniqueItems": true },
+        "derivation": { "type": "string", "enum": ["original", "modelCandidate", "imported", "revised"] },
+        "modelRunIds": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 160 }, "uniqueItems": true }
+      }
+    },
+    "groundingLedger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "blocks"],
+      "properties": {
+        "status": { "type": "string", "enum": ["unverified", "verified", "stale", "failed"] },
+        "blocks": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/groundingBlock" }
+        },
+        "verifiedAt": { "type": ["string", "null"], "format": "date-time" },
+        "contentHash": { "type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$" },
+        "generationTraceId": { "type": ["string", "null"], "maxLength": 160 },
+        "verificationTraceId": { "type": ["string", "null"], "maxLength": 160 }
+      }
+    },
+    "groundingBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sourceRefIds", "verdict", "evidence"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+        "sourceRefIds": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+          "uniqueItems": true
+        },
+        "verdict": { "type": "string", "enum": ["supported", "unsupported", "uncertain"] },
+        "evidence": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/groundingEvidence" }
+        }
+      }
+    },
+    "groundingEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceRefId", "quote"],
+      "properties": {
+        "sourceRefId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" },
+        "quote": { "type": "string", "minLength": 1, "maxLength": 2000 }
+      }
+    },
+    "validationReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaValid", "astValid", "htmlValid", "issues", "validatedAt", "validatorVersion"],
+      "properties": {
+        "schemaValid": { "type": "boolean" },
+        "astValid": { "type": "boolean" },
+        "htmlValid": { "type": "boolean" },
+        "issues": { "type": "array", "items": { "$ref": "#/$defs/validationIssue" } },
+        "validatedAt": { "type": "string", "format": "date-time" },
+        "validatorVersion": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "contentHash": { "type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$" }
+      }
+    },
+    "validationIssue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9._-]{0,99}$" },
+        "severity": { "type": "string", "enum": ["info", "warning", "error"] },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "blockId": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$" }
+      }
+    }
+  }
+}

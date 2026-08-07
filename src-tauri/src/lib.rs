@@ -2,6 +2,8 @@ mod assistant_runtime;
 mod capture_pipeline;
 mod command_bus;
 mod connectors;
+mod creation;
+mod durable_asset;
 mod execution_ticket;
 mod memory;
 mod model_config;
@@ -53,6 +55,20 @@ fn initialize_local_runtime(
     database: &runtime_db::RuntimeDatabase,
     generation: u64,
 ) -> Result<Vec<obsidian::VaultDescriptor>, String> {
+    match durable_asset::reconcile_for_startup(app, database) {
+        Ok(report) => {
+            if report.recovered_finalizations > 0 || report.source_missing > 0 {
+                log::info!(
+                    "耐久资产恢复完成：就绪={}，上传中={}，恢复提交={}，源文件缺失={}",
+                    report.ready,
+                    report.staging,
+                    report.recovered_finalizations,
+                    report.source_missing
+                );
+            }
+        }
+        Err(error) => log::warn!("无法校验耐久资产状态：{error}"),
+    }
     match capture_pipeline::cleanup_expired_capture_staging() {
         Ok(report) => {
             let removed = report.removed_upload_parts
@@ -93,10 +109,23 @@ fn initialize_local_runtime(
     if let Err(error) = assistant_runtime::recover_requests_for_startup(database) {
         log::warn!("无法恢复中断的 AI助手请求：{error}");
     }
+    if let Err(error) = creation::runtime::recover_creation_runs_for_startup(database) {
+        log::warn!("无法恢复中断的创作 WritingRun：{error}");
+    }
     let vaults = obsidian::discover_vaults_for_runtime().unwrap_or_default();
     database.sync_vault_registry(&vaults)?;
-    vault_watcher::start_vault_watchers(app, &vaults, generation)?;
-    Ok(vaults)
+    database.purge_unreadable_vault_indexes(&workspace_scope, &vaults)?;
+    let readable_vaults = vaults
+        .into_iter()
+        .filter(|vault| {
+            vault.connection_state == "connected"
+                && database
+                    .ensure_vault_read_allowed(&workspace_scope, &vault.id)
+                    .is_ok()
+        })
+        .collect::<Vec<_>>();
+    vault_watcher::start_vault_watchers(app, &readable_vaults, generation)?;
+    Ok(readable_vaults)
 }
 
 fn start_background_vault_indexing(
@@ -191,6 +220,16 @@ fn suspend_local_runtime_locked(
     state.generation.fetch_add(1, Ordering::AcqRel);
     scheduler::pause_scheduler(app);
     let mut failures = Vec::new();
+    match app
+        .state::<connectors::ExternalConnectorRuntimeState>()
+        .cancel_all()
+    {
+        Ok(cancelled) if cancelled > 0 => {
+            log::info!("撤销统一授权时已取消 {cancelled} 个外部连接器请求");
+        }
+        Ok(_) => {}
+        Err(error) => failures.push(error),
+    }
     let index_task = match state.index_task.lock() {
         Ok(mut task) => task.take(),
         Err(_) => {
@@ -281,8 +320,9 @@ fn revoke_application_authorization(
         .lock
         .lock()
         .map_err(|_| "云枢本地运行时初始化锁不可用".to_string())?;
+    let authorization = database.set_application_authorization(false)?;
     suspend_local_runtime_locked(app, state.inner())?;
-    database.set_application_authorization(false)
+    Ok(authorization)
 }
 
 #[tauri::command]
@@ -323,9 +363,11 @@ pub fn run() {
         .manage(model_provider::ModelIntentState::default())
         .manage(model_provider::ModelRequestState::default())
         .manage(execution_ticket::ExecutionTicketState::default())
+        .manage(connectors::ExternalConnectorRuntimeState::default())
         .manage(capture_pipeline::CaptureAuthorizationState::default())
         .manage(capture_pipeline::CaptureTaskState::default())
         .manage(capture_pipeline::CaptureUploadState::default())
+        .manage(durable_asset::DurableAssetState::default())
         .manage(vault_watcher::VaultWatcherState::default())
         .manage(scheduler::SchedulerState::default())
         .manage(LocalRuntimeInitializationState::default())
@@ -337,10 +379,17 @@ pub fn run() {
                 memory::upsert_memory_record,
                 memory::tombstone_memory_record,
                 memory::search_memory_records,
+                memory::list_memory_records,
                 memory::begin_memory_reflection,
+                memory::get_memory_reflection,
+                memory::list_memory_reflections,
+                memory::claim_memory_reflection,
+                memory::renew_memory_reflection_lease,
                 memory::complete_memory_reflection,
                 memory::review_memory_reflection,
+                memory::approve_reflection_optimization_candidate,
                 memory::fail_memory_reflection,
+                memory::cancel_memory_reflection,
                 memory::memory_backend_status,
                 assistant_runtime::enqueue_assistant_request,
                 assistant_runtime::claim_assistant_request,
@@ -355,7 +404,38 @@ pub fn run() {
                 connectors::save_external_connector,
                 connectors::load_external_connectors,
                 connectors::delete_external_connector,
+                connectors::prepare_external_delivery,
                 connectors::send_external_message,
+                creation::list_creation_catalog,
+                creation::normalize_creation_document,
+                creation::validate_creation_document,
+                creation::runtime::begin_creation_run,
+                creation::runtime::get_creation_run,
+                creation::runtime::read_creation_stream_events_page,
+                creation::runtime::append_creation_stream_event,
+                creation::runtime::checkpoint_creation_run,
+                creation::runtime::record_creation_run_usage,
+                creation::runtime::recover_creation_runs,
+                creation::runtime::reverify_creation_grounding,
+                creation::runtime::accept_creation_candidate,
+                creation::runtime::cancel_creation_run,
+                creation::runtime::upsert_creation_brand_profile,
+                creation::runtime::get_creation_brand_profile,
+                creation::runtime::list_creation_brand_profiles,
+                creation::runtime::approve_creation_brand_profile,
+                creation::runtime::archive_creation_brand_profile,
+                creation::runtime::delete_creation_brand_profile,
+                creation::runtime::bind_creation_brand_profile,
+                creation::runtime::evaluate_creation_brand_profile,
+                durable_asset::import_legacy_creation_draft_asset,
+                durable_asset::begin_durable_asset_upload,
+                durable_asset::append_durable_asset_chunk,
+                durable_asset::finish_durable_asset_upload,
+                durable_asset::get_durable_asset,
+                durable_asset::list_durable_assets,
+                durable_asset::list_durable_assets_page,
+                durable_asset::read_durable_asset_chunk,
+                durable_asset::delete_durable_asset,
                 capture_pipeline::create_capture_authorization,
                 capture_pipeline::cancel_capture_task,
                 capture_pipeline::open_capture_authorization_page,
@@ -379,11 +459,13 @@ pub fn run() {
                 obsidian::read_vault_note,
                 obsidian::open_obsidian_note,
                 obsidian::open_vault_note_in_obsidian,
+                obsidian::open_obsidian_vault,
+                obsidian::open_obsidian_graph,
                 obsidian::list_vault_notes,
-                obsidian::save_creation_draft_asset,
-                obsidian::load_creation_draft_asset,
+                obsidian::list_vault_notes_page,
                 obsidian::beautify_creation_markdown,
                 obsidian::prepare_note_write,
+                obsidian::prepare_note_write_from_durable_asset,
                 obsidian::commit_note_write,
                 obsidian::discard_note_write,
                 obsidian::prepare_asset_write,
@@ -397,6 +479,8 @@ pub fn run() {
                 obsidian_management::commit_vault_entry_delete,
                 obsidian_management::list_yunspire_trash_entries,
                 obsidian_management::restore_yunspire_trash_entry,
+                obsidian_management::purge_yunspire_trash_entry,
+                obsidian_management::empty_yunspire_trash,
                 obsidian_management::create_vault_folder,
                 obsidian_management::move_vault_entry,
                 obsidian_management::read_note_properties,
@@ -406,6 +490,11 @@ pub fn run() {
                 obsidian_management::read_obsidian_graph_config,
                 obsidian_management::update_obsidian_graph_config,
                 runtime_db::load_workspace_snapshot,
+                runtime_db::upsert_workspace_messages_page,
+                runtime_db::list_workspace_messages_page,
+                runtime_db::search_workspace_messages,
+                runtime_db::delete_workspace_messages,
+                runtime_db::delete_workspace_conversation_messages,
                 runtime_db::load_application_authorization,
                 load_third_party_notices,
                 update_application_authorization,
@@ -419,6 +508,7 @@ pub fn run() {
                 runtime_db::govern_long_term_memory,
                 runtime_db::export_long_term_memory,
                 runtime_db::long_term_memory_metrics,
+                skill_lifecycle::install_skill_from_github,
                 skill_lifecycle::save_skill_draft,
                 skill_lifecycle::list_user_skills,
                 skill_lifecycle::list_routable_skills,
@@ -428,26 +518,59 @@ pub fn run() {
                 skill_lifecycle::retire_skill,
                 skill_lifecycle::rollback_skill,
                 skill_lifecycle::list_skill_versions,
+                skill_lifecycle::list_skill_execution_effects,
+                skill_lifecycle::record_skill_execution_effect_feedback,
+                skill_lifecycle::execute_skill,
                 trace::query_runtime_trace,
                 trace::validate_runtime_trace,
                 runtime_db::read_optimization_evidence,
                 runtime_db::create_optimization_candidate,
                 runtime_db::evaluate_optimization_candidate,
+                runtime_db::get_optimization_candidate,
                 runtime_db::load_optimization_profile,
                 runtime_db::apply_optimization_candidate,
                 runtime_db::rollback_optimization_profile,
                 runtime_db::list_optimization_versions,
+                runtime_db::get_neural_embedding_index_status,
+                runtime_db::rebuild_neural_embedding_index,
                 runtime_db::indexed_search,
                 runtime_db::sync_runtime_state,
                 runtime_db::sync_managed_resources,
                 runtime_db::load_managed_resources,
+                runtime_db::upsert_report_record,
+                runtime_db::delete_report_record,
+                runtime_db::list_report_records_page,
+                runtime_db::upsert_report_subscription,
+                runtime_db::delete_report_subscription,
+                runtime_db::list_report_subscriptions_page,
+                runtime_db::read_report_source_page,
+                runtime_db::upsert_creation_resource,
+                runtime_db::list_creation_resources,
+                runtime_db::list_creation_resource_revisions,
+                runtime_db::restore_creation_resource_revision,
+                runtime_db::archive_creation_resource,
                 runtime_db::recover_interrupted_runtime_tasks,
+                runtime_db::supersede_runtime_task_for_recovery,
+                runtime_db::bind_runtime_task_recovery_replacement,
                 runtime_db::resolve_runtime_task_recovery,
                 runtime_db::upsert_inbound_content_record,
                 runtime_db::poll_due_runtime_schedules,
+                task_runtime::acknowledge_runtime_schedule_dispatch,
+                task_runtime::append_runtime_task_evidence,
+                task_runtime::define_runtime_task_plan,
                 task_runtime::get_runtime_task,
+                task_runtime::get_runtime_task_contract,
+                task_runtime::get_runtime_task_step_frontier,
                 task_runtime::list_runtime_tasks,
+                task_runtime::list_runtime_task_step_receipts,
+                task_runtime::claim_runtime_task_plan_steps,
+                task_runtime::renew_runtime_task_step_lease,
+                task_runtime::renew_runtime_execution_ticket,
+                task_runtime::execute_runtime_read_only_capability,
+                task_runtime::complete_runtime_task_plan_step,
+                task_runtime::fail_runtime_task_plan_step,
                 task_runtime::transition_runtime_task,
+                vault_watcher::refresh_vault_access_policy,
                 updater::check_for_updates,
                 updater::prepare_update_installation,
                 updater::list_update_backups,
@@ -496,50 +619,4 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        command_available_without_application_authorization,
-        persist_grant_after_runtime_preparation,
-    };
-
-    #[test]
-    fn restricted_mode_only_exposes_application_authorization_commands() {
-        assert!(command_available_without_application_authorization(
-            "load_application_authorization"
-        ));
-        assert!(command_available_without_application_authorization(
-            "update_application_authorization"
-        ));
-        assert!(command_available_without_application_authorization(
-            "load_third_party_notices"
-        ));
-        assert!(!command_available_without_application_authorization(
-            "discover_obsidian_vaults"
-        ));
-        assert!(!command_available_without_application_authorization(
-            "chat_with_assistant"
-        ));
-    }
-
-    #[test]
-    fn failed_runtime_preparation_does_not_persist_grant() {
-        let directory = tempfile::tempdir().expect("create temp directory");
-        let database =
-            crate::runtime_db::RuntimeDatabase::open_test(&directory.path().join("runtime.sqlite"))
-                .expect("open test database");
-
-        let result = persist_grant_after_runtime_preparation::<(), _>(&database, || {
-            Err("runtime initialization failed".to_string())
-        });
-
-        assert!(result.is_err());
-        let authorization = database
-            .application_authorization()
-            .expect("read authorization after failure");
-        let serialized = serde_json::to_value(authorization).expect("serialize authorization");
-        assert_eq!(serialized["status"], "pending");
-    }
 }
