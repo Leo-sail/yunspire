@@ -71,8 +71,7 @@ function Test-ReleaseInstallerConfiguration {
   if ($windows.allowDowngrades -ne $false) {
     throw 'Release installer must block downgrades'
   }
-  if ($windows.webviewInstallMode.type -ne 'offlineInstaller'
-      -or $windows.webviewInstallMode.silent -ne $true) {
+  if ($windows.webviewInstallMode.type -ne 'offlineInstaller' -or $windows.webviewInstallMode.silent -ne $true) {
     throw 'The complete WebView2 offline installer must be embedded and run silently'
   }
   $signCommandProperty = $windows.PSObject.Properties['signCommand']
@@ -86,9 +85,7 @@ function Test-ReleaseInstallerConfiguration {
     throw 'NSIS language selector must be disabled'
   }
   $languages = @($nsis.languages)
-  if ($languages.Count -ne 2
-      -or $languages[0] -ne 'SimpChinese'
-      -or $languages[1] -ne 'English') {
+  if ($languages.Count -ne 2 -or $languages[0] -ne 'SimpChinese' -or $languages[1] -ne 'English') {
     throw 'NSIS languages must be exactly SimpChinese then English, with no selector'
   }
   foreach ($propertyName in @('template', 'installerHooks', 'startMenuFolder')) {
