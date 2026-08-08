@@ -95,6 +95,7 @@ const requiredFiles = [
   'scripts/sign-windows.ps1',
   'scripts/verify-release-artifact.mjs',
   'scripts/verify-release-version.mjs',
+  'scripts/verify-release-version-contract.mjs',
   'scripts/verify-macos-helpers.mjs',
   'src-tauri/tauri.macos.conf.json',
   'src-tauri/tauri.release.conf.json',
@@ -219,6 +220,7 @@ if (await exists('.github/workflows/release.yml')) {
   const releaseWorkflow = await readFile(path.join(root, '.github/workflows/release.yml'), 'utf8');
   const requiredReleaseGates = [
     ['release/v* branch trigger', /release\/v\*/u],
+    ['prepare draft visibility permission', /prepare:[\s\S]*?permissions:\s*\n\s+contents:\s+write/u],
     ['source identity gate', /verify-release-version\.mjs\s+source/u],
     ['clean committed source requirement', /--require-clean\s+true/u],
     ['manifest convergence gate', /verify-release-version\.mjs\s+manifests/u],
@@ -227,13 +229,16 @@ if (await exists('.github/workflows/release.yml')) {
     ['prepublish run provenance binding', /--run-provenance\s+"\$RUN_PROVENANCE"/u],
     [
       'final draft revalidation immediately before publication',
-      /Publish the verified Release as Latest[\s\S]*verify-release-version\.mjs\s+prepublish[\s\S]*gh release edit/u,
+      /Publish the verified Release as Latest[\s\S]*verify-release-version\.mjs\s+prepublish[\s\S]*--method PATCH[\s\S]*releases\/\$RELEASE_ID/u,
     ],
+    ['numeric Release identity lock', /release_id:\s*\$\{\{\s*steps\.verify_draft\.outputs\.release_id\s*\}\}/u],
+    ['published immutable Release verification', /\.immutable\s*==\s*true/u],
+    ['shared provenance-safe cleanup command', /verify-release-version\.mjs\s+"\$\{cleanup_arguments\[@\]\}"/u],
     ['attempt-scoped build artifacts', /attempt-\$\{\{\s*github\.run_attempt\s*\}\}/u],
     ['run-provenance cleanup ownership', /RUN_PROVENANCE:\s*yunspire-release-run:/u],
     ['annotated-tag cleanup ownership', /tag_message[\s\S]*RUN_PROVENANCE/u],
     ['existing-tag verification', /--verify-tag/u],
-    ['explicit latest release selection', /--latest(?:\s|$)/mu],
+    ['explicit latest release selection', /make_latest:\s*"true"/u],
   ];
   for (const [label, pattern] of requiredReleaseGates) {
     if (!pattern.test(releaseWorkflow)) failures.push(`release workflow is missing ${label}`);
@@ -244,11 +249,15 @@ if (await exists('.github/workflows/release.yml')) {
   if (/gh release delete[^\n]*--cleanup-tag/u.test(releaseWorkflow)) {
     failures.push('release cleanup must verify and delete its owned annotated tag separately');
   }
+  if (/gh release (?:upload|edit|delete)\b/u.test(releaseWorkflow)) {
+    failures.push('draft assets, publication, and cleanup must stay locked to the verified numeric Release ID');
+  }
   if (/workflow_dispatch\s*:/u.test(releaseWorkflow)) {
     failures.push('release workflow must only publish from the version-bound release/v* branch trigger');
   }
   const noSignCount = releaseWorkflow.match(/--no-sign/gu)?.length || 0;
   const unsignedManifestCount = releaseWorkflow.match(/--signed\s+false/gu)?.length || 0;
+  const prepublishGateCount = releaseWorkflow.match(/verify-release-version\.mjs\s+prepublish/gu)?.length || 0;
   const prepublishProvenanceCount = releaseWorkflow.match(/--run-provenance\s+"\$RUN_PROVENANCE"/gu)?.length || 0;
   if (noSignCount !== 2 || unsignedManifestCount !== 2) {
     failures.push(`release workflow must build exactly two explicitly unsigned installers; no-sign=${noSignCount} manifests=${unsignedManifestCount}`);
@@ -256,8 +265,8 @@ if (await exists('.github/workflows/release.yml')) {
   if (/--require-signed\s+true/u.test(releaseWorkflow)) {
     failures.push('unsigned release workflow must not require signed artifacts');
   }
-  if (prepublishProvenanceCount !== 2) {
-    failures.push(`release workflow must bind both prepublish gates to this run provenance; found=${prepublishProvenanceCount}`);
+  if (prepublishGateCount !== 2 || prepublishProvenanceCount < 2) {
+    failures.push(`release workflow must bind both prepublish gates to this run provenance; gates=${prepublishGateCount} provenance=${prepublishProvenanceCount}`);
   }
 }
 
@@ -272,8 +281,20 @@ if (await exists('scripts/verify-release-version.mjs')) {
     failures.push('prepublish verification must require the built commit to remain the remote main HEAD');
   }
   if (!/remoteAnnotatedTag\(repository, identity\.tag\)/u.test(prepublishVerifier)
-      || !/release\.body[\s\S]*provenance/u.test(prepublishVerifier)) {
+      || !/requireOwnedDraftRelease\(release/u.test(prepublishVerifier)
+      || !/function requireOwnedDraftRelease[\s\S]*release\.body[\s\S]*provenance/u.test(releaseVerifier)) {
     failures.push('prepublish verification must bind the annotated tag and draft Release body to this workflow run');
+  }
+  if (/\/releases\/tags\//u.test(releaseVerifier)) {
+    failures.push('draft Release discovery must use the authenticated paginated Release list, not the published-only tag endpoint');
+  }
+  if (!/remoteReleasesByTag\(repository, identity\.tag\)/u.test(prepublishVerifier)
+      || !/cleanupIncompleteRelease/u.test(releaseVerifier)
+      || !/preserved-draft/u.test(releaseVerifier)) {
+    failures.push('release verification and failure recovery must share draft-aware lookup and numeric-ID inspection');
+  }
+  if (/method:\s*'DELETE'/u.test(releaseVerifier)) {
+    failures.push('automatic failure recovery must not delete a Release or annotated tag after client-side inspection');
   }
   const stableReleaseGuards = releaseVerifier.match(/stable release workflow does not accept prerelease version/gu)?.length || 0;
   if (stableReleaseGuards < 2) {
@@ -423,6 +444,9 @@ try {
 
 const packageJson = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
 const packageVersion = packageJson.version;
+if (!String(packageJson.scripts?.verify || '').includes('verify:release-version-contract')) {
+  failures.push('complete verification must run the draft Release lookup contract');
+}
 try {
   await readReleaseVersion(root);
 } catch (error) {

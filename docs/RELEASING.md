@@ -49,7 +49,7 @@ node scripts/verify-release-version.mjs prepare \
   --source-commit "$SOURCE_COMMIT"
 ```
 
-该门禁要求分支后缀等于 `v${package.version}`、检出 SHA 等于指定 SHA 且等于远端 `main` HEAD，并要求同名 tag 与 Release 均不存在。通过后，工作流才创建精确指向 `SOURCE_COMMIT` 的标签和未公开 draft Release。创建 Release 时仍使用 `--verify-tag`，禁止 GitHub 隐式选择其他提交。
+该门禁要求分支后缀等于 `v${package.version}`、检出 SHA 等于指定 SHA 且等于远端 `main` HEAD，并要求同名 tag 与 Release 均不存在。Release 缺失检查必须使用具备 `contents: write` 的工作流令牌分页枚举调用者可见的全部 Release，再按 `tag_name` 精确匹配；该权限用于读取 draft 可见性，门禁步骤本身不执行写操作。不能使用只返回已公开版本的 `/releases/tags/{tag}` 接口判断 draft 是否存在。通过后，工作流才创建精确指向 `SOURCE_COMMIT` 的标签和未公开 draft Release。创建 Release 时仍使用 `--verify-tag`，禁止 GitHub 隐式选择其他提交。
 
 该工作流只发布稳定版本并设置为 Latest；包含预发布后缀（例如 `-beta.1`）的版本会在 prepare 和 prepublish 阶段被拒绝，不能误标为稳定版。
 
@@ -103,9 +103,9 @@ node scripts/verify-release-version.mjs prepublish \
   --run-provenance "$RUN_PROVENANCE"
 ```
 
-该门禁要求远端 `main` 仍严格指向本次构建 commit，远端标签必须是直接指向该 commit 且携带本次 run provenance 的 annotated tag，并要求同名 GitHub Release 仍是目标为该 commit、正文携带同一 provenance 的未公开稳定草稿。上传完成后必须在公开 Release 的命令紧前再次运行该门禁。工作流不得使用 `--clobber`，也不得“更新”一个已经公开的版本。
+该门禁要求远端 `main` 仍严格指向本次构建 commit，远端标签必须是直接指向该 commit 且携带本次 run provenance 的 annotated tag，并要求同名 GitHub Release 恰好只有一个，且仍是目标为该 commit、正文携带同一 provenance 的未公开稳定草稿。第一次通过后必须锁定其数值 Release ID；资产上传、公开为 Latest、最终核验和失败清理都只能操作这个 ID。上传完成后必须在公开 Release 的命令紧前再次运行该门禁并核对 ID 未变化。工作流不得使用 `--clobber`，也不得“更新”一个已经公开的版本。
 
-仓库设置应在首次正式发布前启用 GitHub **Immutable Releases**，并保护 `v*` 标签不被更新或删除。发布命令必须使用 `--verify-tag`，稳定版本必须显式使用 `--latest`。先完成所有本地校验，再一次性创建公开 Release；若发布失败，只能清理同时携带本次 run provenance、目标 commit 和 annotated tag provenance 的未公开草稿与标签，不能使用连带删标签的模糊清理，也不能覆盖历史正式版。
+仓库设置必须在正式发布前由管理员启用 GitHub **Immutable Releases**；Actions 自带令牌没有读取该管理设置的权限，因此触发发布前必须人工确认，发布后再以 Release 对象的 `immutable: true` 作为结果门禁。创建草稿时必须使用 `--verify-tag`，稳定版本必须通过 Release API 显式设置 `make_latest: "true"`。若发布失败，自动恢复只分页定位并按数值 ID 核验本次 run 的未公开草稿与 annotated tag，二者都保留并报警，待人工复核后处理；客户端检查后绝不自动执行删除。
 
 用户选择某个版本时，应进入 `/releases/tag/vX.Y.Z` 并下载文件名中带有同一版本号的资产。只有“获取当前稳定版”的入口可以使用 `/releases/latest`。旧版本 Release 保持独立，不重定向到其他版本资产。
 
@@ -170,7 +170,7 @@ node scripts/verify-release-version.mjs prepare \
   --source-commit "$SOURCE_COMMIT"
 ```
 
-This gate requires the branch suffix to equal `v${package.version}`, the checked-out SHA to equal both the supplied SHA and the remote `main` HEAD, and the matching tag and Release to be absent. Only then does the workflow create an exact tag at `SOURCE_COMMIT` and an unpublished draft Release. Release creation still uses `--verify-tag`, preventing GitHub from selecting another commit implicitly.
+This gate requires the branch suffix to equal `v${package.version}`, the checked-out SHA to equal both the supplied SHA and the remote `main` HEAD, and the matching tag and Release to be absent. Release absence must be checked with a workflow token granted `contents: write`, paginating every Release visible to the authenticated caller and filtering exact `tag_name` matches; that permission is needed for draft visibility while the gate itself remains read-only. The published-only `/releases/tags/{tag}` endpoint cannot prove that a draft is absent. Only then does the workflow create an exact tag at `SOURCE_COMMIT` and an unpublished draft Release. Release creation still uses `--verify-tag`, preventing GitHub from selecting another commit implicitly.
 
 This workflow publishes stable versions only and marks them Latest. A version with a prerelease suffix such as `-beta.1` is rejected by both prepare and prepublish gates instead of being mislabeled as stable.
 
@@ -224,9 +224,9 @@ node scripts/verify-release-version.mjs prepublish \
   --run-provenance "$RUN_PROVENANCE"
 ```
 
-This gate requires remote `main` to still point exactly to the built commit, requires the remote tag to be an annotated tag pointing directly to that commit and carrying this run's provenance, and requires the GitHub Release to remain an unpublished stable draft targeting the commit with the same provenance in its body. Run the gate again immediately before making the uploaded Release public. The workflow never uses `--clobber` and never updates an already published version.
+This gate requires remote `main` to still point exactly to the built commit, requires the remote tag to be an annotated tag pointing directly to that commit and carrying this run's provenance, and requires exactly one matching GitHub Release to remain an unpublished stable draft targeting the commit with the same provenance in its body. The first successful gate locks the numeric Release ID; asset upload, publication as Latest, final verification, and failure cleanup may operate only on that ID. Run the gate again immediately before publication and require the ID to remain unchanged. The workflow never uses `--clobber` and never updates an already published version.
 
-Enable GitHub **Immutable Releases** before the first production publication and protect `v*` tags from update or deletion. Release creation uses `--verify-tag`; a stable release explicitly uses `--latest`. Complete all local checks before creating the public Release. If publication fails, cleanup may remove only an unpublished draft and annotated tag whose run provenance and target commit both match this exact workflow attempt; it must not use an ambiguous cascading tag deletion or replace a historical stable release.
+An administrator must enable GitHub **Immutable Releases** before production publication. The built-in Actions token cannot read that administration setting, so it is confirmed manually before the trigger and enforced after publication by requiring the Release object to report `immutable: true`. Draft creation uses `--verify-tag`, and stable publication sends `make_latest: "true"` through the Release API. If publication fails, automation only paginates and validates this run's draft by numeric ID together with its annotated tag; both are preserved and reported for manual review, with no automatic deletion after client-side checks.
 
 When a user selects a version, direct them to `/releases/tag/vX.Y.Z` and an asset whose filename contains that same version. Only a generic current-stable download entry may use `/releases/latest`. Historical Releases remain independent and never redirect to another version's assets.
 

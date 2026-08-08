@@ -36,6 +36,18 @@ function normalizedCommit(value, label) {
   return commit;
 }
 
+function normalizedReleaseId(value, label = 'GitHub Release ID') {
+  const text = typeof value === 'number' ? String(value) : String(value || '').trim();
+  if (!/^[1-9][0-9]*$/u.test(text)) {
+    throw new Error(`${label} is not a positive integer: ${value || 'missing'}`);
+  }
+  const releaseId = Number(text);
+  if (!Number.isSafeInteger(releaseId) || releaseId <= 0) {
+    throw new Error(`${label} is not a positive integer: ${value || 'missing'}`);
+  }
+  return releaseId;
+}
+
 async function tauriVersion(root, configuredVersion) {
   if (releaseVersionPattern.test(configuredVersion || '')) return configuredVersion;
   if (!configuredVersion || typeof configuredVersion !== 'string') return configuredVersion;
@@ -211,7 +223,9 @@ function githubHeaders() {
 
 async function githubRequest(repository, endpoint, { allowNotFound = false } = {}) {
   const apiRoot = (process.env.GITHUB_API_URL || 'https://api.github.com').replace(/\/$/u, '');
-  const response = await fetch(`${apiRoot}/repos/${repository}${endpoint}`, { headers: githubHeaders() });
+  const response = await fetch(`${apiRoot}/repos/${repository}${endpoint}`, {
+    headers: githubHeaders(),
+  });
   if (allowNotFound && response.status === 404) return { response, body: null };
   const body = await response.json().catch(() => null);
   if (!response.ok) {
@@ -220,13 +234,50 @@ async function githubRequest(repository, endpoint, { allowNotFound = false } = {
   return { response, body };
 }
 
-async function remoteAnnotatedTag(repository, tag) {
-  const { body: reference } = await githubRequest(repository, `/git/ref/tags/${encodeURIComponent(tag)}`);
+export async function remoteReleasesByTag(repository, tag) {
+  const matchingReleases = new Map();
+  for (let page = 1; page <= 1_000; page += 1) {
+    const endpoint = `/releases?per_page=100&page=${page}`;
+    const { body } = await githubRequest(repository, endpoint);
+    if (!Array.isArray(body)) throw new Error(`GitHub API ${endpoint} did not return a Release array`);
+    for (const release of body) {
+      if (release?.tag_name !== tag) continue;
+      const releaseId = normalizedReleaseId(release.id, `GitHub Release ${tag} ID`);
+      matchingReleases.set(releaseId, release);
+    }
+    if (body.length < 100) return [...matchingReleases.values()];
+  }
+  throw new Error(`GitHub Release pagination exceeded the safety limit while searching for ${tag}`);
+}
+
+async function remoteReleaseById(repository, releaseId, { allowNotFound = false } = {}) {
+  const normalizedId = normalizedReleaseId(releaseId);
+  const { response, body } = await githubRequest(repository, `/releases/${normalizedId}`, { allowNotFound });
+  if (allowNotFound && response.status === 404) return null;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw new Error(`GitHub Release ${normalizedId} response is not an object`);
+  }
+  if (normalizedReleaseId(body.id, `GitHub Release ${normalizedId} response ID`) !== normalizedId) {
+    throw new Error(`GitHub Release ${normalizedId} response returned a different ID`);
+  }
+  return body;
+}
+
+async function remoteAnnotatedTag(repository, tag, { allowNotFound = false } = {}) {
+  const { response, body: reference } = await githubRequest(
+    repository,
+    `/git/ref/tags/${encodeURIComponent(tag)}`,
+    { allowNotFound },
+  );
+  if (allowNotFound && response.status === 404) return null;
   if (reference?.object?.type !== 'tag') {
     throw new Error(`remote tag ${tag} must be the annotated tag created by this workflow`);
   }
   const tagObjectSha = normalizedCommit(reference.object.sha, `remote tag object ${tag}`);
   const { body: tagObject } = await githubRequest(repository, `/git/tags/${tagObjectSha}`);
+  if (tagObject?.tag !== tag) {
+    throw new Error(`remote annotated tag object ${tagObjectSha} claims ${tagObject?.tag || 'no tag'}, not ${tag}`);
+  }
   if (tagObject?.object?.type !== 'commit') {
     throw new Error(`remote annotated tag ${tag} does not point directly to a commit`);
   }
@@ -243,15 +294,43 @@ async function remoteBranchCommit(repository, branch) {
   return normalizedCommit(reference.object.sha, `remote branch ${branch} commit`);
 }
 
+function requireReleaseRepository(repository) {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository || '')) {
+    throw new Error(`invalid GitHub repository: ${repository || 'missing'}`);
+  }
+}
+
+function requireOwnedDraftRelease(release, { tag, sourceCommit, provenance }) {
+  const releaseId = normalizedReleaseId(release?.id, `GitHub Release ${tag} ID`);
+  if (release.tag_name !== tag || release.draft !== true || release.prerelease !== false) {
+    throw new Error(`GitHub Release ${tag} must be the unpublished stable draft created by this workflow`);
+  }
+  if (release.target_commitish !== sourceCommit) {
+    throw new Error(`GitHub Release ${tag} targets ${release.target_commitish || 'missing'}, not ${sourceCommit}`);
+  }
+  if (!String(release.body || '').split(/\r?\n/u)
+    .some((line) => line.trim() === `<!-- ${provenance} -->`)) {
+    throw new Error(`GitHub Release ${tag} does not carry this workflow run provenance`);
+  }
+  return releaseId;
+}
+
+function requireOwnedAnnotatedTag(remoteTag, { tag, sourceCommit, provenance }) {
+  if (remoteTag.commit !== sourceCommit) {
+    throw new Error(`remote tag ${tag} points to ${remoteTag.commit}, not ${sourceCommit}`);
+  }
+  if (!remoteTag.message.split(/\r?\n/u).some((line) => line.trim() === provenance)) {
+    throw new Error(`remote annotated tag ${tag} does not carry this workflow run provenance`);
+  }
+}
+
 export async function verifyPrepare({
   repository,
   releaseBranch,
   expectedCommit,
   root = repositoryRoot,
 } = {}) {
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository || '')) {
-    throw new Error(`invalid GitHub repository: ${repository || 'missing'}`);
-  }
+  requireReleaseRepository(repository);
   const identity = await validateSourceIdentity({ root, expectedCommit, requireClean: true });
   if (identity.version.includes('-')) {
     throw new Error(`stable release workflow does not accept prerelease version ${identity.version}`);
@@ -274,12 +353,8 @@ export async function verifyPrepare({
   if (tagResponse.status !== 404) {
     throw new Error(`remote tag ${identity.tag} already exists; refusing to move or reuse it`);
   }
-  const { response: releaseResponse } = await githubRequest(
-    repository,
-    `/releases/tags/${encodeURIComponent(identity.tag)}`,
-    { allowNotFound: true },
-  );
-  if (releaseResponse.status !== 404) {
+  const matchingReleases = await remoteReleasesByTag(repository, identity.tag);
+  if (matchingReleases.length !== 0) {
     throw new Error(`GitHub Release ${identity.tag} already exists; refusing to overwrite or replace its assets`);
   }
   return { ...identity, releaseBranch: branch, mainCommit };
@@ -290,11 +365,10 @@ export async function verifyPrepublish({
   tag,
   expectedCommit,
   expectedProvenance,
+  expectedReleaseId = null,
   root = repositoryRoot,
 } = {}) {
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository || '')) {
-    throw new Error(`invalid GitHub repository: ${repository || 'missing'}`);
-  }
+  requireReleaseRepository(repository);
   const identity = await validateSourceIdentity({ root, expectedCommit, requireClean: true });
   if (identity.version.includes('-')) {
     throw new Error(`stable release workflow does not accept prerelease version ${identity.version}`);
@@ -310,23 +384,117 @@ export async function verifyPrepublish({
     throw new Error(`release source ${identity.sourceCommit} is not the remote main HEAD ${mainCommit}`);
   }
   const remoteTag = await remoteAnnotatedTag(repository, identity.tag);
-  if (remoteTag.commit !== identity.sourceCommit) {
-    throw new Error(`remote tag ${identity.tag} points to ${remoteTag.commit}, not ${identity.sourceCommit}`);
+  requireOwnedAnnotatedTag(remoteTag, {
+    tag: identity.tag,
+    sourceCommit: identity.sourceCommit,
+    provenance,
+  });
+  const matchingReleases = await remoteReleasesByTag(repository, identity.tag);
+  if (matchingReleases.length !== 1) {
+    throw new Error(`GitHub Release ${identity.tag} must resolve to exactly one draft; found ${matchingReleases.length}`);
   }
-  if (!remoteTag.message.split(/\r?\n/u).some((line) => line.trim() === provenance)) {
-    throw new Error(`remote annotated tag ${identity.tag} does not carry this workflow run provenance`);
+  const [release] = matchingReleases;
+  const releaseId = requireOwnedDraftRelease(release, {
+    tag: identity.tag,
+    sourceCommit: identity.sourceCommit,
+    provenance,
+  });
+  if (expectedReleaseId !== null && expectedReleaseId !== undefined
+      && releaseId !== normalizedReleaseId(expectedReleaseId, `expected GitHub Release ${identity.tag} ID`)) {
+    throw new Error(`GitHub Release ${identity.tag} ID ${releaseId} does not match the locked Release ID ${expectedReleaseId}`);
   }
-  const { body: release } = await githubRequest(repository, `/releases/tags/${encodeURIComponent(identity.tag)}`);
-  if (release.tag_name !== identity.tag || release.draft !== true || release.prerelease === true) {
-    throw new Error(`GitHub Release ${identity.tag} must be the unpublished stable draft created by this workflow`);
+  return { ...identity, releaseId, mainCommit, provenance, tagObjectSha: remoteTag.tagObjectSha };
+}
+
+export async function cleanupIncompleteRelease({
+  repository,
+  tag,
+  expectedCommit,
+  expectedProvenance,
+  expectedReleaseId = null,
+} = {}) {
+  requireReleaseRepository(repository);
+  const sourceCommit = normalizedCommit(expectedCommit, 'cleanup source commit');
+  const version = String(tag || '').startsWith('v') ? String(tag).slice(1) : '';
+  if (!releaseVersionPattern.test(version) || tag !== releaseTag(version)) {
+    throw new Error(`invalid cleanup Release tag: ${tag || 'missing'}`);
   }
-  if (release.target_commitish !== identity.sourceCommit) {
-    throw new Error(`GitHub Release ${identity.tag} targets ${release.target_commitish}, not ${identity.sourceCommit}`);
+  const provenance = String(expectedProvenance || '').trim();
+  const provenancePattern = new RegExp(`^yunspire-release-run:[0-9]+:[0-9]+:${sourceCommit}$`, 'u');
+  if (!provenancePattern.test(provenance)) {
+    throw new Error('cleanup requires the exact workflow run provenance for this source commit');
   }
-  if (!String(release.body || '').includes(`<!-- ${provenance} -->`)) {
-    throw new Error(`GitHub Release ${identity.tag} does not carry this workflow run provenance`);
+  const lockedReleaseId = expectedReleaseId === null || expectedReleaseId === undefined || expectedReleaseId === ''
+    ? null
+    : normalizedReleaseId(expectedReleaseId, `locked GitHub Release ${tag} ID`);
+
+  const matchingReleases = await remoteReleasesByTag(repository, tag);
+  if (matchingReleases.length > 1) {
+    throw new Error(`cleanup found ${matchingReleases.length} GitHub Releases for ${tag}; refusing ambiguous deletion`);
   }
-  return { ...identity, releaseId: release.id, mainCommit, provenance, tagObjectSha: remoteTag.tagObjectSha };
+  let release = matchingReleases[0] || null;
+  if (lockedReleaseId !== null) {
+    const lockedRelease = await remoteReleaseById(repository, lockedReleaseId, { allowNotFound: true });
+    if (lockedRelease && lockedRelease.tag_name !== tag) {
+      throw new Error(`locked GitHub Release ${lockedReleaseId} now belongs to ${lockedRelease.tag_name || 'no tag'}, not ${tag}`);
+    }
+    if (release && (!lockedRelease || normalizedReleaseId(release.id) !== lockedReleaseId)) {
+      throw new Error(`GitHub Release ${tag} no longer matches locked Release ID ${lockedReleaseId}`);
+    }
+    release = lockedRelease || release;
+  }
+
+  if (release?.draft === false) {
+    return {
+      action: 'preserved-published',
+      releaseId: normalizedReleaseId(release.id),
+      tag,
+      deletedTag: false,
+      tagPreserved: true,
+    };
+  }
+
+  let remoteTag = await remoteAnnotatedTag(repository, tag, { allowNotFound: true });
+  if (remoteTag) requireOwnedAnnotatedTag(remoteTag, { tag, sourceCommit, provenance });
+
+  if (release) {
+    const releaseId = requireOwnedDraftRelease(release, { tag, sourceCommit, provenance });
+    if (lockedReleaseId !== null && releaseId !== lockedReleaseId) {
+      throw new Error(`GitHub Release ${tag} ID ${releaseId} does not match locked Release ID ${lockedReleaseId}`);
+    }
+
+    const currentRelease = await remoteReleaseById(repository, releaseId, { allowNotFound: true });
+    if (!currentRelease) {
+      return {
+        action: remoteTag ? 'release-disappeared-tag-preserved' : 'release-disappeared',
+        releaseId,
+        tag,
+        deletedTag: false,
+        tagPreserved: remoteTag !== null,
+      };
+    }
+    if (currentRelease.draft === false) {
+      return { action: 'preserved-published', releaseId, tag, deletedTag: false, tagPreserved: true };
+    }
+    requireOwnedDraftRelease(currentRelease, { tag, sourceCommit, provenance });
+    return {
+      action: remoteTag ? 'preserved-draft-and-tag' : 'preserved-draft',
+      releaseId,
+      tag,
+      deletedTag: false,
+      tagPreserved: remoteTag !== null,
+    };
+  }
+
+  const tagPreserved = remoteTag !== null;
+
+  return {
+    action: tagPreserved ? 'preserved-tag' : 'nothing-to-do',
+    releaseId: null,
+    tag,
+    deletedTag: false,
+    tagPreserved,
+  };
 }
 
 function manifestSourceCommit(manifest) {
@@ -468,8 +636,29 @@ async function main() {
       tag: options.get('tag'),
       expectedCommit: options.get('source-commit'),
       expectedProvenance: options.get('run-provenance'),
+      expectedReleaseId: options.get('release-id'),
+    });
+    await writeOutputs(options.get('github-output') || process.env.GITHUB_OUTPUT, {
+      release_id: identity.releaseId,
+      tag_object_sha: identity.tagObjectSha,
     });
     console.log(`RELEASE_PREPUBLISH_OK tag=${identity.tag} commit=${identity.sourceCommit} main=${identity.mainCommit} draft=${identity.releaseId} tag_object=${identity.tagObjectSha}`);
+    return;
+  }
+  if (command === 'cleanup') {
+    const result = await cleanupIncompleteRelease({
+      repository: options.get('repository') || process.env.GITHUB_REPOSITORY,
+      tag: options.get('tag'),
+      expectedCommit: options.get('source-commit'),
+      expectedProvenance: options.get('run-provenance'),
+      expectedReleaseId: options.get('release-id'),
+    });
+    if (result.action.startsWith('preserved-draft')) {
+      console.error(`::warning::Draft Release ${result.releaseId} and tag ${result.tag} were preserved for manual review after the failed attempt`);
+    } else if (result.tagPreserved === true) {
+      console.error(`::warning::Annotated tag ${result.tag} was preserved for manual review after the failed Release attempt`);
+    }
+    console.log(`RELEASE_CLEANUP_OK action=${result.action} tag=${result.tag} release=${result.releaseId || 'absent'} tag_deleted=${result.deletedTag === true}`);
     return;
   }
   if (command === 'prepare') {
@@ -492,7 +681,7 @@ async function main() {
     console.log(`RELEASE_MANIFESTS_OK version=${result.version} tag=${result.tag} commit=${result.sourceCommit} tree=${result.sourceTree} signing=${result.signingMode}`);
     return;
   }
-  throw new Error('usage: verify-release-version.mjs <source|prepare|prepublish|manifests> [options]');
+  throw new Error('usage: verify-release-version.mjs <source|prepare|prepublish|cleanup|manifests> [options]');
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

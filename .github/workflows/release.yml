@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
-      contents: read
+      contents: write
     outputs:
       version: ${{ steps.identity.outputs.version }}
       tag: ${{ steps.identity.outputs.tag }}
@@ -365,6 +365,8 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: write
+    outputs:
+      release_id: ${{ steps.verify_draft.outputs.release_id }}
     env:
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
       SOURCE_COMMIT: ${{ needs.prepare.outputs.source_commit }}
@@ -491,6 +493,7 @@ jobs:
             --verify-tag
 
       - name: Fetch tag and verify the stable draft identity
+        id: verify_draft
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -506,11 +509,13 @@ jobs:
             --repository "$GITHUB_REPOSITORY" \
             --tag "$RELEASE_TAG" \
             --source-commit "$SOURCE_COMMIT" \
-            --run-provenance "$RUN_PROVENANCE"
+            --run-provenance "$RUN_PROVENANCE" \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Upload exact assets without clobbering
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.verify_draft.outputs.release_id }}
         run: |
           set -euo pipefail
           asset_root="$RUNNER_TEMP/release-assets"
@@ -522,12 +527,30 @@ jobs:
             "Yunspire_${SOURCE_VERSION}_Windows-x64_unsigned-setup.exe.manifest.json"
             "Yunspire_${SOURCE_VERSION}_Windows-x64_unsigned-setup.exe.sha256"
           )
-          gh release upload "$RELEASE_TAG" "$asset_root"/* --repo "$GITHUB_REPOSITORY"
-          release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets)"
+          release_json="$(gh api "/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID")"
+          upload_url="$(jq -er '.upload_url | sub("\\{.*$"; "")' <<<"$release_json")"
+          for expected in "${expected_files[@]}"; do
+            asset_path="$asset_root/$expected"
+            asset_json="$(gh api \
+              --method POST \
+              "$upload_url" \
+              --input "$asset_path" \
+              --raw-field "name=$expected" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'Content-Type: application/octet-stream')"
+            jq -e \
+              --arg name "$expected" \
+              '.name == $name and .state == "uploaded" and (.id | type == "number")' \
+              <<<"$asset_json" >/dev/null
+          done
+          release_json="$(gh api "/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID")"
           uploaded_count="$(jq '.assets | length' <<<"$release_json")"
           [[ "$uploaded_count" == "6" ]]
           for expected in "${expected_files[@]}"; do
-            remote_digest="$(jq -r --arg name "$expected" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
+            remote_digest="$(jq -er \
+              --arg name "$expected" \
+              '[.assets[] | select(.name == $name)] | if length == 1 then .[0].digest else empty end' \
+              <<<"$release_json")"
             local_digest="$(sha256sum "$asset_root/$expected" | awk '{print $1}')"
             [[ "$remote_digest" == "sha256:$local_digest" ]] || {
               echo "Published asset digest mismatch for $expected" >&2
@@ -538,41 +561,51 @@ jobs:
       - name: Publish the verified Release as Latest
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.verify_draft.outputs.release_id }}
         run: |
           set -euo pipefail
           node scripts/verify-release-version.mjs prepublish \
             --repository "$GITHUB_REPOSITORY" \
             --tag "$RELEASE_TAG" \
             --source-commit "$SOURCE_COMMIT" \
-            --run-provenance "$RUN_PROVENANCE"
-          gh release edit "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$SOURCE_COMMIT" \
-            --draft=false \
-            --prerelease=false \
-            --latest \
-            --verify-tag
+            --run-provenance "$RUN_PROVENANCE" \
+            --release-id "$RELEASE_ID"
+          publish_json="$(jq -n \
+            '{draft: false, prerelease: false, make_latest: "true"}' | \
+            gh api \
+              --method PATCH \
+              "/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+              --input -)"
+          jq -e \
+            --argjson release_id "$RELEASE_ID" \
+            --arg tag "$RELEASE_TAG" \
+            '.id == $release_id and .tag_name == $tag and .draft == false and .prerelease == false' \
+            <<<"$publish_json" >/dev/null
 
       - name: Verify the published Release is the current stable version
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.verify_draft.outputs.release_id }}
         run: |
           set -euo pipefail
-          release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,targetCommitish,isDraft,isPrerelease,assets)"
+          release_json="$(gh api "/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID")"
           jq -e \
             --arg tag "$RELEASE_TAG" \
             --arg commit "$SOURCE_COMMIT" \
-            '.tagName == $tag and .targetCommitish == $commit and .isDraft == false and .isPrerelease == false and (.assets | length) == 6' \
+            --argjson release_id "$RELEASE_ID" \
+            '.id == $release_id and .tag_name == $tag and .target_commitish == $commit and .draft == false and .prerelease == false and .immutable == true and (.assets | length) == 6' \
             <<<"$release_json" >/dev/null
-          [[ "$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)" == "$RELEASE_TAG" ]]
+          [[ "$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq .id)" == "$RELEASE_ID" ]]
+          [[ "$(gh api "/repos/$GITHUB_REPOSITORY/releases/latest" --jq .id)" == "$RELEASE_ID" ]]
 
-      - name: Clean up an incomplete draft Release after failure
+      - name: Inspect and preserve an incomplete draft Release after failure
         if: ${{ failure() || cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.verify_draft.outputs.release_id }}
           RUN_PROVENANCE: yunspire-release-run:${{ github.run_id }}:${{ github.run_attempt }}:${{ needs.prepare.outputs.source_commit }}
         run: |
-          set -u
+          set -euo pipefail
           marker="$RUNNER_TEMP/yunspire-$RELEASE_TAG-tag-created"
           [[ -f "$marker" ]] || {
             echo "::warning::Skipping release cleanup because this run did not record creating $RELEASE_TAG"
@@ -582,111 +615,20 @@ jobs:
             echo "::warning::Skipping release cleanup because the run marker does not match $SOURCE_COMMIT"
             exit 0
           }
-
-          release_probe="$RUNNER_TEMP/yunspire-$RELEASE_TAG-release-probe.json"
-          api_root="${GITHUB_API_URL:-https://api.github.com}"
-          if ! release_status="$(curl \
-            --silent \
-            --show-error \
-            --retry 2 \
-            --retry-all-errors \
-            --output "$release_probe" \
-            --write-out '%{http_code}' \
-            --header 'Accept: application/vnd.github+json' \
-            --header "Authorization: Bearer $GH_TOKEN" \
-            --header 'X-GitHub-Api-Version: 2022-11-28' \
-            "$api_root/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"; then
-            echo "::warning::Unable to determine whether Release $RELEASE_TAG exists; leaving the tag and Release untouched"
-            exit 0
+          cleanup_arguments=(
+            cleanup
+            --repository "$GITHUB_REPOSITORY"
+            --tag "$RELEASE_TAG"
+            --source-commit "$SOURCE_COMMIT"
+            --run-provenance "$RUN_PROVENANCE"
+          )
+          if [[ -n "${RELEASE_ID:-}" ]]; then
+            cleanup_arguments+=(--release-id "$RELEASE_ID")
           fi
-
-          if [[ "$release_status" == "200" ]]; then
-            is_draft="$(jq -r '.draft // false' "$release_probe")"
-            target_commitish="$(jq -r '.target_commitish // empty' "$release_probe")"
-            release_body="$(jq -r '.body // empty' "$release_probe")"
-            if [[ "$is_draft" != "true" ]]; then
-              echo "::warning::Release $RELEASE_TAG is already published; cleanup will not delete it or its tag"
-              exit 0
-            fi
-            if [[ "$target_commitish" != "$SOURCE_COMMIT" || "$release_body" != *"$RUN_PROVENANCE"* ]]; then
-              echo "::warning::Draft Release $RELEASE_TAG does not carry this run's exact provenance; cleanup skipped"
-              exit 0
-            fi
-
-            if ! ref_json="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" 2>/dev/null)"; then
-              echo "::warning::Unable to inspect this run's annotated tag; cleanup skipped"
-              exit 0
-            fi
-            ref_type="$(jq -r '.object.type // empty' <<<"$ref_json")"
-            ref_sha="$(jq -r '.object.sha // empty' <<<"$ref_json")"
-            if [[ "$ref_type" != "tag" || ! "$ref_sha" =~ ^[0-9a-f]{40}$ ]]; then
-              echo "::warning::Tag $RELEASE_TAG is not this workflow's annotated tag; cleanup skipped"
-              exit 0
-            fi
-            if ! tag_json="$(gh api "/repos/$GITHUB_REPOSITORY/git/tags/$ref_sha" 2>/dev/null)"; then
-              echo "::warning::Unable to inspect this run's annotated tag object; cleanup skipped"
-              exit 0
-            fi
-            target_sha="$(jq -r '.object.sha // empty' <<<"$tag_json")"
-            tag_message="$(jq -r '.message // empty' <<<"$tag_json")"
-            if [[ "$target_sha" != "$SOURCE_COMMIT" || "$tag_message" != *"$RUN_PROVENANCE"* ]]; then
-              echo "::warning::Annotated tag $RELEASE_TAG does not carry this run's exact provenance; cleanup skipped"
-              exit 0
-            fi
-
-            if ! gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes; then
-              echo "::warning::Unable to delete this run's incomplete draft Release $RELEASE_TAG"
-              exit 1
-            fi
-            current_ref_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha' 2>/dev/null || true)"
-            if [[ "$current_ref_sha" != "$ref_sha" ]]; then
-              echo "::warning::Tag $RELEASE_TAG changed during cleanup; leaving it untouched"
-              exit 0
-            fi
-            if ! gh api --method DELETE "/repos/$GITHUB_REPOSITORY/git/refs/tags/$RELEASE_TAG" >/dev/null; then
-              echo "::warning::Unable to delete this run's incomplete annotated tag $RELEASE_TAG"
-              exit 1
-            fi
-            exit 0
-          fi
-
-          if [[ "$release_status" != "404" ]]; then
-            echo "::warning::GitHub returned HTTP $release_status while checking Release $RELEASE_TAG; cleanup skipped"
-            exit 0
-          fi
-
-          if ! ref_json="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" 2>/dev/null)"; then
-            echo "::warning::Unable to inspect tag $RELEASE_TAG after confirming that no Release exists; cleanup skipped"
-            exit 0
-          fi
-          ref_type="$(jq -r '.object.type // empty' <<<"$ref_json")"
-          ref_sha="$(jq -r '.object.sha // empty' <<<"$ref_json")"
-          if [[ "$ref_type" != "tag" || ! "$ref_sha" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::warning::Tag $RELEASE_TAG is not this workflow's annotated tag; cleanup skipped"
-            exit 0
-          fi
-          if ! tag_json="$(gh api "/repos/$GITHUB_REPOSITORY/git/tags/$ref_sha" 2>/dev/null)"; then
-            echo "::warning::Unable to inspect annotated tag $RELEASE_TAG; cleanup skipped"
-            exit 0
-          fi
-          target_sha="$(jq -r '.object.sha // empty' <<<"$tag_json")"
-          tag_message="$(jq -r '.message // empty' <<<"$tag_json")"
-          if [[ "$target_sha" != "$SOURCE_COMMIT" || "$tag_message" != *"$RUN_PROVENANCE"* ]]; then
-            echo "::warning::Annotated tag $RELEASE_TAG does not carry this run's exact provenance; cleanup skipped"
-            exit 0
-          fi
-          current_ref_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha' 2>/dev/null || true)"
-          if [[ "$current_ref_sha" != "$ref_sha" ]]; then
-            echo "::warning::Tag $RELEASE_TAG changed during cleanup; leaving it untouched"
-            exit 0
-          fi
-          if ! gh api --method DELETE "/repos/$GITHUB_REPOSITORY/git/refs/tags/$RELEASE_TAG" >/dev/null; then
-            echo "::warning::Unable to delete this run's incomplete annotated tag $RELEASE_TAG"
-            exit 1
-          fi
+          node scripts/verify-release-version.mjs "${cleanup_arguments[@]}"
 
   cleanup_incomplete_release:
-    name: Recover an incomplete unpublished Release
+    name: Inspect an incomplete unpublished Release
     needs: [prepare, publish]
     if: ${{ always() && needs.prepare.result == 'success' && needs.publish.result != 'success' }}
     runs-on: ubuntu-24.04
@@ -695,111 +637,35 @@ jobs:
       contents: write
     env:
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_ID: ${{ needs.publish.outputs.release_id }}
       SOURCE_COMMIT: ${{ needs.prepare.outputs.source_commit }}
       RUN_PROVENANCE: yunspire-release-run:${{ github.run_id }}:${{ github.run_attempt }}:${{ needs.prepare.outputs.source_commit }}
     steps:
-      - name: Remove only this run's unpublished draft or annotated tag
+      - name: Check out the locked release cleanup code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.prepare.outputs.source_commit }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Preserve and report only this run's unpublished objects
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -u
-          api_root="${GITHUB_API_URL:-https://api.github.com}"
-          release_probe="$RUNNER_TEMP/yunspire-$RELEASE_TAG-independent-release-probe.json"
-          if ! release_status="$(curl \
-            --silent \
-            --show-error \
-            --retry 2 \
-            --retry-all-errors \
-            --output "$release_probe" \
-            --write-out '%{http_code}' \
-            --header 'Accept: application/vnd.github+json' \
-            --header "Authorization: Bearer $GH_TOKEN" \
-            --header 'X-GitHub-Api-Version: 2022-11-28' \
-            "$api_root/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"; then
-            echo "::warning::Unable to inspect Release $RELEASE_TAG after the publish job failed; cleanup skipped"
-            exit 0
+          set -euo pipefail
+          cleanup_arguments=(
+            cleanup
+            --repository "$GITHUB_REPOSITORY"
+            --tag "$RELEASE_TAG"
+            --source-commit "$SOURCE_COMMIT"
+            --run-provenance "$RUN_PROVENANCE"
+          )
+          if [[ -n "${RELEASE_ID:-}" ]]; then
+            cleanup_arguments+=(--release-id "$RELEASE_ID")
           fi
-
-          if [[ "$release_status" == "200" ]]; then
-            is_draft="$(jq -r '.draft // false' "$release_probe")"
-            target_commitish="$(jq -r '.target_commitish // empty' "$release_probe")"
-            release_body="$(jq -r '.body // empty' "$release_probe")"
-            if [[ "$is_draft" != "true" ]]; then
-              echo "::warning::Release $RELEASE_TAG is already published; independent cleanup will not modify it or its tag"
-              exit 0
-            fi
-            if [[ "$target_commitish" != "$SOURCE_COMMIT" || "$release_body" != *"$RUN_PROVENANCE"* ]]; then
-              echo "::warning::Draft Release $RELEASE_TAG does not carry this run's exact provenance; cleanup skipped"
-              exit 0
-            fi
-
-            if ! ref_json="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" 2>/dev/null)"; then
-              echo "::warning::Unable to inspect this run's annotated tag; independent cleanup skipped"
-              exit 0
-            fi
-            ref_type="$(jq -r '.object.type // empty' <<<"$ref_json")"
-            ref_sha="$(jq -r '.object.sha // empty' <<<"$ref_json")"
-            if [[ "$ref_type" != "tag" || ! "$ref_sha" =~ ^[0-9a-f]{40}$ ]]; then
-              echo "::warning::Tag $RELEASE_TAG is not this workflow's annotated tag; independent cleanup skipped"
-              exit 0
-            fi
-            if ! tag_json="$(gh api "/repos/$GITHUB_REPOSITORY/git/tags/$ref_sha" 2>/dev/null)"; then
-              echo "::warning::Unable to inspect this run's annotated tag object; independent cleanup skipped"
-              exit 0
-            fi
-            target_sha="$(jq -r '.object.sha // empty' <<<"$tag_json")"
-            tag_message="$(jq -r '.message // empty' <<<"$tag_json")"
-            if [[ "$target_sha" != "$SOURCE_COMMIT" || "$tag_message" != *"$RUN_PROVENANCE"* ]]; then
-              echo "::warning::Annotated tag $RELEASE_TAG does not carry this run's exact provenance; independent cleanup skipped"
-              exit 0
-            fi
-
-            if ! gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes; then
-              echo "::warning::Unable to delete this run's incomplete draft Release $RELEASE_TAG"
-              exit 1
-            fi
-            current_ref_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha' 2>/dev/null || true)"
-            if [[ "$current_ref_sha" != "$ref_sha" ]]; then
-              echo "::warning::Tag $RELEASE_TAG changed during independent cleanup; leaving it untouched"
-              exit 0
-            fi
-            if ! gh api --method DELETE "/repos/$GITHUB_REPOSITORY/git/refs/tags/$RELEASE_TAG" >/dev/null; then
-              echo "::warning::Unable to delete this run's incomplete annotated tag $RELEASE_TAG"
-              exit 1
-            fi
-            exit 0
-          fi
-
-          if [[ "$release_status" != "404" ]]; then
-            echo "::warning::GitHub returned HTTP $release_status while checking Release $RELEASE_TAG; cleanup skipped"
-            exit 0
-          fi
-
-          if ! ref_json="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" 2>/dev/null)"; then
-            exit 0
-          fi
-          ref_type="$(jq -r '.object.type // empty' <<<"$ref_json")"
-          ref_sha="$(jq -r '.object.sha // empty' <<<"$ref_json")"
-          if [[ "$ref_type" != "tag" || ! "$ref_sha" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::warning::Tag $RELEASE_TAG is not the annotated tag created by this workflow; cleanup skipped"
-            exit 0
-          fi
-          if ! tag_json="$(gh api "/repos/$GITHUB_REPOSITORY/git/tags/$ref_sha" 2>/dev/null)"; then
-            echo "::warning::Unable to inspect annotated tag $RELEASE_TAG; cleanup skipped"
-            exit 0
-          fi
-          target_sha="$(jq -r '.object.sha // empty' <<<"$tag_json")"
-          tag_message="$(jq -r '.message // empty' <<<"$tag_json")"
-          if [[ "$target_sha" != "$SOURCE_COMMIT" || "$tag_message" != *"$RUN_PROVENANCE"* ]]; then
-            echo "::warning::Annotated tag $RELEASE_TAG does not carry this run's exact provenance; cleanup skipped"
-            exit 0
-          fi
-          current_ref_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha' 2>/dev/null || true)"
-          if [[ "$current_ref_sha" != "$ref_sha" ]]; then
-            echo "::warning::Tag $RELEASE_TAG changed during independent cleanup; leaving it untouched"
-            exit 0
-          fi
-          if ! gh api --method DELETE "/repos/$GITHUB_REPOSITORY/git/refs/tags/$RELEASE_TAG" >/dev/null; then
-            echo "::warning::Unable to delete this run's incomplete annotated tag $RELEASE_TAG"
-            exit 1
-          fi
+          node scripts/verify-release-version.mjs "${cleanup_arguments[@]}"
