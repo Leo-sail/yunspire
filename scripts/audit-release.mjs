@@ -90,6 +90,7 @@ const requiredFiles = [
   '.github/workflows/windows-installer.yml',
   'scripts/build-macos-python-runtime.mjs',
   'scripts/build-macos-native.mjs',
+  'scripts/run-native-quality.mjs',
   'scripts/generate-third-party-notices.mjs',
   'scripts/sign-windows.ps1',
   'scripts/verify-release-artifact.mjs',

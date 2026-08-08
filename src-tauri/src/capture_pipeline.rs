@@ -1850,7 +1850,7 @@ fn python_executable(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     }
 }
 
-fn configure_python_path(command: &mut Command, python: &Path) {
+fn configure_python_path(command: &mut Command, _python: &Path) {
     command.env("PYTHONDONTWRITEBYTECODE", "1");
     #[cfg(target_os = "windows")]
     {
@@ -1873,7 +1873,7 @@ fn configure_python_path(command: &mut Command, python: &Path) {
             .env("PYTHONUTF8", "1")
             .env("PYTHONIOENCODING", "utf-8")
             .env("SSL_CERT_FILE", "/etc/ssl/cert.pem");
-        if let Some(home) = macos_python_home(python) {
+        if let Some(home) = macos_python_home(_python) {
             command.env("PYTHONHOME", home);
         }
     }
