@@ -3,6 +3,7 @@ import { readFile, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { promisify } from 'node:util';
+import { readReleaseVersion } from './verify-release-version.mjs';
 
 const root = path.resolve(process.cwd());
 const execFileAsync = promisify(execFile);
@@ -78,15 +79,25 @@ const requiredFiles = [
   'src-tauri/src/trace.rs',
   'src-tauri/src/vault_batch.rs',
   'docs/MEMORY_V2.md',
+  'docs/RELEASING.md',
   'docs/assets/architecture-overview.svg',
   'docs/schemas/memory-record.schema.json',
   'docs/schemas/memory-reflection-job.schema.json',
   '.github/ISSUE_TEMPLATE/bug_report.yml',
   '.github/ISSUE_TEMPLATE/feature_request.yml',
   '.github/workflows/ci.yml',
+  '.github/workflows/release.yml',
   '.github/workflows/windows-installer.yml',
+  'scripts/build-macos-python-runtime.mjs',
+  'scripts/build-macos-native.mjs',
+  'scripts/run-native-quality.mjs',
   'scripts/generate-third-party-notices.mjs',
+  'scripts/sign-windows.ps1',
   'scripts/verify-release-artifact.mjs',
+  'scripts/verify-release-version.mjs',
+  'scripts/verify-macos-helpers.mjs',
+  'src-tauri/tauri.macos.conf.json',
+  'src-tauri/tauri.release.conf.json',
   'skills/deep-research/SKILL.md',
   'skills/deep-research/input.schema.json',
   'skills/deep-research/output.schema.json',
@@ -102,6 +113,7 @@ const bilingualDocuments = [
   'docs/AI_ASSISTANT_INSTRUCTIONS.md',
   'docs/BRAND_GUIDE.md',
   'docs/PRODUCT_REQUIREMENTS.md',
+  'docs/RELEASING.md',
   'docs/schemas/README.md',
 ];
 const canonicalRootDocuments = new Set([
@@ -115,6 +127,7 @@ const canonicalDirectDocs = new Set([
   'BRAND_GUIDE.md',
   'MEMORY_V2.md',
   'PRODUCT_REQUIREMENTS.md',
+  'RELEASING.md',
 ]);
 const canonicalDocumentation = [
   ...canonicalRootDocuments,
@@ -202,6 +215,152 @@ for (const document of bilingualDocuments) {
   }
 }
 
+if (await exists('.github/workflows/release.yml')) {
+  const releaseWorkflow = await readFile(path.join(root, '.github/workflows/release.yml'), 'utf8');
+  const requiredReleaseGates = [
+    ['release/v* branch trigger', /release\/v\*/u],
+    ['source identity gate', /verify-release-version\.mjs\s+source/u],
+    ['clean committed source requirement', /--require-clean\s+true/u],
+    ['manifest convergence gate', /verify-release-version\.mjs\s+manifests/u],
+    ['pre-creation tag and release absence gate', /verify-release-version\.mjs\s+prepare/u],
+    ['draft release identity gate', /verify-release-version\.mjs\s+prepublish/u],
+    ['prepublish run provenance binding', /--run-provenance\s+"\$RUN_PROVENANCE"/u],
+    [
+      'final draft revalidation immediately before publication',
+      /Publish the verified Release as Latest[\s\S]*verify-release-version\.mjs\s+prepublish[\s\S]*gh release edit/u,
+    ],
+    ['attempt-scoped build artifacts', /attempt-\$\{\{\s*github\.run_attempt\s*\}\}/u],
+    ['run-provenance cleanup ownership', /RUN_PROVENANCE:\s*yunspire-release-run:/u],
+    ['annotated-tag cleanup ownership', /tag_message[\s\S]*RUN_PROVENANCE/u],
+    ['existing-tag verification', /--verify-tag/u],
+    ['explicit latest release selection', /--latest(?:\s|$)/mu],
+  ];
+  for (const [label, pattern] of requiredReleaseGates) {
+    if (!pattern.test(releaseWorkflow)) failures.push(`release workflow is missing ${label}`);
+  }
+  if (/--clobber/u.test(releaseWorkflow)) {
+    failures.push('release workflow must never overwrite an existing release asset with --clobber');
+  }
+  if (/gh release delete[^\n]*--cleanup-tag/u.test(releaseWorkflow)) {
+    failures.push('release cleanup must verify and delete its owned annotated tag separately');
+  }
+  if (/workflow_dispatch\s*:/u.test(releaseWorkflow)) {
+    failures.push('release workflow must only publish from the version-bound release/v* branch trigger');
+  }
+  const noSignCount = releaseWorkflow.match(/--no-sign/gu)?.length || 0;
+  const unsignedManifestCount = releaseWorkflow.match(/--signed\s+false/gu)?.length || 0;
+  const prepublishProvenanceCount = releaseWorkflow.match(/--run-provenance\s+"\$RUN_PROVENANCE"/gu)?.length || 0;
+  if (noSignCount !== 2 || unsignedManifestCount !== 2) {
+    failures.push(`release workflow must build exactly two explicitly unsigned installers; no-sign=${noSignCount} manifests=${unsignedManifestCount}`);
+  }
+  if (/--require-signed\s+true/u.test(releaseWorkflow)) {
+    failures.push('unsigned release workflow must not require signed artifacts');
+  }
+  if (prepublishProvenanceCount !== 2) {
+    failures.push(`release workflow must bind both prepublish gates to this run provenance; found=${prepublishProvenanceCount}`);
+  }
+}
+
+if (await exists('scripts/verify-release-version.mjs')) {
+  const releaseVerifier = await readFile(path.join(root, 'scripts/verify-release-version.mjs'), 'utf8');
+  const prepublishStart = releaseVerifier.indexOf('export async function verifyPrepublish');
+  const prepublishEnd = releaseVerifier.indexOf('function manifestSourceCommit', prepublishStart);
+  const prepublishVerifier = prepublishStart >= 0 && prepublishEnd > prepublishStart
+    ? releaseVerifier.slice(prepublishStart, prepublishEnd)
+    : '';
+  if (!/remoteBranchCommit\(repository, 'main'\)/u.test(prepublishVerifier)) {
+    failures.push('prepublish verification must require the built commit to remain the remote main HEAD');
+  }
+  if (!/remoteAnnotatedTag\(repository, identity\.tag\)/u.test(prepublishVerifier)
+      || !/release\.body[\s\S]*provenance/u.test(prepublishVerifier)) {
+    failures.push('prepublish verification must bind the annotated tag and draft Release body to this workflow run');
+  }
+  const stableReleaseGuards = releaseVerifier.match(/stable release workflow does not accept prerelease version/gu)?.length || 0;
+  if (stableReleaseGuards < 2) {
+    failures.push('prepare and prepublish verification must reject prerelease versions from the stable Latest workflow');
+  }
+}
+
+if (await exists('scripts/verify-release-artifact.mjs')) {
+  const artifactVerifier = await readFile(path.join(root, 'scripts/verify-release-artifact.mjs'), 'utf8');
+  if (!/requireClean:\s*option\('require-clean',\s*\{\s*fallback:\s*'true'\s*\}\)\s*===\s*'true'/u.test(artifactVerifier)) {
+    failures.push('release artifact manifests must default to a clean checked-out source tree');
+  }
+}
+
+if (await exists('.github/workflows/windows-installer.yml')) {
+  const windowsInstallerWorkflow = await readFile(
+    path.join(root, '.github/workflows/windows-installer.yml'),
+    'utf8',
+  );
+  const requiredWindowsCiGates = [
+    ['CI-only workflow label', /CI (?:verification|only)/iu],
+    ['shared release installer configuration', /--config\s+src-tauri\/tauri\.release\.conf\.json/u],
+    ['explicit unsigned build flag', /--no-sign/u],
+    ['silent install and startup smoke', /sign-windows\.ps1[\s\S]*VerifyUnsignedInstaller/u],
+  ];
+  for (const [label, pattern] of requiredWindowsCiGates) {
+    if (!pattern.test(windowsInstallerWorkflow)) failures.push(`Windows installer CI is missing ${label}`);
+  }
+  if (/actions\/upload-artifact@/u.test(windowsInstallerWorkflow)) {
+    failures.push('Windows installer CI must not upload a second distributable installer');
+  }
+}
+
+if (await exists('src-tauri/tauri.release.conf.json')) {
+  try {
+    const fragments = await Promise.all([
+      'src-tauri/tauri.conf.json',
+      'src-tauri/tauri.windows.conf.json',
+      'src-tauri/tauri.release.conf.json',
+    ].map((relativePath) => readFile(path.join(root, relativePath), 'utf8').then(JSON.parse)));
+    const mergeConfig = (base, overlay) => {
+      if (!overlay || typeof overlay !== 'object' || Array.isArray(overlay)) return overlay;
+      const merged = { ...base };
+      for (const [key, value] of Object.entries(overlay)) {
+        merged[key] = value && typeof value === 'object' && !Array.isArray(value)
+          ? mergeConfig(merged[key] || {}, value)
+          : value;
+      }
+      return merged;
+    };
+    const releaseConfig = fragments.reduce(mergeConfig, {});
+    const bundle = releaseConfig.bundle || {};
+    const windows = bundle.windows || {};
+    const nsis = windows.nsis || {};
+    const languages = Array.isArray(nsis.languages) ? nsis.languages : [];
+    if (bundle.licenseFile !== null) {
+      failures.push('Windows release installer must not add a separate license page');
+    }
+    if (windows.allowDowngrades !== false) {
+      failures.push('Windows release installer must block downgrades');
+    }
+    if (windows.webviewInstallMode?.type !== 'offlineInstaller'
+      || windows.webviewInstallMode?.silent !== true) {
+      failures.push('Windows release installer must embed the complete WebView2 offline installer silently');
+    }
+    if (windows.signCommand != null) {
+      failures.push('unsigned Windows release must not configure a signing command');
+    }
+    if (nsis.installMode !== 'currentUser') {
+      failures.push('Windows NSIS release must use currentUser install mode');
+    }
+    if (nsis.displayLanguageSelector !== false) {
+      failures.push('Windows NSIS release must disable the language selector');
+    }
+    if (languages.length !== 2 || languages[0] !== 'SimpChinese' || languages[1] !== 'English') {
+      failures.push('Windows NSIS languages must be SimpChinese then English');
+    }
+    for (const property of ['template', 'installerHooks', 'startMenuFolder']) {
+      if (nsis[property] != null) {
+        failures.push(`Windows NSIS ${property} must remain unset to avoid custom or unnecessary pages`);
+      }
+    }
+  } catch (error) {
+    failures.push(`effective Windows release installer configuration is invalid: ${error.message}`);
+  }
+}
+
 const files = await collectFiles(root);
 for (const relativePath of files) {
   const segments = relativePath.split(path.sep);
@@ -264,6 +423,11 @@ try {
 
 const packageJson = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
 const packageVersion = packageJson.version;
+try {
+  await readReleaseVersion(root);
+} catch (error) {
+  failures.push(`release version validation failed: ${error.message}`);
+}
 const packageLock = JSON.parse(await readFile(path.join(root, 'package-lock.json'), 'utf8'));
 if (packageLock.version !== packageVersion || packageLock.packages?.['']?.version !== packageVersion) {
   failures.push(`version mismatch in package-lock.json; expected ${packageVersion}`);

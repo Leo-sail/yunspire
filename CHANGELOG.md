@@ -6,8 +6,12 @@ This file records material public-version changes only. It excludes local valida
 
 ## 中文
 
-### 未发布
+### 0.3.0 - 2026-08-08
 
+- 重构桌面端整体信息架构和视觉层级，统一总览、AI助手、采集、知识、创作、回望、操作日志与设置，并在常用桌面宽度下消除横向溢出。
+- 建立版本绑定发布契约：应用版本、Git 标签、源码提交和源码树必须一致；macOS 与 Windows 安装包使用独立清单和 SHA-256，已有标签、Release 或安装包禁止覆盖。
+- macOS DMG 改为 Apple Silicon/Intel 通用构建，Windows 保持 NSIS 安装方式并采用当前用户安装、禁止降级和静默 WebView2 引导；`0.3.0` 当前明确作为无签名版本发布，系统 Gatekeeper/SmartScreen 提示不属于应用可关闭的弹窗。
+- 将 macOS PDF、媒体和语音辅助程序改为构建时编译并随应用打包，正式版本不再在用户设备上调用 `clang` 或触发命令行开发工具安装。
 - 完成 Hermes 融合 P0 任务契约与调度闭环：原生版本化类型 DAG、确定性 `all_of` 完成契约、不可变计划/证据、frontier、原子 claim、lease/reclaim、硬预算、只读并行、副作用屏障、父子取消栅栏和 Rust 可信步骤回执。
 - 完成 Hermes 融合 P1 能力编排主链路：AI助手使用 `capability-main -> verify-result` 计划，真实能力通过 `origin=runtime` 子命令执行；子命令绑定父任务/步骤/claim，不能复用模型凭证或扩大 capability、操作、Trace、Vault、路径、网络、声明范围和预算。
 - 强化调度 occurrence：每个到期时间创建稳定 occurrence 与 wrapper 任务；只有核验真实 Command Bus/Policy 子任务绑定后才确认派发，历史 occurrence 不随日程删除。
@@ -54,8 +58,12 @@ This file records material public-version changes only. It excludes local valida
 
 ## English
 
-### Unreleased
+### 0.3.0 - 2026-08-08
 
+- Reworked the desktop information architecture and visual hierarchy across Overview, Assistant, Capture, Knowledge, Creation, Reflection, Audit, and Settings, with overflow-free layouts at common desktop widths.
+- Added a version-bound release contract: application version, Git tag, source commit, and source tree must agree; macOS and Windows installers carry separate manifests and SHA-256 digests, and existing tags, Releases, or assets are never overwritten.
+- Changed macOS DMGs to universal Apple Silicon/Intel builds. Windows retains NSIS setup with current-user installation, downgrade prevention, and silent WebView2 bootstrap. Version `0.3.0` is explicitly published unsigned, so Gatekeeper and SmartScreen warnings remain outside application control.
+- Moved macOS PDF, media, and speech helper compilation to build time and bundle the helpers with the app, so release builds no longer invoke `clang` or trigger Command Line Tools installation on user devices.
 - Completed the Hermes-fusion P0 task-contract and scheduling loop: versioned typed DAGs, deterministic `all_of` completion contracts, immutable plans/evidence, frontier discovery, atomic claims, lease/reclaim, hard budgets, read-only fan-out, effectful barriers, parent-child cancellation fences, and Rust-generated trusted step receipts.
 - Completed the Hermes-fusion P1 orchestration path: the Assistant uses a `capability-main -> verify-result` plan and executes real work through `origin=runtime` child commands bound to the parent task/step/claim. Children cannot reuse model authority or expand capability, operation, trace, Vault/path/network/declared scope, or budget.
 - Strengthened native scheduling so every due timestamp creates a stable occurrence and wrapper task; dispatch completes only after Rust verifies real Command Bus/Policy child-task bindings, and schedule deletion retains occurrence history.

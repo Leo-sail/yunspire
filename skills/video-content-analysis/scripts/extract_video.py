@@ -462,6 +462,18 @@ def windows_native_adapter(environment_name, packaged_name, build_name):
     return None
 
 
+def macos_media_adapter():
+    configured = os.environ.get("YUNSPIRE_MACOS_MEDIA_ADAPTER", "").strip()
+    candidates = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.append(Path(__file__).with_name("bin") / "yunspire-media")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
 def compile_media_adapter(output_dir):
     if sys.platform == "win32":
         adapter = windows_native_adapter(
@@ -474,6 +486,11 @@ def compile_media_adapter(output_dir):
         return None, "Windows 媒体适配器未随安装包部署；请使用完整 Yunspire 安装包重新安装"
     if sys.platform != "darwin":
         return None, "当前平台不支持云枢本地视频帧/音轨适配器"
+    adapter = macos_media_adapter()
+    if adapter:
+        return adapter, ""
+    if os.environ.get("YUNSPIRE_MACOS_ALLOW_RUNTIME_COMPILE") != "1":
+        return None, "macOS 媒体适配器未随安装包部署；为避免触发 Command Line Tools，云枢不会在用户设备上运行 clang"
     compiler = shutil.which("clang")
     source = Path(__file__).with_name("yunspire_media.m")
     target = output_dir / "yunspire-media"
@@ -587,7 +604,12 @@ def local_media_analysis(media, output_dir, locale):
     adapter, detail = compile_media_adapter(output_dir)
     if not adapter:
         warning = detail or "媒体适配器没有返回编译信息"
-        error = "windows_media_adapter_missing" if sys.platform == "win32" else "media_adapter_build_failed"
+        if sys.platform == "win32":
+            error = "windows_media_adapter_missing"
+        elif sys.platform == "darwin" and os.environ.get("YUNSPIRE_MACOS_ALLOW_RUNTIME_COMPILE") != "1":
+            error = "macos_media_adapter_missing"
+        else:
+            error = "media_adapter_build_failed"
         return {"duration_seconds": 0, "audio_path": "", "frames": [], "warnings": [warning], "errors": [error]}
     progress_checkpoint("media-analysis-started")
     result = run([str(adapter), str(media), str(output_dir)], None, (output_dir,))

@@ -1,0 +1,805 @@
+name: Release desktop installers
+
+on:
+  push:
+    branches:
+      - "release/v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: yunspire-desktop-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Lock release identity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      tag: ${{ steps.identity.outputs.tag }}
+      source_commit: ${{ steps.identity.outputs.source_commit }}
+      source_tree: ${{ steps.identity.outputs.source_tree }}
+    steps:
+      - name: Check out triggering commit with complete history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Resolve version, commit, and tree
+        id: identity
+        env:
+          YUNSPIRE_RELEASE_SOURCE_SHA: ${{ github.sha }}
+        run: >-
+          node scripts/verify-release-version.mjs source
+          --source-commit "$GITHUB_SHA"
+          --require-tag false
+          --require-clean true
+          --github-output "$GITHUB_OUTPUT"
+
+      - name: Require the version-bound release branch
+        env:
+          RELEASE_TAG: ${{ steps.identity.outputs.tag }}
+        run: |
+          set -euo pipefail
+          expected_branch="release/$RELEASE_TAG"
+          if [[ "$GITHUB_REF_TYPE" != "branch" || "$GITHUB_REF_NAME" != "$expected_branch" ]]; then
+            echo "Release branch must be exactly $expected_branch; received $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+
+      - name: Require exact main head with no existing tag or Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.identity.outputs.tag }}
+          SOURCE_COMMIT: ${{ steps.identity.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          node scripts/verify-release-version.mjs prepare \
+            --repository "$GITHUB_REPOSITORY" \
+            --release-branch "$GITHUB_REF_NAME" \
+            --source-commit "$SOURCE_COMMIT"
+
+  macos:
+    name: Build unsigned macOS universal DMG
+    needs: prepare
+    runs-on: macos-14
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
+      LC_CTYPE: en_US.UTF-8
+      RUST_BACKTRACE: "1"
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      SOURCE_COMMIT: ${{ needs.prepare.outputs.source_commit }}
+      SOURCE_TREE: ${{ needs.prepare.outputs.source_tree }}
+      SOURCE_VERSION: ${{ needs.prepare.outputs.version }}
+      YUNSPIRE_LICENSE_TARGETS: aarch64-apple-darwin,x86_64-apple-darwin
+      YUNSPIRE_MACOS_ARCHS: arm64,x86_64
+      YUNSPIRE_RELEASE_SOURCE_SHA: ${{ needs.prepare.outputs.source_commit }}
+    steps:
+      - name: Check out the locked release commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.prepare.outputs.source_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the locked source identity
+        run: |
+          set -euo pipefail
+          node scripts/verify-release-version.mjs source \
+            --source-commit "$SOURCE_COMMIT" \
+            --require-tag false \
+            --require-clean true
+          [[ "$(git rev-parse --verify 'HEAD^{tree}')" == "$SOURCE_TREE" ]]
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust 1.88 universal targets
+        uses: dtolnay/rust-toolchain@39b0b3842c7e8bbf6904c0bfc3d9006fdd4dc4e0 # 1.88.0
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          components: rustfmt, clippy
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run complete product verification
+        run: npm run verify
+
+      - name: Build and verify bundled macOS Python runtime and native helpers
+        run: |
+          node scripts/build-macos-python-runtime.mjs
+          node scripts/build-macos-native.mjs
+          node scripts/verify-macos-helpers.mjs
+
+      - name: Build unsigned universal DMG
+        run: >-
+          npm run tauri -- build
+          --target universal-apple-darwin
+          --bundles dmg
+          --config src-tauri/tauri.release.conf.json
+          --no-sign
+          --ci
+
+      - name: Reverify native helpers rebuilt by the Tauri bundle hook
+        run: node scripts/verify-macos-helpers.mjs
+
+      - name: Verify DMG installation and application startup
+        id: bundle
+        run: |
+          set -euo pipefail
+          bundle_root="src-tauri/target/universal-apple-darwin/release/bundle"
+          dmg_count="$(find "$bundle_root/dmg" -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d ' ')"
+          if [[ "$dmg_count" != "1" ]]; then
+            echo "Expected one DMG; found dmg=$dmg_count" >&2
+            exit 1
+          fi
+          dmg="$(find "$bundle_root/dmg" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          hdiutil verify "$dmg"
+          if codesign --verify "$dmg" >/dev/null 2>&1; then
+            echo "DMG unexpectedly has a code signature in unsigned mode" >&2
+            exit 1
+          fi
+
+          mount_point="$RUNNER_TEMP/yunspire-dmg-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          install_root="$RUNNER_TEMP/yunspire-macos-install-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          application_pid=""
+          mkdir -p "$mount_point" "$install_root"
+          cleanup() {
+            if [[ -n "$application_pid" ]]; then
+              kill "$application_pid" >/dev/null 2>&1 || true
+              wait "$application_pid" >/dev/null 2>&1 || true
+            fi
+            hdiutil detach "$mount_point" >/dev/null 2>&1 || true
+            rm -rf "$install_root" "$mount_point"
+          }
+          trap cleanup EXIT
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_point"
+          mounted_app="$mount_point/Yunspire.app"
+          [[ -d "$mounted_app" ]]
+          if codesign --verify --deep --strict "$mounted_app" >/dev/null 2>&1; then
+            echo "Mounted macOS app unexpectedly has a code signature in unsigned mode" >&2
+            exit 1
+          fi
+          installed_app="$install_root/Yunspire.app"
+          ditto "$mounted_app" "$installed_app"
+
+          bundle_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$installed_app/Contents/Info.plist")"
+          [[ "$bundle_version" == "$SOURCE_VERSION" ]]
+          executable="$(find "$installed_app/Contents/MacOS" -maxdepth 1 -type f -perm +111 -print -quit)"
+          [[ -n "$executable" ]]
+          architectures="$(lipo -archs "$executable")"
+          [[ " $architectures " == *" arm64 "* ]]
+          [[ " $architectures " == *" x86_64 "* ]]
+          packaged_pdf="$installed_app/Contents/Resources/skills/document-content-analysis/scripts/bin/yunspire-pdf"
+          packaged_media="$installed_app/Contents/Resources/skills/video-content-analysis/scripts/bin/yunspire-media"
+          packaged_speech="$installed_app/Contents/Resources/skills/video-content-analysis/scripts/bin/Yunspire Speech Helper.app/Contents/MacOS/yunspire-speech"
+          packaged_speech_plist="$installed_app/Contents/Resources/skills/video-content-analysis/scripts/bin/Yunspire Speech Helper.app/Contents/Info.plist"
+          [[ -x "$packaged_pdf" ]]
+          [[ -x "$packaged_media" ]]
+          [[ -x "$packaged_speech" ]]
+          cmp -s "$packaged_pdf" "src-tauri/target/yunspire-native/macos/yunspire-pdf"
+          cmp -s "$packaged_media" "src-tauri/target/yunspire-native/macos/yunspire-media"
+          cmp -s "$packaged_speech" "src-tauri/target/yunspire-native/macos/Yunspire Speech Helper.app/Contents/MacOS/yunspire-speech"
+          cmp -s "$packaged_speech_plist" "src-tauri/target/yunspire-native/macos/Yunspire Speech Helper.app/Contents/Info.plist"
+          [[ -f "$installed_app/Contents/Resources/legal/LICENSE" ]]
+          [[ -f "$installed_app/Contents/Resources/legal/NOTICE" ]]
+          [[ -f "$installed_app/Contents/Resources/legal/THIRD_PARTY_NOTICES.txt" ]]
+
+          node scripts/verify-macos-helpers.mjs --app "$installed_app"
+
+          application_log="$RUNNER_TEMP/yunspire-macos-startup.log"
+          "$executable" >"$application_log" 2>&1 &
+          application_pid=$!
+          sleep 10
+          if ! kill -0 "$application_pid" >/dev/null 2>&1; then
+            wait "$application_pid" || true
+            sed -n '1,200p' "$application_log" >&2
+            echo "Installed Yunspire exited during macOS startup smoke" >&2
+            exit 1
+          fi
+          echo "dmg_path=$dmg" >>"$GITHUB_OUTPUT"
+          cleanup
+          trap - EXIT
+
+      - name: Create canonical unsigned macOS artifact and manifest
+        run: >-
+          node scripts/verify-release-artifact.mjs artifact
+          --platform macos
+          --input "${{ steps.bundle.outputs.dmg_path }}"
+          --output release-assets/macos
+          --signed false
+          --source-commit "$SOURCE_COMMIT"
+          --require-tag false
+          --require-clean true
+
+      - name: Upload macOS artifact, checksum, and manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Yunspire-${{ needs.prepare.outputs.version }}-macOS-universal-unsigned-attempt-${{ github.run_attempt }}
+          path: release-assets/macos/*
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Build unsigned Windows x64 NSIS
+    needs: prepare
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
+      RUST_BACKTRACE: "1"
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      SOURCE_COMMIT: ${{ needs.prepare.outputs.source_commit }}
+      SOURCE_TREE: ${{ needs.prepare.outputs.source_tree }}
+      SOURCE_VERSION: ${{ needs.prepare.outputs.version }}
+      YUNSPIRE_LICENSE_TARGETS: x86_64-pc-windows-msvc
+      YUNSPIRE_RELEASE_SOURCE_SHA: ${{ needs.prepare.outputs.source_commit }}
+    steps:
+      - name: Check out the locked release commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.prepare.outputs.source_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the locked source identity
+        shell: pwsh
+        run: |
+          node scripts/verify-release-version.mjs source `
+            --source-commit $env:SOURCE_COMMIT `
+            --require-tag false `
+            --require-clean true
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $tree = (git rev-parse --verify 'HEAD^{tree}').Trim().ToLowerInvariant()
+          if ($tree -ne $env:SOURCE_TREE) { throw "Source tree mismatch: $tree" }
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust 1.88 x64 MSVC
+        uses: dtolnay/rust-toolchain@39b0b3842c7e8bbf6904c0bfc3d9006fdd4dc4e0 # 1.88.0
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install locked dependencies
+        id: locked_dependencies
+        run: npm ci
+
+      - name: Audit release source tree
+        id: release_audit
+        run: npm run audit:release
+
+      - name: Run complete product verification
+        id: product_verification
+        run: npm run verify
+
+      - name: Verify Windows runtime and native helpers
+        run: node scripts/verify-windows-release.mjs helpers
+
+      - name: Build unsigned current-user NSIS installer
+        run: >-
+          npm run tauri -- build
+          --target x86_64-pc-windows-msvc
+          --bundles nsis
+          --config src-tauri/tauri.release.conf.json
+          --no-sign
+          --ci
+
+      - name: Verify installed Windows resources
+        env:
+          YUNSPIRE_RELEASE_AUDIT_OUTCOME: ${{ steps.release_audit.outcome }}
+          YUNSPIRE_LOCKED_DEPENDENCIES_OUTCOME: ${{ steps.locked_dependencies.outcome }}
+          YUNSPIRE_PRODUCT_VERIFICATION_OUTCOME: ${{ steps.product_verification.outcome }}
+        run: node scripts/verify-windows-release.mjs bundle
+
+      - name: Verify silent installation and application startup
+        id: bundle
+        shell: pwsh
+        run: >-
+          ./scripts/sign-windows.ps1
+          -Mode VerifyUnsignedInstaller
+          -ExpectedVersion $env:SOURCE_VERSION
+          -ExpectedCommit $env:SOURCE_COMMIT
+          -ExpectedTree $env:SOURCE_TREE
+          -GitHubOutput $env:GITHUB_OUTPUT
+
+      - name: Create canonical unsigned Windows artifact and manifest
+        run: >-
+          node scripts/verify-release-artifact.mjs artifact
+          --platform windows
+          --input "${{ steps.bundle.outputs.installer }}"
+          --output release-assets/windows
+          --signed false
+          --source-commit "$env:SOURCE_COMMIT"
+          --require-tag false
+          --require-clean true
+
+      - name: Upload Windows artifact, checksum, and manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Yunspire-${{ needs.prepare.outputs.version }}-Windows-x64-unsigned-attempt-${{ github.run_attempt }}
+          path: release-assets/windows/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Verify and publish immutable Latest Release
+    needs: [prepare, macos, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      SOURCE_COMMIT: ${{ needs.prepare.outputs.source_commit }}
+      SOURCE_TREE: ${{ needs.prepare.outputs.source_tree }}
+      SOURCE_VERSION: ${{ needs.prepare.outputs.version }}
+      RUN_PROVENANCE: yunspire-release-run:${{ github.run_id }}:${{ github.run_attempt }}:${{ needs.prepare.outputs.source_commit }}
+      YUNSPIRE_RELEASE_SOURCE_SHA: ${{ needs.prepare.outputs.source_commit }}
+    steps:
+      - name: Check out the locked release commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.prepare.outputs.source_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verify the locked source before any release write
+        run: |
+          set -euo pipefail
+          node scripts/verify-release-version.mjs source \
+            --source-commit "$SOURCE_COMMIT" \
+            --require-tag false \
+            --require-clean true
+          [[ "$(git rev-parse --verify 'HEAD^{tree}')" == "$SOURCE_TREE" ]]
+
+      - name: Download both verified platform artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: Yunspire-${{ needs.prepare.outputs.version }}-*-unsigned-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-assets
+          merge-multiple: true
+
+      - name: Verify checksums and converged manifests
+        run: |
+          set -euo pipefail
+          asset_root="$RUNNER_TEMP/release-assets"
+          expected_files=(
+            "Yunspire_${SOURCE_VERSION}_macOS-universal_unsigned.dmg"
+            "Yunspire_${SOURCE_VERSION}_macOS-universal_unsigned.dmg.sha256"
+            "Yunspire_${SOURCE_VERSION}_macOS-universal_unsigned.dmg.manifest.json"
+            "Yunspire_${SOURCE_VERSION}_Windows-x64_unsigned-setup.exe"
+            "Yunspire_${SOURCE_VERSION}_Windows-x64_unsigned-setup.exe.sha256"
+            "Yunspire_${SOURCE_VERSION}_Windows-x64_unsigned-setup.exe.manifest.json"
+          )
+          mapfile -t actual_files < <(find "$asset_root" -maxdepth 1 -type f -printf '%f\n' | sort)
+          [[ "${#actual_files[@]}" == "6" ]]
+          printf '%s\n' "${actual_files[@]}"
+          for expected in "${expected_files[@]}"; do
+            [[ -f "$asset_root/$expected" ]] || {
+              echo "Missing or unexpected release asset: $expected" >&2
+              exit 1
+            }
+          done
+          for checksum in "$asset_root"/*.sha256; do
+            (cd "$asset_root" && sha256sum --check "$(basename "$checksum")")
+          done
+          manifest_arguments=()
+          while IFS= read -r manifest; do
+            manifest_arguments+=(--manifest "$manifest")
+            jq -e '.signed == false and .signingMode == "unsigned"' "$manifest" >/dev/null
+          done < <(find "$asset_root" -maxdepth 1 -type f -name '*.manifest.json' -print | sort)
+          node scripts/verify-release-version.mjs manifests \
+            --tag "$RELEASE_TAG" \
+            --source-commit "$SOURCE_COMMIT" \
+            --source-tree "$SOURCE_TREE" \
+            "${manifest_arguments[@]}"
+
+      - name: Recheck remote main and release absence before writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node scripts/verify-release-version.mjs prepare \
+            --repository "$GITHUB_REPOSITORY" \
+            --release-branch "release/$RELEASE_TAG" \
+            --source-commit "$SOURCE_COMMIT"
+
+      - name: Create exact annotated tag and empty draft Release
+        id: create_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag_message="$(printf 'Yunspire %s release\n%s' "$SOURCE_VERSION" "$RUN_PROVENANCE")"
+          tag_object_sha="$(gh api \
+            --method POST \
+            "/repos/$GITHUB_REPOSITORY/git/tags" \
+            -f tag="$RELEASE_TAG" \
+            -f message="$tag_message" \
+            -f object="$SOURCE_COMMIT" \
+            -f type=commit \
+            --jq .sha)"
+          [[ "$tag_object_sha" =~ ^[0-9a-f]{40}$ ]]
+          gh api \
+            --method POST \
+            "/repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$RELEASE_TAG" \
+            -f sha="$tag_object_sha" >/dev/null
+          printf '%s\n' "$SOURCE_COMMIT" >"$RUNNER_TEMP/yunspire-$RELEASE_TAG-tag-created"
+          notes_path="$RUNNER_TEMP/yunspire-$RELEASE_TAG-release-notes.md"
+          printf '%s\n' \
+            "# Yunspire $SOURCE_VERSION" \
+            "" \
+            "This release is built from commit $SOURCE_COMMIT." \
+            "" \
+            "Both installers are intentionally unsigned. macOS Gatekeeper or Windows SmartScreen may show an operating-system security warning on first launch; verify the published SHA-256 checksum before proceeding." \
+            "" \
+            "The Windows installer uses a current-user install, silently embeds the complete offline WebView2 installer, has no language selector, and has no separate license page." \
+            "" \
+            "<!-- $RUN_PROVENANCE -->" \
+            >"$notes_path"
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$SOURCE_COMMIT" \
+            --title "Yunspire $SOURCE_VERSION" \
+            --notes-file "$notes_path" \
+            --draft \
+            --latest=false \
+            --verify-tag
+
+      - name: Fetch tag and verify the stable draft identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          node scripts/verify-release-version.mjs source \
+            --tag "$RELEASE_TAG" \
+            --source-commit "$SOURCE_COMMIT" \
+            --require-tag true \
+            --require-clean true
+          [[ "$(git rev-parse --verify 'HEAD^{tree}')" == "$SOURCE_TREE" ]]
+          node scripts/verify-release-version.mjs prepublish \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --source-commit "$SOURCE_COMMIT" \
+            --run-provenance "$RUN_PROVENANCE"
+
+      - name: Upload exact assets without clobbering
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          asset_root="$RUNNER_TEMP/release-assets"
+          expected_files=(
+            "Yunspire_${SOURCE_VERSION}_macOS-universal_unsigned.dmg"
+            "Yunspire_${SOURCE_VERSION}_macOS-universal_unsigned.dmg.sha256"
+            "Yunspire_${SOURCE_VERSION}_macOS-universal_unsigned.dmg.manifest.json"
+            "Yunspire_${SOURCE_VERSION}_Windows-x64_unsigned-setup.exe"
+            "Yunspire_${SOURCE_VERSION}_Windows-x64_unsigned-setup.exe.manifest.json"
+            "Yunspire_${SOURCE_VERSION}_Windows-x64_unsigned-setup.exe.sha256"
+          )
+          gh release upload "$RELEASE_TAG" "$asset_root"/* --repo "$GITHUB_REPOSITORY"
+          release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets)"
+          uploaded_count="$(jq '.assets | length' <<<"$release_json")"
+          [[ "$uploaded_count" == "6" ]]
+          for expected in "${expected_files[@]}"; do
+            remote_digest="$(jq -r --arg name "$expected" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
+            local_digest="$(sha256sum "$asset_root/$expected" | awk '{print $1}')"
+            [[ "$remote_digest" == "sha256:$local_digest" ]] || {
+              echo "Published asset digest mismatch for $expected" >&2
+              exit 1
+            }
+          done
+
+      - name: Publish the verified Release as Latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node scripts/verify-release-version.mjs prepublish \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --source-commit "$SOURCE_COMMIT" \
+            --run-provenance "$RUN_PROVENANCE"
+          gh release edit "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$SOURCE_COMMIT" \
+            --draft=false \
+            --prerelease=false \
+            --latest \
+            --verify-tag
+
+      - name: Verify the published Release is the current stable version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,targetCommitish,isDraft,isPrerelease,assets)"
+          jq -e \
+            --arg tag "$RELEASE_TAG" \
+            --arg commit "$SOURCE_COMMIT" \
+            '.tagName == $tag and .targetCommitish == $commit and .isDraft == false and .isPrerelease == false and (.assets | length) == 6' \
+            <<<"$release_json" >/dev/null
+          [[ "$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)" == "$RELEASE_TAG" ]]
+
+      - name: Clean up an incomplete draft Release after failure
+        if: ${{ failure() || cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_PROVENANCE: yunspire-release-run:${{ github.run_id }}:${{ github.run_attempt }}:${{ needs.prepare.outputs.source_commit }}
+        run: |
+          set -u
+          marker="$RUNNER_TEMP/yunspire-$RELEASE_TAG-tag-created"
+          [[ -f "$marker" ]] || {
+            echo "::warning::Skipping release cleanup because this run did not record creating $RELEASE_TAG"
+            exit 0
+          }
+          [[ "$(<"$marker")" == "$SOURCE_COMMIT" ]] || {
+            echo "::warning::Skipping release cleanup because the run marker does not match $SOURCE_COMMIT"
+            exit 0
+          }
+
+          release_probe="$RUNNER_TEMP/yunspire-$RELEASE_TAG-release-probe.json"
+          api_root="${GITHUB_API_URL:-https://api.github.com}"
+          if ! release_status="$(curl \
+            --silent \
+            --show-error \
+            --retry 2 \
+            --retry-all-errors \
+            --output "$release_probe" \
+            --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "$api_root/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"; then
+            echo "::warning::Unable to determine whether Release $RELEASE_TAG exists; leaving the tag and Release untouched"
+            exit 0
+          fi
+
+          if [[ "$release_status" == "200" ]]; then
+            is_draft="$(jq -r '.draft // false' "$release_probe")"
+            target_commitish="$(jq -r '.target_commitish // empty' "$release_probe")"
+            release_body="$(jq -r '.body // empty' "$release_probe")"
+            if [[ "$is_draft" != "true" ]]; then
+              echo "::warning::Release $RELEASE_TAG is already published; cleanup will not delete it or its tag"
+              exit 0
+            fi
+            if [[ "$target_commitish" != "$SOURCE_COMMIT" || "$release_body" != *"$RUN_PROVENANCE"* ]]; then
+              echo "::warning::Draft Release $RELEASE_TAG does not carry this run's exact provenance; cleanup skipped"
+              exit 0
+            fi
+
+            if ! ref_json="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" 2>/dev/null)"; then
+              echo "::warning::Unable to inspect this run's annotated tag; cleanup skipped"
+              exit 0
+            fi
+            ref_type="$(jq -r '.object.type // empty' <<<"$ref_json")"
+            ref_sha="$(jq -r '.object.sha // empty' <<<"$ref_json")"
+            if [[ "$ref_type" != "tag" || ! "$ref_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::warning::Tag $RELEASE_TAG is not this workflow's annotated tag; cleanup skipped"
+              exit 0
+            fi
+            if ! tag_json="$(gh api "/repos/$GITHUB_REPOSITORY/git/tags/$ref_sha" 2>/dev/null)"; then
+              echo "::warning::Unable to inspect this run's annotated tag object; cleanup skipped"
+              exit 0
+            fi
+            target_sha="$(jq -r '.object.sha // empty' <<<"$tag_json")"
+            tag_message="$(jq -r '.message // empty' <<<"$tag_json")"
+            if [[ "$target_sha" != "$SOURCE_COMMIT" || "$tag_message" != *"$RUN_PROVENANCE"* ]]; then
+              echo "::warning::Annotated tag $RELEASE_TAG does not carry this run's exact provenance; cleanup skipped"
+              exit 0
+            fi
+
+            if ! gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes; then
+              echo "::warning::Unable to delete this run's incomplete draft Release $RELEASE_TAG"
+              exit 1
+            fi
+            current_ref_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha' 2>/dev/null || true)"
+            if [[ "$current_ref_sha" != "$ref_sha" ]]; then
+              echo "::warning::Tag $RELEASE_TAG changed during cleanup; leaving it untouched"
+              exit 0
+            fi
+            if ! gh api --method DELETE "/repos/$GITHUB_REPOSITORY/git/refs/tags/$RELEASE_TAG" >/dev/null; then
+              echo "::warning::Unable to delete this run's incomplete annotated tag $RELEASE_TAG"
+              exit 1
+            fi
+            exit 0
+          fi
+
+          if [[ "$release_status" != "404" ]]; then
+            echo "::warning::GitHub returned HTTP $release_status while checking Release $RELEASE_TAG; cleanup skipped"
+            exit 0
+          fi
+
+          if ! ref_json="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" 2>/dev/null)"; then
+            echo "::warning::Unable to inspect tag $RELEASE_TAG after confirming that no Release exists; cleanup skipped"
+            exit 0
+          fi
+          ref_type="$(jq -r '.object.type // empty' <<<"$ref_json")"
+          ref_sha="$(jq -r '.object.sha // empty' <<<"$ref_json")"
+          if [[ "$ref_type" != "tag" || ! "$ref_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::warning::Tag $RELEASE_TAG is not this workflow's annotated tag; cleanup skipped"
+            exit 0
+          fi
+          if ! tag_json="$(gh api "/repos/$GITHUB_REPOSITORY/git/tags/$ref_sha" 2>/dev/null)"; then
+            echo "::warning::Unable to inspect annotated tag $RELEASE_TAG; cleanup skipped"
+            exit 0
+          fi
+          target_sha="$(jq -r '.object.sha // empty' <<<"$tag_json")"
+          tag_message="$(jq -r '.message // empty' <<<"$tag_json")"
+          if [[ "$target_sha" != "$SOURCE_COMMIT" || "$tag_message" != *"$RUN_PROVENANCE"* ]]; then
+            echo "::warning::Annotated tag $RELEASE_TAG does not carry this run's exact provenance; cleanup skipped"
+            exit 0
+          fi
+          current_ref_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha' 2>/dev/null || true)"
+          if [[ "$current_ref_sha" != "$ref_sha" ]]; then
+            echo "::warning::Tag $RELEASE_TAG changed during cleanup; leaving it untouched"
+            exit 0
+          fi
+          if ! gh api --method DELETE "/repos/$GITHUB_REPOSITORY/git/refs/tags/$RELEASE_TAG" >/dev/null; then
+            echo "::warning::Unable to delete this run's incomplete annotated tag $RELEASE_TAG"
+            exit 1
+          fi
+
+  cleanup_incomplete_release:
+    name: Recover an incomplete unpublished Release
+    needs: [prepare, publish]
+    if: ${{ always() && needs.prepare.result == 'success' && needs.publish.result != 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      SOURCE_COMMIT: ${{ needs.prepare.outputs.source_commit }}
+      RUN_PROVENANCE: yunspire-release-run:${{ github.run_id }}:${{ github.run_attempt }}:${{ needs.prepare.outputs.source_commit }}
+    steps:
+      - name: Remove only this run's unpublished draft or annotated tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          api_root="${GITHUB_API_URL:-https://api.github.com}"
+          release_probe="$RUNNER_TEMP/yunspire-$RELEASE_TAG-independent-release-probe.json"
+          if ! release_status="$(curl \
+            --silent \
+            --show-error \
+            --retry 2 \
+            --retry-all-errors \
+            --output "$release_probe" \
+            --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "$api_root/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"; then
+            echo "::warning::Unable to inspect Release $RELEASE_TAG after the publish job failed; cleanup skipped"
+            exit 0
+          fi
+
+          if [[ "$release_status" == "200" ]]; then
+            is_draft="$(jq -r '.draft // false' "$release_probe")"
+            target_commitish="$(jq -r '.target_commitish // empty' "$release_probe")"
+            release_body="$(jq -r '.body // empty' "$release_probe")"
+            if [[ "$is_draft" != "true" ]]; then
+              echo "::warning::Release $RELEASE_TAG is already published; independent cleanup will not modify it or its tag"
+              exit 0
+            fi
+            if [[ "$target_commitish" != "$SOURCE_COMMIT" || "$release_body" != *"$RUN_PROVENANCE"* ]]; then
+              echo "::warning::Draft Release $RELEASE_TAG does not carry this run's exact provenance; cleanup skipped"
+              exit 0
+            fi
+
+            if ! ref_json="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" 2>/dev/null)"; then
+              echo "::warning::Unable to inspect this run's annotated tag; independent cleanup skipped"
+              exit 0
+            fi
+            ref_type="$(jq -r '.object.type // empty' <<<"$ref_json")"
+            ref_sha="$(jq -r '.object.sha // empty' <<<"$ref_json")"
+            if [[ "$ref_type" != "tag" || ! "$ref_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::warning::Tag $RELEASE_TAG is not this workflow's annotated tag; independent cleanup skipped"
+              exit 0
+            fi
+            if ! tag_json="$(gh api "/repos/$GITHUB_REPOSITORY/git/tags/$ref_sha" 2>/dev/null)"; then
+              echo "::warning::Unable to inspect this run's annotated tag object; independent cleanup skipped"
+              exit 0
+            fi
+            target_sha="$(jq -r '.object.sha // empty' <<<"$tag_json")"
+            tag_message="$(jq -r '.message // empty' <<<"$tag_json")"
+            if [[ "$target_sha" != "$SOURCE_COMMIT" || "$tag_message" != *"$RUN_PROVENANCE"* ]]; then
+              echo "::warning::Annotated tag $RELEASE_TAG does not carry this run's exact provenance; independent cleanup skipped"
+              exit 0
+            fi
+
+            if ! gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes; then
+              echo "::warning::Unable to delete this run's incomplete draft Release $RELEASE_TAG"
+              exit 1
+            fi
+            current_ref_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha' 2>/dev/null || true)"
+            if [[ "$current_ref_sha" != "$ref_sha" ]]; then
+              echo "::warning::Tag $RELEASE_TAG changed during independent cleanup; leaving it untouched"
+              exit 0
+            fi
+            if ! gh api --method DELETE "/repos/$GITHUB_REPOSITORY/git/refs/tags/$RELEASE_TAG" >/dev/null; then
+              echo "::warning::Unable to delete this run's incomplete annotated tag $RELEASE_TAG"
+              exit 1
+            fi
+            exit 0
+          fi
+
+          if [[ "$release_status" != "404" ]]; then
+            echo "::warning::GitHub returned HTTP $release_status while checking Release $RELEASE_TAG; cleanup skipped"
+            exit 0
+          fi
+
+          if ! ref_json="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" 2>/dev/null)"; then
+            exit 0
+          fi
+          ref_type="$(jq -r '.object.type // empty' <<<"$ref_json")"
+          ref_sha="$(jq -r '.object.sha // empty' <<<"$ref_json")"
+          if [[ "$ref_type" != "tag" || ! "$ref_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::warning::Tag $RELEASE_TAG is not the annotated tag created by this workflow; cleanup skipped"
+            exit 0
+          fi
+          if ! tag_json="$(gh api "/repos/$GITHUB_REPOSITORY/git/tags/$ref_sha" 2>/dev/null)"; then
+            echo "::warning::Unable to inspect annotated tag $RELEASE_TAG; cleanup skipped"
+            exit 0
+          fi
+          target_sha="$(jq -r '.object.sha // empty' <<<"$tag_json")"
+          tag_message="$(jq -r '.message // empty' <<<"$tag_json")"
+          if [[ "$target_sha" != "$SOURCE_COMMIT" || "$tag_message" != *"$RUN_PROVENANCE"* ]]; then
+            echo "::warning::Annotated tag $RELEASE_TAG does not carry this run's exact provenance; cleanup skipped"
+            exit 0
+          fi
+          current_ref_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha' 2>/dev/null || true)"
+          if [[ "$current_ref_sha" != "$ref_sha" ]]; then
+            echo "::warning::Tag $RELEASE_TAG changed during independent cleanup; leaving it untouched"
+            exit 0
+          fi
+          if ! gh api --method DELETE "/repos/$GITHUB_REPOSITORY/git/refs/tags/$RELEASE_TAG" >/dev/null; then
+            echo "::warning::Unable to delete this run's incomplete annotated tag $RELEASE_TAG"
+            exit 1
+          fi

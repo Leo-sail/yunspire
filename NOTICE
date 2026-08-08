@@ -10,10 +10,12 @@ Copyright (c) 2026 Leo Chang. All rights reserved.
 操作系统框架、标准、API、商标或其他第三方组件。第三方内容
 仍属于各自权利人，并适用各自的许可证、条款和商标规则。
 
-Windows 安装包包含 Python Software Foundation 发布的官方 CPython
-3.13.7 x64 嵌入式运行时，用于执行云枢自研的第一方处理脚本。该运行时
-不是我的原创实现，适用其随包 `LICENSE.txt` 中的 PSF 许可；构建时会对
-官方归档执行固定 SHA-256 和发布校验值验证。
+macOS 通用安装包包含 Python Software Foundation 发布的官方 CPython
+3.13.7 universal2 framework，Windows 安装包包含官方 CPython 3.13.7 x64
+嵌入式运行时；两者都只用于执行云枢自研的第一方处理脚本。这些运行时
+不是我的原创实现，适用其随包 `LICENSE.txt` 中的 PSF 许可。构建时会对
+macOS 官方 pkg 执行固定 SHA-256、MD5、Developer ID Installer 与 notarization
+校验，并对 Windows 官方归档执行固定 SHA-256 和发布校验值验证。
 
 安装包还会在 `legal/THIRD_PARTY_NOTICES.txt` 中携带实际构建依赖声明的
 许可证、来源位置、锁文件完整性校验和包内许可正文。没有独立许可文件的
@@ -34,12 +36,14 @@ operating-system frameworks, standards, APIs, trademarks, and all other
 third-party components. Third-party materials remain the property of their
 respective rights holders and are governed by their own licenses and terms.
 
-The Windows installer contains the official CPython 3.13.7 x64 embeddable
-runtime published by the Python Software Foundation solely to execute
-Yunspire's first-party processing scripts. The runtime is not claimed as my
-work and remains governed by the PSF terms in its bundled `LICENSE.txt`.
-The build verifies the official archive with a pinned SHA-256 and release
-checksum before packaging it.
+The macOS universal installer contains the official CPython 3.13.7 universal2
+framework published by the Python Software Foundation, and the Windows
+installer contains the official CPython 3.13.7 x64 embeddable runtime. Both
+are included solely to execute Yunspire's first-party processing scripts.
+Neither runtime is claimed as my work; each remains governed by the PSF terms
+in its bundled `LICENSE.txt`. The build verifies the macOS pkg with a pinned
+SHA-256, MD5, Developer ID Installer, and notarization check, and verifies the
+Windows archive with a pinned SHA-256 and release checksum before packaging.
 
 Installers also include `legal/THIRD_PARTY_NOTICES.txt`, generated from the
 locked build dependencies with their declared licenses, source locations,

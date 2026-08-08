@@ -1694,7 +1694,7 @@ fn helper_script(app: &tauri::AppHandle, kind: &str) -> Result<PathBuf, String> 
     let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join(&relative_path);
-    if development.exists() {
+    if cfg!(debug_assertions) && development.exists() {
         return Ok(development);
     }
     let bundled = app
@@ -1711,18 +1711,54 @@ fn helper_script(app: &tauri::AppHandle, kind: &str) -> Result<PathBuf, String> 
     ))
 }
 
-fn python_executable(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+#[cfg(any(not(target_os = "macos"), debug_assertions))]
+fn configured_python_executable() -> Result<Option<PathBuf>, String> {
     if let Ok(configured) = env::var("YUNSPIRE_PYTHON") {
         if !configured.trim().is_empty() {
             let configured = PathBuf::from(configured);
             if configured.is_file() {
-                return Ok(configured);
+                return Ok(Some(configured));
             }
             return Err(format!(
                 "YUNSPIRE_PYTHON 指向的运行时不存在：{}",
                 configured.display()
             ));
         }
+    }
+    Ok(None)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_python_home(executable: &Path) -> Option<PathBuf> {
+    let home = executable.ancestors().nth(5)?.to_path_buf();
+    if home.join("Python").is_file() && home.join("lib").join("python3.13").is_dir() {
+        Some(home)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn validate_macos_python_runtime(executable: PathBuf, label: &str) -> Result<PathBuf, String> {
+    if !executable.is_file() {
+        return Err(format!(
+            "{label}缺少 Python launcher：{}",
+            executable.display()
+        ));
+    }
+    if macos_python_home(&executable).is_none() {
+        return Err(format!(
+            "{label}结构不完整，缺少 Python framework 或标准库：{}",
+            executable.display()
+        ));
+    }
+    Ok(executable)
+}
+
+fn python_executable(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    #[cfg(not(target_os = "macos"))]
+    if let Some(configured) = configured_python_executable()? {
+        return Ok(configured);
     }
     #[cfg(target_os = "windows")]
     {
@@ -1750,17 +1786,71 @@ fn python_executable(app: &tauri::AppHandle) -> Result<PathBuf, String> {
             bundled.display()
         ))
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        #[cfg(debug_assertions)]
+        if let Some(configured) = configured_python_executable()? {
+            return Ok(configured);
+        }
+        let relative = Path::new("runtime")
+            .join("python")
+            .join("Resources")
+            .join("Python.app")
+            .join("Contents")
+            .join("MacOS")
+            .join("Python");
+        let bundled = app
+            .path()
+            .resolve(&relative, BaseDirectory::Resource)
+            .map_err(|error| format!("无法定位云枢 macOS Python 运行时：{error}"))?;
+        #[cfg(not(debug_assertions))]
+        {
+            validate_macos_python_runtime(bundled, "云枢安装包内置 Python runtime")
+        }
+        #[cfg(debug_assertions)]
+        {
+            let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("yunspire-runtime")
+                .join("macos-python")
+                .join("Resources")
+                .join("Python.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("Python");
+            if development.is_file() {
+                return validate_macos_python_runtime(
+                    development,
+                    "本地构建的 macOS Python runtime",
+                );
+            }
+            if bundled.is_file() {
+                return validate_macos_python_runtime(bundled, "debug 应用内置 Python runtime");
+            }
+            let python_org = PathBuf::from(
+                "/Library/Frameworks/Python.framework/Versions/3.13/Resources/Python.app/Contents/MacOS/Python",
+            );
+            if python_org.is_file() {
+                return validate_macos_python_runtime(python_org, "本机 Python.org debug runtime");
+            }
+            // 仅 debug 开发模式保留系统/PATH fallback；release 二进制不会编译这些分支。
+            if Path::new("/usr/bin/python3").is_file() {
+                return Ok(PathBuf::from("/usr/bin/python3"));
+            }
+            Ok(PathBuf::from("python3"))
+        }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         let _ = app;
-        if Path::new("/usr/bin/python3").exists() {
+        if Path::new("/usr/bin/python3").is_file() {
             return Ok(PathBuf::from("/usr/bin/python3"));
         }
         Ok(PathBuf::from("python3"))
     }
 }
 
-fn configure_python_path(command: &mut Command) {
+fn configure_python_path(command: &mut Command, _python: &Path) {
     command.env("PYTHONDONTWRITEBYTECODE", "1");
     #[cfg(target_os = "windows")]
     {
@@ -1772,22 +1862,150 @@ fn configure_python_path(command: &mut Command) {
             .creation_flags(CREATE_NO_WINDOW);
     }
     #[cfg(target_os = "macos")]
-    if let Ok(home) = env::var("HOME") {
-        let user_site = Path::new(&home).join("Library/Python/3.9/lib/python/site-packages");
-        if user_site.exists() {
-            let joined = match env::var_os("PYTHONPATH") {
-                Some(existing) if !existing.is_empty() => {
-                    let mut paths = vec![user_site];
-                    paths.extend(env::split_paths(&existing));
-                    env::join_paths(paths).ok()
-                }
-                _ => env::join_paths([user_site]).ok(),
-            };
-            if let Some(value) = joined {
-                command.env("PYTHONPATH", value);
-            }
+    {
+        command
+            .env_remove("PYTHONHOME")
+            .env_remove("PYTHONPATH")
+            .env_remove("PYTHONUSERBASE")
+            .env_remove("PYTHONSTARTUP")
+            .env("PYTHONNOUSERSITE", "1")
+            .env("PYTHONSAFEPATH", "1")
+            .env("PYTHONUTF8", "1")
+            .env("PYTHONIOENCODING", "utf-8")
+            .env("SSL_CERT_FILE", "/etc/ssl/cert.pem");
+        if let Some(home) = macos_python_home(_python) {
+            command.env("PYTHONHOME", home);
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn configure_macos_native_helpers(command: &mut Command, script: &Path) -> Result<(), String> {
+    configure_macos_native_helpers_for_mode(command, script, cfg!(debug_assertions))
+}
+
+#[cfg(target_os = "macos")]
+fn configure_macos_native_helpers_for_mode(
+    command: &mut Command,
+    script: &Path,
+    development_mode: bool,
+) -> Result<(), String> {
+    let scripts_directory = script
+        .parent()
+        .ok_or_else(|| "macOS 采集脚本缺少父目录".to_string())?;
+    // PYTHONSAFEPATH prevents Python from trusting the process working directory
+    // or the invoking user's environment. Re-add only the selected bundled Skill
+    // directory so its reviewed sibling modules remain importable.
+    command.env("PYTHONPATH", scripts_directory);
+    let script_name = script.file_name().and_then(|value| value.to_str());
+    if script_name == Some("extract_document.py") {
+        let bundled_pdf = scripts_directory.join("bin").join("yunspire-pdf");
+        if !development_mode {
+            if !bundled_pdf.is_file() {
+                return Err(format!(
+                    "macOS 原生 PDF helper 未随安装包部署：{}；为避免触发 Command Line Tools，release 运行时不会调用 clang",
+                    bundled_pdf.display()
+                ));
+            }
+            command
+                .env("YUNSPIRE_MACOS_PDF_ADAPTER", bundled_pdf)
+                .env_remove("YUNSPIRE_MACOS_ALLOW_RUNTIME_COMPILE");
+            return Ok(());
+        }
+        let development_pdf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("yunspire-native")
+            .join("macos")
+            .join("yunspire-pdf");
+        let pdf = env::var_os("YUNSPIRE_MACOS_PDF_ADAPTER")
+            .map(PathBuf::from)
+            .filter(|value| value.is_file())
+            .or_else(|| bundled_pdf.is_file().then_some(bundled_pdf))
+            .or_else(|| development_pdf.is_file().then_some(development_pdf));
+        if let Some(pdf) = pdf {
+            command.env("YUNSPIRE_MACOS_PDF_ADAPTER", pdf);
+        }
+        command.env("YUNSPIRE_MACOS_ALLOW_RUNTIME_COMPILE", "1");
+        return Ok(());
+    }
+    if script_name != Some("extract_video.py") {
+        return Ok(());
+    }
+    let bundled_directory = scripts_directory.join("bin");
+    let bundled_media = bundled_directory.join("yunspire-media");
+    let bundled_speech_app = bundled_directory.join("Yunspire Speech Helper.app");
+    let bundled_speech_executable = bundled_speech_app
+        .join("Contents")
+        .join("MacOS")
+        .join("yunspire-speech");
+
+    if !development_mode {
+        let mut missing = Vec::new();
+        if !bundled_media.is_file() {
+            missing.push(bundled_media.display().to_string());
+        }
+        if !bundled_speech_app.is_dir() || !bundled_speech_executable.is_file() {
+            missing.push(bundled_speech_app.display().to_string());
+        }
+        if !missing.is_empty() {
+            return Err(format!(
+                "macOS 原生音视频 helper 未随安装包部署：{}；为避免触发 Command Line Tools，release 运行时不会调用 clang",
+                missing.join("；")
+            ));
+        }
+        command
+            .env("YUNSPIRE_MACOS_MEDIA_ADAPTER", &bundled_media)
+            .env("YUNSPIRE_MACOS_SPEECH_HELPER_APP", &bundled_speech_app)
+            .env_remove("YUNSPIRE_MACOS_ALLOW_RUNTIME_COMPILE");
+        return Ok(());
+    }
+
+    let development_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("yunspire-native")
+        .join("macos");
+    let development_media = development_directory.join("yunspire-media");
+    let development_speech_app = development_directory.join("Yunspire Speech Helper.app");
+    let development_speech_executable = development_speech_app
+        .join("Contents")
+        .join("MacOS")
+        .join("yunspire-speech");
+    let media = env::var_os("YUNSPIRE_MACOS_MEDIA_ADAPTER")
+        .map(PathBuf::from)
+        .filter(|value| value.is_file())
+        .or_else(|| bundled_media.is_file().then_some(bundled_media))
+        .or_else(|| development_media.is_file().then_some(development_media));
+    let speech_app = env::var_os("YUNSPIRE_MACOS_SPEECH_HELPER_APP")
+        .map(PathBuf::from)
+        .filter(|value| {
+            value.is_dir()
+                && value
+                    .join("Contents")
+                    .join("MacOS")
+                    .join("yunspire-speech")
+                    .is_file()
+        })
+        .or_else(|| {
+            (bundled_speech_app.is_dir() && bundled_speech_executable.is_file())
+                .then_some(bundled_speech_app)
+        })
+        .or_else(|| {
+            (development_speech_app.is_dir() && development_speech_executable.is_file())
+                .then_some(development_speech_app)
+        });
+    if let Some(media) = media {
+        command.env("YUNSPIRE_MACOS_MEDIA_ADAPTER", media);
+    }
+    if let Some(speech_app) = speech_app {
+        command.env("YUNSPIRE_MACOS_SPEECH_HELPER_APP", speech_app);
+    }
+    command.env("YUNSPIRE_MACOS_ALLOW_RUNTIME_COMPILE", "1");
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configure_macos_native_helpers(_command: &mut Command, _script: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -2067,7 +2285,8 @@ fn run_helper(
     let progress_file =
         NamedTempFile::new().map_err(|error| format!("无法创建采集技能进度暂存文件：{error}"))?;
     let mut command = Command::new(python);
-    configure_python_path(&mut command);
+    configure_python_path(&mut command, python);
+    configure_macos_native_helpers(&mut command, script)?;
     command.env("YUNSPIRE_PROGRESS_FILE", progress_file.path());
     #[cfg(target_os = "windows")]
     {

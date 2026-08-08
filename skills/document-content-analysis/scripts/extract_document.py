@@ -1391,6 +1391,18 @@ def _windows_pdf_adapter_path():
     return None
 
 
+def _macos_pdf_adapter_path():
+    configured = os.environ.get("YUNSPIRE_MACOS_PDF_ADAPTER", "").strip()
+    candidates = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.append(Path(__file__).with_name("bin") / "yunspire-pdf")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
 def _pdf_reference_id(source_sha256, page_number):
     identity = f"{source_sha256}\0page\0{page_number}"
     return "pdf-page-reference-" + hashlib.sha256(identity.encode()).hexdigest()[:24]
@@ -1607,14 +1619,21 @@ def extract_pdf(path, attachment_output_directory=None):
         return "", None, [], [], [
             "platform_pdf_adapter_unavailable: 当前平台没有云枢 PDF 原生适配器"
         ]
-    compiler = shutil.which("clang")
-    if not compiler:
-        return "", None, [], [], [
-            "macos_pdf_adapter_compiler_missing: 本机缺少 Apple clang 编译器"
-        ]
-    with tempfile.TemporaryDirectory() as temporary:
+    adapter = _macos_pdf_adapter_path()
+    temporary = None
+    if adapter is None:
+        if os.environ.get("YUNSPIRE_MACOS_ALLOW_RUNTIME_COMPILE") != "1":
+            return "", None, [], [], [
+                "macos_pdf_adapter_missing: macOS PDF 适配器未随安装包部署；为避免触发 Command Line Tools，云枢不会在用户设备上运行 clang"
+            ]
+        compiler = shutil.which("clang")
+        if not compiler:
+            return "", None, [], [], [
+                "macos_pdf_adapter_compiler_missing: 本机缺少 Apple clang 编译器"
+            ]
+        temporary = tempfile.TemporaryDirectory()
         source = Path(__file__).with_name("yunspire_pdf.m")
-        adapter = Path(temporary) / "yunspire-pdf"
+        adapter = Path(temporary.name) / "yunspire-pdf"
         build = _run_utf8_subprocess(
             [compiler, "-fobjc-arc", str(source), "-framework", "PDFKit", "-framework", "AppKit", "-framework", "Foundation", "-o", str(adapter)],
             timeout=120,
@@ -1623,6 +1642,7 @@ def extract_pdf(path, attachment_output_directory=None):
             return "", None, [], [], [
                 f"macos_pdf_adapter_build_failed:{build.stderr[-500:]}"
             ]
+    try:
         result = _run_utf8_subprocess([str(adapter), str(path)], timeout=180)
         if result.returncode != 0:
             return "", None, [], [], [
@@ -1640,6 +1660,9 @@ def extract_pdf(path, attachment_output_directory=None):
             payload.get("warnings", []),
             payload.get("errors", []),
         )
+    finally:
+        if temporary is not None:
+            temporary.cleanup()
 
 
 def empty_result(path, warning=None, error=None):

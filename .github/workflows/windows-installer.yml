@@ -1,4 +1,4 @@
-name: Windows x64 Installer
+name: Windows installer CI verification
 
 on:
   workflow_dispatch:
@@ -14,24 +14,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify-and-package:
-    name: Verify and package unsigned NSIS
+  verify-installer:
+    name: Build and smoke-test offline release NSIS (CI only)
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       CARGO_TERM_COLOR: always
       PYTHONIOENCODING: utf-8
       PYTHONUTF8: "1"
       RUST_BACKTRACE: "1"
+      YUNSPIRE_LICENSE_TARGETS: x86_64-pc-windows-msvc
     steps:
       - name: Check out source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Node.js 22
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
+
+      - name: Lock the CI source identity
+        id: identity
+        shell: pwsh
+        run: |
+          node scripts/verify-release-version.mjs source `
+            --source-commit $env:GITHUB_SHA `
+            --require-tag false `
+            --require-clean true `
+            --github-output $env:GITHUB_OUTPUT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Audit release source tree
         id: release_audit
@@ -59,20 +74,27 @@ jobs:
       - name: Verify official Python runtime and native helpers
         run: node scripts/verify-windows-release.mjs helpers
 
-      - name: Build unsigned Windows x64 NSIS installer
-        run: npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis --no-sign --ci
+      - name: Build unsigned Windows x64 NSIS with offline WebView2
+        run: >-
+          npm run tauri -- build
+          --target x86_64-pc-windows-msvc
+          --bundles nsis
+          --config src-tauri/tauri.release.conf.json
+          --no-sign
+          --ci
 
-      - name: Verify installed Unicode PDF, media, speech, and prepare checksums
+      - name: Verify bundled Unicode PDF, media, speech, and CI checksums
         env:
           YUNSPIRE_RELEASE_AUDIT_OUTCOME: ${{ steps.release_audit.outcome }}
           YUNSPIRE_LOCKED_DEPENDENCIES_OUTCOME: ${{ steps.locked_dependencies.outcome }}
           YUNSPIRE_PRODUCT_VERIFICATION_OUTCOME: ${{ steps.product_verification.outcome }}
         run: node scripts/verify-windows-release.mjs bundle
 
-      - name: Upload unsigned installer and checksums
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: Yunspire-${{ github.sha }}-Windows-x64-unsigned
-          path: artifacts/windows/*
-          if-no-files-found: error
-          retention-days: 14
+      - name: Perform a CI-only silent install and startup smoke test
+        shell: pwsh
+        run: >-
+          ./scripts/sign-windows.ps1
+          -Mode VerifyUnsignedInstaller
+          -ExpectedVersion "${{ steps.identity.outputs.version }}"
+          -ExpectedCommit "${{ steps.identity.outputs.source_commit }}"
+          -ExpectedTree "${{ steps.identity.outputs.source_tree }}"
