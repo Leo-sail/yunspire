@@ -4,7 +4,7 @@
 
 ### 支持版本
 
-我当前只为仓库默认分支上的最新版本提供安全修复。当前版本为 `0.1.2`。
+我当前只为仓库默认分支上的最新版本提供安全修复。当前版本为 `0.3.0`。
 
 ### 私下报告漏洞
 
@@ -28,7 +28,7 @@
 
 ### Supported version
 
-I currently provide security fixes only for the latest version on the repository's default branch. The current version is `0.1.2`.
+I currently provide security fixes only for the latest version on the repository's default branch. The current version is `0.3.0`.
 
 ### Private vulnerability reporting
 

@@ -1,4 +1,3 @@
-import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   appendFile,
@@ -12,9 +11,10 @@ import {
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
+import {
+  validateSourceIdentity,
+} from './verify-release-version.mjs';
 
-const execFileAsync = promisify(execFile);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const [command, ...argumentsList] = process.argv.slice(2);
 const windowsReleaseFiles = [
@@ -22,7 +22,9 @@ const windowsReleaseFiles = [
   'scripts/build-windows-python-runtime.mjs',
   'scripts/build-windows-native.mjs',
   'scripts/build-windows-media-helper.mjs',
+  'scripts/sign-windows.ps1',
   'scripts/verify-windows-release.mjs',
+  'src-tauri/tauri.release.conf.json',
   'src-tauri/tauri.windows.conf.json',
   'skills/document-content-analysis/scripts/yunspire_image_windows.cpp',
   'skills/document-content-analysis/scripts/yunspire_pdf_windows.cpp',
@@ -39,10 +41,6 @@ function option(name, { required = false, fallback } = {}) {
   return value;
 }
 
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 async function appendOutputs(values) {
   const outputPath = option('github-output', { fallback: process.env.GITHUB_OUTPUT });
   if (!outputPath) return;
@@ -50,43 +48,14 @@ async function appendOutputs(values) {
   await appendFile(outputPath, body, 'utf8');
 }
 
-async function readVersions() {
-  const [packageJson, packageLock, tauriConfig, cargoToml, changelog] = await Promise.all([
-    readFile(path.join(root, 'package.json'), 'utf8').then(JSON.parse),
-    readFile(path.join(root, 'package-lock.json'), 'utf8').then(JSON.parse),
-    readFile(path.join(root, 'src-tauri/tauri.conf.json'), 'utf8').then(JSON.parse),
-    readFile(path.join(root, 'src-tauri/Cargo.toml'), 'utf8'),
-    readFile(path.join(root, 'CHANGELOG.md'), 'utf8'),
-  ]);
-  const cargoVersion = cargoToml.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
-  const version = packageJson.version;
-  const versions = {
-    'package.json': version,
-    'package-lock.json': packageLock.version,
-    'package-lock.json root package': packageLock.packages?.['']?.version,
-    'src-tauri/tauri.conf.json': tauriConfig.version,
-    'src-tauri/Cargo.toml': cargoVersion,
-  };
-  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
-    throw new Error(`unsupported release version: ${version}`);
-  }
-  const mismatches = Object.entries(versions).filter(([, value]) => value !== version);
-  if (mismatches.length) {
-    throw new Error(`release version mismatch: ${JSON.stringify(versions)}`);
-  }
-  if (!new RegExp(`^### ${escapeRegExp(version)} (?:-|$)`, 'm').test(changelog)) {
-    throw new Error(`CHANGELOG.md has no release section for ${version}`);
-  }
-  return version;
-}
-
 async function verifySource() {
-  const version = await readVersions();
-  const expectedTag = `v${version}`;
-  const suppliedTag = option('tag');
-  if (suppliedTag && suppliedTag !== expectedTag) {
-    throw new Error(`release tag ${suppliedTag} does not match source version ${expectedTag}`);
-  }
+  const identity = await validateSourceIdentity({
+    root,
+    suppliedTag: option('tag'),
+    expectedCommit: option('source-commit'),
+    requireTag: option('require-tag', { fallback: 'false' }) === 'true',
+    requireClean: option('require-clean', { fallback: 'false' }) === 'true',
+  });
   if (option('require-windows', { fallback: 'false' }) === 'true') {
     const missing = [];
     for (const relativePath of windowsReleaseFiles) {
@@ -107,18 +76,13 @@ async function verifySource() {
       throw new Error(`Windows release prerequisites are missing: ${missing.join(', ')}`);
     }
   }
-  await appendOutputs({ version, tag: expectedTag });
-  console.log(`RELEASE_SOURCE_OK version=${version} tag=${expectedTag}`);
-}
-
-async function readCommit() {
-  if (process.env.GITHUB_SHA) return process.env.GITHUB_SHA;
-  try {
-    const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' });
-    return stdout.trim();
-  } catch {
-    return null;
-  }
+  await appendOutputs({
+    version: identity.version,
+    tag: identity.tag,
+    source_commit: identity.sourceCommit,
+    source_tree: identity.sourceTree,
+  });
+  console.log(`RELEASE_SOURCE_OK version=${identity.version} tag=${identity.tag} commit=${identity.sourceCommit} tree=${identity.sourceTree}`);
 }
 
 async function sha256(filePath) {
@@ -159,7 +123,14 @@ async function verifyArtifact() {
   const signedValue = option('signed', { fallback: 'false' });
   if (!['true', 'false'].includes(signedValue)) throw new Error('--signed must be true or false');
   const signed = signedValue === 'true';
-  const version = await readVersions();
+  const identity = await validateSourceIdentity({
+    root,
+    suppliedTag: option('tag'),
+    expectedCommit: option('source-commit'),
+    requireTag: option('require-tag', { fallback: process.env.GITHUB_ACTIONS === 'true' ? 'true' : 'false' }) === 'true',
+    requireClean: option('require-clean', { fallback: 'true' }) === 'true',
+  });
+  const version = identity.version;
   const inputStat = await stat(inputPath);
   if (!inputStat.isFile() || inputStat.size < 1024 * 1024) {
     throw new Error(`release artifact is missing or unexpectedly small: ${inputPath}`);
@@ -184,21 +155,35 @@ async function verifyArtifact() {
 
   const manifestPath = `${artifactPath}.manifest.json`;
   const manifest = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     product: 'Yunspire',
     version,
+    tag: identity.tag,
     platform,
     architecture: platform === 'macos' ? ['arm64', 'x86_64'] : ['x86_64'],
     signed,
+    signingMode: signed ? 'signed' : 'unsigned',
     file: artifactName,
     bytes: inputStat.size,
     sha256: checksum,
-    sourceCommit: await readCommit(),
+    sourceCommit: identity.sourceCommit,
+    sourceTree: identity.sourceTree,
+    repository: process.env.GITHUB_REPOSITORY || 'Leo-sail/yunspire',
+    workflowRunId: process.env.GITHUB_RUN_ID || null,
+    workflowRunAttempt: process.env.GITHUB_RUN_ATTEMPT || null,
     createdAt: new Date().toISOString(),
   };
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-  await appendOutputs({ artifact_path: artifactPath, checksum_path: checksumPath, manifest_path: manifestPath });
-  console.log(`RELEASE_ARTIFACT_OK platform=${platform} file=${artifactName} sha256=${checksum}`);
+  await appendOutputs({
+    artifact_path: artifactPath,
+    checksum_path: checksumPath,
+    manifest_path: manifestPath,
+    version,
+    tag: identity.tag,
+    source_commit: identity.sourceCommit,
+    source_tree: identity.sourceTree,
+  });
+  console.log(`RELEASE_ARTIFACT_OK platform=${platform} file=${artifactName} sha256=${checksum} commit=${identity.sourceCommit} tree=${identity.sourceTree}`);
 }
 
 try {

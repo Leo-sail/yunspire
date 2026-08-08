@@ -13,7 +13,8 @@ const runtimeBundlePath = resolve(creationRoot, "catalog/runtime-bundle.json");
 const writingResourcesPath = resolve(creationRoot, "catalog/writing-resources.json");
 
 const CATALOG_VERSION = "0.4.0";
-const RUNTIME_VERSION = "0.1.2";
+const RUNTIME_VERSION = "0.3.0";
+const MIN_RUNTIME_VERSION = "0.1.2";
 const REPOSITORY = "https://github.com/Leo-sail/yunspire";
 
 function assert(condition, message) {
@@ -339,7 +340,7 @@ function legacyTheme(seed, componentIds) {
     compatibility: {
       targets: ["markdown", "html", "wechatRichText"],
       wechatCertification: "legacyCompatible",
-      minRuntimeVersion: RUNTIME_VERSION,
+      minRuntimeVersion: MIN_RUNTIME_VERSION,
     },
     source: {
       policy: "yunspire_first_party",
@@ -405,7 +406,7 @@ function generatedTheme(family, variant, componentIds) {
     compatibility: {
       targets: ["markdown", "html", "wechatRichText"],
       wechatCertification: "candidate",
-      minRuntimeVersion: RUNTIME_VERSION,
+      minRuntimeVersion: MIN_RUNTIME_VERSION,
     },
     source: sourceFor("theme"),
     license: licenseFor("theme manifest and rendering tokens"),
@@ -548,7 +549,7 @@ function componentManifest(seed) {
     },
     compatibility: {
       targets: ["markdown", "html", "wechatRichText"],
-      minRuntimeVersion: RUNTIME_VERSION,
+      minRuntimeVersion: MIN_RUNTIME_VERSION,
     },
     source: sourceFor("component"),
     license: licenseFor("component manifest and Markdown block"),
@@ -1100,7 +1101,7 @@ function templateManifest(seed, markdown) {
       allowExternalScripts: false,
     },
     compatibility: {
-      minRuntimeVersion: RUNTIME_VERSION,
+      minRuntimeVersion: MIN_RUNTIME_VERSION,
       previewMode: "sandboxedIframe",
     },
     source: sourceFor("template"),

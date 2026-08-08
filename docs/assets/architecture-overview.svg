@@ -6,7 +6,7 @@
 
   <g font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Segoe UI', sans-serif" letter-spacing="0">
     <text x="80" y="96" fill="#193747" font-size="34" font-weight="700">云枢系统架构</text>
-    <text x="80" y="130" fill="#4D6573" font-size="18">Yunspire local-first system architecture · v0.1.2</text>
+    <text x="80" y="130" fill="#4D6573" font-size="18">Yunspire local-first system architecture · v0.3.0</text>
     <rect x="1320" y="76" width="184" height="42" rx="8" fill="#DCEAF2" stroke="#B9CBD5"/>
     <text x="1412" y="103" fill="#305D77" font-size="16" font-weight="650" text-anchor="middle">LOCAL FIRST</text>
 

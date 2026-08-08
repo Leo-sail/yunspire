@@ -1,0 +1,15 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "build": {
+    "beforeBuildCommand": "node scripts/build-macos-python-runtime.mjs && node scripts/build-macos-native.mjs && npm run build"
+  },
+  "bundle": {
+    "resources": {
+      "target/yunspire-runtime/macos-python/": "runtime/python/",
+      "target/yunspire-native/macos/yunspire-media": "skills/video-content-analysis/scripts/bin/yunspire-media",
+      "target/yunspire-native/macos/yunspire-pdf": "skills/document-content-analysis/scripts/bin/yunspire-pdf",
+      "target/yunspire-native/macos/Yunspire Speech Helper.app/": "skills/video-content-analysis/scripts/bin/Yunspire Speech Helper.app/",
+      "target/yunspire-native/macos/helpers-manifest.json": "skills/video-content-analysis/scripts/bin/yunspire-macos-helpers.json"
+    }
+  }
+}

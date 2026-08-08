@@ -12,7 +12,7 @@ body:
     id: version
     attributes:
       label: 云枢版本 / Yunspire version
-      placeholder: 0.1.2
+      placeholder: 0.3.0
     validations:
       required: true
   - type: input

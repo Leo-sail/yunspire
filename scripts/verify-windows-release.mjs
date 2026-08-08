@@ -17,9 +17,12 @@ const root = resolve(import.meta.dirname, '..');
 const nativeDirectory = join(root, 'src-tauri', 'target', 'yunspire-native');
 const runtimeDirectory = join(root, 'src-tauri', 'target', 'yunspire-runtime', 'python');
 const artifactDirectory = join(root, 'artifacts', 'windows');
+const baseConfigPath = join(root, 'src-tauri', 'tauri.conf.json');
 const windowsConfigPath = join(root, 'src-tauri', 'tauri.windows.conf.json');
+const releaseConfigPath = join(root, 'src-tauri', 'tauri.release.conf.json');
 const packagePath = join(root, 'package.json');
 const EXPECTED_PYTHON_LICENSE_SHA256 = '62bec384df47b0328307db41455ff6ea2559e5546b394ac69148561b21703120';
+const MINIMUM_OFFLINE_INSTALLER_SIZE = 100 * 1024 * 1024;
 const helperResources = [
   {
     source: 'target/yunspire-native/yunspire_pdf_windows.exe',
@@ -531,7 +534,63 @@ async function verifyRuntime(resources) {
   return { path: python, license, manifest };
 }
 
+async function verifyInstallerConfiguration() {
+  const fragments = await Promise.all([baseConfigPath, windowsConfigPath, releaseConfigPath]
+    .map((file) => readFile(file, 'utf8').then(JSON.parse)));
+  const mergeConfig = (base, overlay) => {
+    if (!overlay || typeof overlay !== 'object' || Array.isArray(overlay)) return overlay;
+    const merged = { ...base };
+    for (const [key, value] of Object.entries(overlay)) {
+      merged[key] = value && typeof value === 'object' && !Array.isArray(value)
+        ? mergeConfig(merged[key] || {}, value)
+        : value;
+    }
+    return merged;
+  };
+  const releaseConfig = fragments.reduce(mergeConfig, {});
+  const bundle = releaseConfig.bundle || {};
+  const windows = bundle.windows || {};
+  const nsis = windows.nsis || {};
+  const languages = Array.isArray(nsis.languages) ? nsis.languages : [];
+  if (bundle.licenseFile !== null) {
+    throw new Error('Windows 发布安装器不得增加独立许可页');
+  }
+  if (windows.allowDowngrades !== false) {
+    throw new Error('Windows 发布安装器必须禁止降级');
+  }
+  if (windows.webviewInstallMode?.type !== 'offlineInstaller'
+    || windows.webviewInstallMode?.silent !== true) {
+    throw new Error('Windows 发布安装器必须静默内置完整 WebView2 离线安装程序');
+  }
+  if (windows.signCommand != null) {
+    throw new Error('Windows 无签名发布不得配置签名命令');
+  }
+  if (nsis.installMode !== 'currentUser') {
+    throw new Error('Windows NSIS 必须使用 currentUser 安装模式');
+  }
+  if (nsis.displayLanguageSelector !== false) {
+    throw new Error('Windows NSIS 必须关闭语言选择器');
+  }
+  if (languages.length !== 2 || languages[0] !== 'SimpChinese' || languages[1] !== 'English') {
+    throw new Error('Windows NSIS 语言必须依次为 SimpChinese、English');
+  }
+  for (const property of ['template', 'installerHooks', 'startMenuFolder']) {
+    if (nsis[property] != null) {
+      throw new Error(`Windows NSIS ${property} 必须保持未设置，避免自定义或不必要页面`);
+    }
+  }
+  return {
+    installMode: 'currentUser',
+    webview2InstallMode: 'offlineInstaller',
+    webview2Silent: true,
+    languageSelector: false,
+    licensePage: false,
+    signed: false,
+  };
+}
+
 async function verifyHelpers() {
+  const installerConfiguration = await verifyInstallerConfiguration();
   const windowsConfig = JSON.parse(await readFile(windowsConfigPath, 'utf8'));
   const resources = windowsConfig.bundle?.resources || {};
   const files = [];
@@ -563,8 +622,9 @@ async function verifyHelpers() {
     await rm(pdfSmokeDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
   }
   const runtime = await verifyRuntime(resources);
-  console.log(JSON.stringify({
+  const verification = {
     schema: 'yunspire.windows-build-inputs.v1',
+    installerConfiguration,
     helpers: files,
     mediaSmoke,
     pdfSmoke: {
@@ -572,7 +632,9 @@ async function verifyHelpers() {
       jpegByteLength: pdfSmoke.jpegByteLength,
     },
     python: { path: runtime.path, version: runtime.manifest.version, sha256: runtime.manifest.archiveSha256 },
-  }));
+  };
+  console.log(JSON.stringify(verification));
+  return verification;
 }
 
 async function findInstaller() {
@@ -785,12 +847,14 @@ async function verifyInstalledBundle(installer) {
 }
 
 async function packageBundle() {
-  await verifyHelpers();
+  const buildInputs = await verifyHelpers();
   const installer = await findInstaller();
   await assertPortableExecutable(installer);
   assertAuthenticodeNotSigned(installer, 'NSIS 安装器');
   const installerSize = await fileSize(installer);
-  if (installerSize < 1024 * 1024) throw new Error(`NSIS 安装器大小异常：${installerSize}`);
+  if (installerSize < MINIMUM_OFFLINE_INSTALLER_SIZE) {
+    throw new Error(`NSIS 安装器不足 100 MiB，未证明内置完整 WebView2 离线运行时：${installerSize}`);
+  }
   const installedVerification = await verifyInstalledBundle(installer);
 
   const packageJson = JSON.parse(await readFile(packagePath, 'utf8'));
@@ -843,6 +907,7 @@ async function packageBundle() {
       productVerification: workflowGate('YUNSPIRE_PRODUCT_VERIFICATION_OUTCOME'),
       helperVerification: true,
       nsisInstaller: true,
+      installerConfiguration: buildInputs.installerConfiguration,
       installerAuthenticodeStatus: 'NotSigned',
     },
     installedVerification,

@@ -1,6 +1,6 @@
 [package]
 name = "yunspire"
-version = "0.1.2"
+version = "0.3.0"
 description = "Yunspire local-first self-growing personal knowledge hub"
 authors = ["Leo Chang <leochang210@gmail.com>"]
 license-file = "../LICENSE"

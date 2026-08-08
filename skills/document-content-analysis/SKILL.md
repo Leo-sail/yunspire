@@ -5,7 +5,7 @@ description: Use Yunspire-owned standard-library OOXML and Markdown parsers plus
 
 # 多格式文档内容分析
 
-使用 `scripts/extract_document.py` 按扩展名解析本地文件。解析失败必须保留文件级错误并阻止伪成功。DOCX、XLSX、PPTX、TXT 和 Markdown 使用纯 Python 标准库解析。PDF 在 macOS 调用 PDFKit，在 Windows 调用系统 `Windows.Data.Pdf`；Windows 适配器由云枢源代码在打包阶段使用 MSVC/Windows SDK 构建，用户无需安装第三方 PDF 工具或运行库。
+使用 `scripts/extract_document.py` 按扩展名解析本地文件。解析失败必须保留文件级错误并阻止伪成功。DOCX、XLSX、PPTX、TXT 和 Markdown 使用纯 Python 标准库解析。PDF 在 macOS 调用 PDFKit，在 Windows 调用系统 `Windows.Data.Pdf`；两端原生适配器都由云枢源代码在打包阶段预编译并随安装包部署，用户无需安装编译工具、第三方 PDF 工具或运行库。
 
 ## 工作流
 

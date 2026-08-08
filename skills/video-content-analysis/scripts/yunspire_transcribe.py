@@ -82,9 +82,25 @@ def windows_speech_adapter():
     return None
 
 
+def macos_speech_helper_app():
+    configured = os.environ.get("YUNSPIRE_MACOS_SPEECH_HELPER_APP", "").strip()
+    candidates = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.append(Path(__file__).with_name("bin") / "Yunspire Speech Helper.app")
+    for candidate in candidates:
+        executable = candidate / "Contents" / "MacOS" / "yunspire-speech"
+        info_plist = candidate / "Contents" / "Info.plist"
+        if candidate.is_dir() and executable.is_file() and info_plist.is_file():
+            return candidate.resolve()
+    return None
+
+
 def compile_speech_adapter(source, target):
     if sys.platform != "darwin":
         return False, "当前平台不支持云枢本地语音适配器：该适配器依赖 macOS Speech Framework"
+    if os.environ.get("YUNSPIRE_MACOS_ALLOW_RUNTIME_COMPILE") != "1":
+        return False, "macOS 语音适配器未随安装包部署；为避免触发 Command Line Tools，云枢不会在用户设备上运行 clang"
     import shutil
     compiler = shutil.which("clang")
     if not compiler:
@@ -144,18 +160,26 @@ def main():
     else:
         owned_temp = tempfile.TemporaryDirectory()
         work_dir = Path(owned_temp.name)
-    source = Path(__file__).with_name("yunspire_speech.m")
-    adapter = work_dir / "Yunspire Speech Helper.app" / "Contents" / "MacOS" / "yunspire-speech"
-    compiled, detail = compile_speech_adapter(source, adapter)
-    if not compiled:
+    app_bundle = macos_speech_helper_app() if sys.platform == "darwin" else None
+    detail = ""
+    if app_bundle is None:
+        source = Path(__file__).with_name("yunspire_speech.m")
+        adapter = work_dir / "Yunspire Speech Helper.app" / "Contents" / "MacOS" / "yunspire-speech"
+        compiled, detail = compile_speech_adapter(source, adapter)
+        if compiled:
+            app_bundle = adapter.parents[2]
+    if app_bundle is None:
         error = (
             "platform_speech_transcription_unavailable"
             if sys.platform != "darwin"
-            else "speech_adapter_build_failed"
+            else (
+                "speech_adapter_build_failed"
+                if os.environ.get("YUNSPIRE_MACOS_ALLOW_RUNTIME_COMPILE") == "1"
+                else "macos_speech_adapter_missing"
+            )
         )
         emit({"transcript": "", "segments": [], "warnings": [detail], "errors": [error]})
         return
-    app_bundle = adapter.parents[2]
     result_path = work_dir / "speech-result.json"
     result_path.unlink(missing_ok=True)
     result = run([
