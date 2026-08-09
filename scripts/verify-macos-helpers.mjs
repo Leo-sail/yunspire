@@ -15,6 +15,7 @@ import {
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import process from 'node:process';
+import { verifyPackagedPrivacy } from './verify-packaged-privacy.mjs';
 
 if (process.platform !== 'darwin') {
   throw new Error('macOS helper 核验只能在 macOS 构建机上执行');
@@ -32,6 +33,8 @@ const PYTHON_EXECUTABLE = 'Resources/Python.app/Contents/MacOS/Python';
 const PYTHON_FRAMEWORK_BINARY = 'Python';
 const PYTHON_SYSTEM_CERTIFICATE = '/etc/ssl/cert.pem';
 const EXPECTED_ARCHITECTURES = ['arm64', 'x86_64'];
+const PYTHON_BUILD_PATH_POLICY = 'no-absolute-user-build-paths-v1';
+const PYTHON_PRUNED_TEST_MODULES = ['_ctypes_test', 'xxsubtype'];
 
 const root = resolve(import.meta.dirname, '..');
 const outputDirectory = join(root, 'src-tauri', 'target', 'yunspire-native', 'macos');
@@ -244,6 +247,7 @@ async function verifyPythonRuntime(directory, label) {
     frameworkBinary: PYTHON_FRAMEWORK_BINARY,
     relocationPrefix: PYTHON_RELOCATION_PREFIX,
     certificateFile: PYTHON_SYSTEM_CERTIFICATE,
+    buildPathPolicy: PYTHON_BUILD_PATH_POLICY,
     builderSha256: expectedBuilderSha256,
   };
   for (const [key, value] of Object.entries(expected)) {
@@ -251,6 +255,9 @@ async function verifyPythonRuntime(directory, label) {
   }
   if (JSON.stringify(manifest.architectures) !== JSON.stringify(EXPECTED_ARCHITECTURES)) {
     throw new Error(`${label} manifest 架构无效：${JSON.stringify(manifest.architectures)}`);
+  }
+  if (JSON.stringify(manifest.prunedTestModules) !== JSON.stringify(PYTHON_PRUNED_TEST_MODULES)) {
+    throw new Error(`${label} manifest 测试模块裁剪清单无效：${JSON.stringify(manifest.prunedTestModules)}`);
   }
   if (manifest.sourceSignature?.signer !== 'Developer ID Installer: Python Software Foundation (BMM5U3QVKW)'
     || manifest.sourceSignature?.notarization !== 'trusted') {
@@ -291,6 +298,17 @@ async function verifyPythonRuntime(directory, label) {
   if (metrics.symlinkCount !== 0) {
     throw new Error(`${label}仍含有会被 Tauri 解引用的符号链：${metrics.symlinkCount}`);
   }
+  const dynamicDirectory = join(directory, 'lib', 'python3.13', 'lib-dynload');
+  const dynamicEntries = await readdir(dynamicDirectory);
+  for (const moduleName of PYTHON_PRUNED_TEST_MODULES) {
+    if (dynamicEntries.some((entry) => entry.startsWith(`${moduleName}.`) || entry === moduleName)) {
+      throw new Error(`${label}仍含有测试扩展：${moduleName}`);
+    }
+  }
+  if (await stat(join(directory, 'lib', 'python3.13', 'venv')).catch(() => null)) {
+    throw new Error(`${label}仍含有不可用的 venv 模块`);
+  }
+  await verifyPackagedPrivacy(directory, { platform: 'macos-python-runtime' });
   if (manifest.pythonExecutableSmoke?.version !== PYTHON_VERSION
     || manifest.pythonExecutableSmoke?.arbitraryPathVerified !== true
     || manifest.pythonExecutableSmoke?.certificateFile !== PYTHON_SYSTEM_CERTIFICATE) {
@@ -304,7 +322,7 @@ async function smokeInstalledDocumentCapture(application, pythonDirectory) {
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'yunspire-installed-capture-'));
   try {
     const source = join(temporaryRoot, '云枢安装后采集冒烟.txt');
-    const marker = 'Yunspire installed capture smoke v0.3.0';
+    const marker = 'Yunspire installed capture smoke v0.4.0';
     await writeFile(source, `${marker}\n`, 'utf8');
     const executable = join(pythonDirectory, PYTHON_EXECUTABLE);
     const script = join(
@@ -436,7 +454,6 @@ for (const [needle, label] of [
   ['YUNSPIRE_MACOS_PDF_ADAPTER', 'Rust PDF helper 注入'],
   ['YUNSPIRE_MACOS_ALLOW_RUNTIME_COMPILE', 'Rust debug fallback 门禁'],
   ['cfg!(debug_assertions)', 'Rust release/debug 分流'],
-  ['if cfg!(debug_assertions) && development.exists()', 'Rust release 资源脚本强制门禁'],
   ['join("macos-python")', 'Rust 本地内置 Python runtime'],
   ['云枢安装包内置 Python runtime', 'Rust release Python 硬失败'],
   ['#[cfg(not(debug_assertions))]', 'Rust release 不编译 debug fallback'],
@@ -447,6 +464,13 @@ for (const [needle, label] of [
   ['PYTHONSAFEPATH', 'Rust Python 安全路径'],
   ['SSL_CERT_FILE', 'Rust macOS CA 路径'],
 ]) assertContains(capturePipeline, needle, label);
+const manifestDirectoryReferences = capturePipeline.match(/env!\("CARGO_MANIFEST_DIR"\)/gu)?.length || 0;
+const debugGatedManifestDirectoryReferences = capturePipeline
+  .match(/#\[cfg\(debug_assertions\)\][\s\S]{0,400}?env!\("CARGO_MANIFEST_DIR"\)/gu)?.length || 0;
+if (manifestDirectoryReferences === 0
+  || manifestDirectoryReferences !== debugGatedManifestDirectoryReferences) {
+  throw new Error(`Rust CARGO_MANIFEST_DIR 引用没有全部隔离在 debug 构建：${debugGatedManifestDirectoryReferences}/${manifestDirectoryReferences}`);
+}
 if (capturePipeline.includes('Library/Python/3.9/lib/python/site-packages')) {
   throw new Error('Rust 仍向 macOS 用户 Python 3.9 site-packages 注入路径');
 }
@@ -470,6 +494,7 @@ if (installedApp) {
     || installedPythonManifest.builderSha256 !== builtPythonManifest.builderSha256) {
     throw new Error('安装后 macOS Python runtime 与当前选定的构建产物不一致');
   }
+  await verifyPackagedPrivacy(installedApp, { platform: 'macos' });
   await smokeInstalledDocumentCapture(installedApp, installedRuntime);
 }
 

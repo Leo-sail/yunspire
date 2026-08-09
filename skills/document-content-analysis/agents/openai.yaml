@@ -1,0 +1,4 @@
+interface:
+  display_name: "文档内容分析"
+  short_description: "提取并分析 Office、PDF、Markdown、图片和文件夹内容"
+  default_prompt: "使用 $document-content-analysis 保真提取这些文档，并准备可审计的知识库入库结果。"

@@ -110,7 +110,7 @@ export function normalizeThemeManifest(value, index = 0) {
   const manifest = {
     schemaVersion: '1.0',
     manifestType: 'theme',
-    catalogVersion: stringValue(source.catalogVersion, '0.3.0', 40),
+    catalogVersion: stringValue(source.catalogVersion, '0.4.0', 40),
     id,
     version: stringValue(source.version, '1.0.0', 40).includes('.') ? stringValue(source.version, '1.0.0', 40) : `${stringValue(source.version, '1')}.0.0`,
     displayName: stringValue(source.displayName || source.name, id, 80),
@@ -148,7 +148,7 @@ export function normalizeThemeManifest(value, index = 0) {
         ? uniqueStrings(source.compatibility.targets, 3).filter((item) => ['markdown', 'html', 'wechatRichText'].includes(item))
         : ['markdown', 'html', 'wechatRichText'],
       wechatCertification: ['notApplicable', 'legacyCompatible', 'candidate', 'certified'].includes(certification) ? certification : 'candidate',
-      minRuntimeVersion: stringValue(source.compatibility?.minRuntimeVersion, '0.3.0', 40),
+      minRuntimeVersion: stringValue(source.compatibility?.minRuntimeVersion, '0.4.0', 40),
     },
     source: { ...FIRST_PARTY_SOURCE, ...(isRecord(source.source) ? source.source : {}) },
     license: { ...FIRST_PARTY_LICENSE, ...(isRecord(source.license) ? source.license : {}) },

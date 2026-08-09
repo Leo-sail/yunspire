@@ -993,7 +993,7 @@ def download_external_image(source_url, output_root, remaining_bytes):
         raise ImageLocalizationError("aggregate_byte_budget_exceeded", "网页图片累计响应超过 1 GB 安全边界")
     redirect_chain = []
     request = Request(source_url, headers={
-        "User-Agent": "Yunspire/0.1 local knowledge capture",
+        "User-Agent": "Yunspire/0.4.0 local knowledge capture",
         "Accept": "image/avif,image/webp,image/png,image/jpeg,image/gif,image/*;q=0.8",
         "Accept-Encoding": "identity",
     })
@@ -1291,11 +1291,26 @@ def localize_references(markdown, references, output_root):
     return markdown, list(localized_assets.values()), failures, unique_results, bytes_downloaded
 
 
-def authorization_output(parsed, source_url, status):
+def empty_localization_summary():
     return {
-        "title": parsed.netloc,
+        "external_asset_count": 0,
+        "localized_asset_count": 0,
+        "failed_asset_count": 0,
+        "reference_count": 0,
+        "localized_reference_count": 0,
+        "failed_reference_count": 0,
+        "all_external_images_localized": True,
+    }
+
+
+def failure_output(source_url, code, message, metadata=None, auth_required=False):
+    parsed = urlparse(source_url)
+    content_markdown = ""
+    return {
+        "title": parsed.netloc or "网页内容",
         "source_url": source_url,
-        "content_markdown": "",
+        "final_url": "",
+        "content_markdown": content_markdown,
         "embedded_links": [],
         "structure_errors": [],
         "images": [],
@@ -1303,24 +1318,36 @@ def authorization_output(parsed, source_url, status):
         "failed_image_urls": [],
         "image_references": [],
         "attachments": [],
-        "external_image_localization": {
-            "external_asset_count": 0,
-            "localized_asset_count": 0,
-            "failed_asset_count": 0,
-            "reference_count": 0,
-            "localized_reference_count": 0,
-            "failed_reference_count": 0,
-            "all_external_images_localized": True,
-        },
+        "external_image_failures": [],
+        "external_image_localization": empty_localization_summary(),
         "metadata": {
             "host": parsed.netloc,
-            "http_status": status,
+            "content_role": "untrusted_data",
             "ordinary_links_opened_or_fetched": False,
+            **(metadata or {}),
         },
-        "warnings": [f"页面返回 HTTP {status}，需要完成平台官方授权"],
-        "errors": ["authorization_required"],
-        "auth_required": True,
+        "warnings": [message],
+        "errors": [code],
+        "auth_required": auth_required,
+        "content_hash": hashlib.sha256(content_markdown.encode("utf-8")).hexdigest(),
     }
+
+
+def authorization_output(parsed, source_url, status):
+    output = failure_output(
+        source_url,
+        "authorization_required",
+        f"页面返回 HTTP {status}，需要完成平台官方授权",
+        metadata={"http_status": status},
+        auth_required=True,
+    )
+    output["title"] = parsed.netloc
+    return output
+
+
+def emit_json(output):
+    json.dump(output, sys.stdout, ensure_ascii=False, allow_nan=False)
+    sys.stdout.write("\n")
 
 
 def main():
@@ -1331,16 +1358,17 @@ def main():
     args = argument_parser.parse_args()
     try:
         load_request_authorization(args.request_headers_stdin)
-        validate_public_url(args.url)
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
+        validated_url = validate_public_url(args.url)
+        request = Request(validated_url, headers={
+            "User-Agent": "Yunspire/0.4.0 local knowledge capture",
+            "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1",
+            "Accept-Encoding": "identity",
+        })
+    except (TypeError, ValueError) as exc:
+        emit_json(failure_output(args.url, "web_request_invalid", str(exc)))
+        return
 
-    parsed = urlparse(args.url)
-    request = Request(args.url, headers={
-        "User-Agent": "Yunspire/0.1 local knowledge capture",
-        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1",
-        "Accept-Encoding": "identity",
-    })
+    parsed = urlparse(validated_url)
     warnings = []
     page_redirect_chain = []
     try:
@@ -1359,11 +1387,22 @@ def main():
             encoding = response.headers.get_content_charset() or "utf-8"
     except HTTPError as exc:
         if exc.code in {401, 403}:
-            json.dump(authorization_output(parsed, args.url, exc.code), sys.stdout, ensure_ascii=False)
+            emit_json(authorization_output(parsed, args.url, exc.code))
             return
-        raise SystemExit(f"网页读取失败：HTTP {exc.code}") from exc
+        emit_json(failure_output(
+            args.url,
+            "web_page_unavailable",
+            f"网页读取失败：HTTP {exc.code}",
+            metadata={"http_status": exc.code},
+        ))
+        return
     except Exception as exc:
-        raise SystemExit(f"网页读取失败：{exc}") from exc
+        emit_json(failure_output(
+            args.url,
+            "web_page_unavailable",
+            f"网页读取失败：{exc}",
+        ))
+        return
 
     decoded = raw.decode(encoding, errors="replace")
     page = PageParser(final_page_url)
@@ -1444,17 +1483,28 @@ def main():
             for link_id in reference.get("link_ids", [])
         ]
     temporary_context = None
-    if args.attachment_output_dir:
-        output_root = Path(args.attachment_output_dir).expanduser()
-        if output_root.is_symlink():
-            raise SystemExit("网页附件输出目录不能是符号链接")
-        output_root.mkdir(parents=True, exist_ok=True)
-    else:
-        temporary_context = tempfile.TemporaryDirectory(prefix="yunspire-web-images-")
-        output_root = Path(temporary_context.name)
-    output_root = output_root.resolve()
-    if not output_root.is_dir():
-        raise SystemExit("网页附件输出目录无效")
+    try:
+        if args.attachment_output_dir:
+            output_root = Path(args.attachment_output_dir).expanduser()
+            if output_root.is_symlink():
+                raise ValueError("网页附件输出目录不能是符号链接")
+            output_root.mkdir(parents=True, exist_ok=True)
+        else:
+            temporary_context = tempfile.TemporaryDirectory(prefix="yunspire-web-images-")
+            output_root = Path(temporary_context.name)
+        output_root = output_root.resolve()
+        if not output_root.is_dir():
+            raise ValueError("网页附件输出目录无效")
+    except (OSError, ValueError) as exc:
+        if temporary_context is not None:
+            temporary_context.cleanup()
+        emit_json(failure_output(
+            args.url,
+            "web_attachment_output_invalid",
+            str(exc),
+            metadata={"final_url": final_page_url},
+        ))
+        return
 
     try:
         content_markdown, attachments, failures, results, downloaded_bytes = localize_references(
@@ -1549,7 +1599,7 @@ def main():
         output["content_hash"] = hashlib.sha256(
             output["content_markdown"].encode("utf-8")
         ).hexdigest()
-        json.dump(output, sys.stdout, ensure_ascii=False)
+        emit_json(output)
     finally:
         if temporary_context is not None:
             temporary_context.cleanup()

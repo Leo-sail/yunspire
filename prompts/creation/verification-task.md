@@ -1,0 +1,7 @@
+TASK {{TASK_ID}}
+
+{{TASK_JSON}}
+
+SOURCE CHUNK ({{SOURCE_ID}}, path={{SOURCE_PATH}})
+
+{{SOURCE_TEXT}}

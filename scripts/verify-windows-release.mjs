@@ -1,8 +1,9 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { dirname, join, resolve, sep } from 'node:path';
 import process from 'node:process';
+import { verifyPackagedPrivacy } from './verify-packaged-privacy.mjs';
 
 if (process.platform !== 'win32') {
   throw new Error('Windows 发布核验只能在 Windows Runner 上执行');
@@ -16,11 +17,9 @@ if (!['helpers', 'bundle'].includes(phase)) {
 const root = resolve(import.meta.dirname, '..');
 const nativeDirectory = join(root, 'src-tauri', 'target', 'yunspire-native');
 const runtimeDirectory = join(root, 'src-tauri', 'target', 'yunspire-runtime', 'python');
-const artifactDirectory = join(root, 'artifacts', 'windows');
 const baseConfigPath = join(root, 'src-tauri', 'tauri.conf.json');
 const windowsConfigPath = join(root, 'src-tauri', 'tauri.windows.conf.json');
 const releaseConfigPath = join(root, 'src-tauri', 'tauri.release.conf.json');
-const packagePath = join(root, 'package.json');
 const EXPECTED_PYTHON_LICENSE_SHA256 = '62bec384df47b0328307db41455ff6ea2559e5546b394ac69148561b21703120';
 const MINIMUM_OFFLINE_INSTALLER_SIZE = 100 * 1024 * 1024;
 const helperResources = [
@@ -120,39 +119,6 @@ function runJson(path, args = [], options = {}) {
   } catch {
     throw new Error(`原生执行器没有返回 JSON：${path}\n${result.stdout || ''}`.trim());
   }
-}
-
-function gitRevision(revision) {
-  const result = spawnSync('git', ['rev-parse', revision], {
-    cwd: root,
-    encoding: 'utf8',
-    windowsHide: true,
-    timeout: 30_000,
-  });
-  const value = result.stdout?.trim().toLowerCase();
-  if (result.error || result.status !== 0 || !/^[0-9a-f]{40}$/u.test(value || '')) {
-    throw new Error(`无法解析发布源码版本 ${revision}：${result.error || result.stderr || value || 'unknown'}`);
-  }
-  return value;
-}
-
-function githubRunValue(name) {
-  const value = process.env[name]?.trim() || null;
-  if (value && !/^\d+$/u.test(value)) {
-    throw new Error(`无效的 GitHub Actions ${name}：${value}`);
-  }
-  if (process.env.GITHUB_ACTIONS === 'true' && !value) {
-    throw new Error(`GitHub Actions 发布缺少 ${name}`);
-  }
-  return value;
-}
-
-function workflowGate(name) {
-  const outcome = process.env[name]?.trim().toLowerCase() || null;
-  if (process.env.GITHUB_ACTIONS === 'true' && outcome !== 'success') {
-    throw new Error(`GitHub Actions 发布门禁未通过 ${name}：${outcome || 'missing'}`);
-  }
-  return outcome === 'success' ? true : null;
 }
 
 function pythonUtf8Environment() {
@@ -823,12 +789,14 @@ async function verifyInstalledBundle(installer) {
     if (await sha256(installedRuntimeLicense) !== EXPECTED_PYTHON_LICENSE_SHA256) {
       throw new Error('安装后的 Python 许可文件哈希不一致');
     }
+    const privacyVerification = await verifyPackagedPrivacy(installDirectory, { platform: 'windows' });
     return {
       unicodeSilentInstall: true,
       applicationPortableExecutable: true,
       applicationAuthenticodeStatus: 'NotSigned',
       installedResourceIntegrity: true,
       installedRuntimeIntegrity: true,
+      packagedPrivacy: privacyVerification,
       ...await smokeInstalledResources(installDirectory, installedPython),
     };
   } finally {
@@ -847,7 +815,7 @@ async function verifyInstalledBundle(installer) {
 }
 
 async function packageBundle() {
-  const buildInputs = await verifyHelpers();
+  await verifyHelpers();
   const installer = await findInstaller();
   await assertPortableExecutable(installer);
   assertAuthenticodeNotSigned(installer, 'NSIS 安装器');
@@ -855,70 +823,8 @@ async function packageBundle() {
   if (installerSize < MINIMUM_OFFLINE_INSTALLER_SIZE) {
     throw new Error(`NSIS 安装器不足 100 MiB，未证明内置完整 WebView2 离线运行时：${installerSize}`);
   }
-  const installedVerification = await verifyInstalledBundle(installer);
-
-  const packageJson = JSON.parse(await readFile(packagePath, 'utf8'));
-  const artifactName = `Yunspire_${packageJson.version}_Windows-x64_unsigned-setup.exe`;
-  const artifactInstaller = join(artifactDirectory, artifactName);
-  await rm(artifactDirectory, { recursive: true, force: true });
-  await mkdir(artifactDirectory, { recursive: true });
-  await copyFile(installer, artifactInstaller);
-
-  const resourceFiles = [
-    ...helperResources.map((helper) => ({ name: `resources/${basename(helper.path)}`, path: helper.path })),
-    { name: 'resources/python.exe', path: join(runtimeDirectory, 'python.exe') },
-    { name: 'resources/python-LICENSE.txt', path: join(runtimeDirectory, 'LICENSE.txt') },
-    ...legalResources.map((legal) => ({ name: `resources/${legal.destination}`, path: legal.path })),
-  ];
-  const installerSha256 = await sha256(artifactInstaller);
-  const resourceManifest = [];
-  for (const file of resourceFiles) {
-    resourceManifest.push({
-      name: file.name,
-      byteLength: await fileSize(file.path),
-      sha256: await sha256(file.path),
-    });
-  }
-  const sourceSha = gitRevision('HEAD');
-  const githubSha = process.env.GITHUB_SHA?.trim().toLowerCase() || null;
-  if (githubSha && githubSha !== sourceSha) {
-    throw new Error(`GitHub Actions 源码 SHA 与检出版本不一致：${githubSha} != ${sourceSha}`);
-  }
-  const sourceTree = gitRevision('HEAD^{tree}');
-  const manifestPath = join(artifactDirectory, 'windows-build-manifest.json');
-  await writeFile(manifestPath, JSON.stringify({
-    schema: 'yunspire.windows-installer.v1',
-    version: packageJson.version,
-    architecture: 'x64',
-    runner: process.env.RUNNER_NAME || 'local-windows',
-    sourceSha,
-    sourceTree,
-    workflowRunId: githubRunValue('GITHUB_RUN_ID'),
-    workflowRunAttempt: githubRunValue('GITHUB_RUN_ATTEMPT'),
-    unsigned: true,
-    installer: { name: artifactName, byteLength: installerSize, sha256: installerSha256 },
-    resources: resourceManifest,
-    buildVerification: {
-      releaseAudit: workflowGate('YUNSPIRE_RELEASE_AUDIT_OUTCOME'),
-      lockedDependencies: workflowGate('YUNSPIRE_LOCKED_DEPENDENCIES_OUTCOME'),
-      pythonRuntime: true,
-      nativeHelpers: true,
-      mediaAndSpeechHelpers: true,
-      productVerification: workflowGate('YUNSPIRE_PRODUCT_VERIFICATION_OUTCOME'),
-      helperVerification: true,
-      nsisInstaller: true,
-      installerConfiguration: buildInputs.installerConfiguration,
-      installerAuthenticodeStatus: 'NotSigned',
-    },
-    installedVerification,
-  }, null, 2) + '\n', 'utf8');
-  const manifestSha256 = await sha256(manifestPath);
-  await writeFile(
-    join(artifactDirectory, 'SHA256SUMS.txt'),
-    `${installerSha256}  ${artifactName}\n${manifestSha256}  windows-build-manifest.json\n`,
-    'utf8',
-  );
-  console.log(`WINDOWS_NSIS_ARTIFACT_OK path=${artifactInstaller} sha256=${installerSha256}`);
+  await verifyInstalledBundle(installer);
+  console.log(`WINDOWS_NSIS_BUNDLE_OK installer=${installer}`);
 }
 
 if (phase === 'helpers') await verifyHelpers();

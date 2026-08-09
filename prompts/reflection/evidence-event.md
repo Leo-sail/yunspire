@@ -1,0 +1,3 @@
+[{{OCCURRED_AT}}] {{EVENT_TYPE}} · {{ACTOR}}
+{{CONTENT}}
+元数据：{{METADATA_JSON}}

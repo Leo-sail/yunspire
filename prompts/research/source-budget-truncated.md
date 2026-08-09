@@ -1,0 +1,1 @@
+原文 {{ORIGINAL_CHARACTER_COUNT}} 字符，已按预算读取前 {{READ_CHARACTER_COUNT}} 字符

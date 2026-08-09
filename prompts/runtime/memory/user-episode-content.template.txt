@@ -1,0 +1,3 @@
+用户请求：{{user_message}}
+处理状态：{{state}}
+结果摘要：{{outcome}}

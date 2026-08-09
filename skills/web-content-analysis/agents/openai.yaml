@@ -1,0 +1,4 @@
+interface:
+  display_name: "网页内容分析"
+  short_description: "安全提取网页正文、链接和图片，并准备可追溯的 Obsidian 内容"
+  default_prompt: "使用 $web-content-analysis 提取这个网页的正文、链接和图片，并生成可追溯的 Obsidian 内容。"

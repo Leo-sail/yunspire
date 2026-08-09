@@ -25,7 +25,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # This historical filename remains the Windows release entry point. The current
-# v0.3.0 policy is intentionally unsigned, so this script verifies that state,
+# v0.4.0 policy is intentionally unsigned, so this script verifies that state,
 # the offline WebView2/current-user installer policy, and a real silent
 # install/start cycle. It never signs an executable.
 
@@ -200,6 +200,12 @@ function Invoke-UnsignedInstallerSmokeTest {
     )) {
       $helperPath = Join-Path -Path $installDirectory -ChildPath $relativePath
       Test-UnsignedExecutable -LiteralPath $helperPath -Label "Installed helper $relativePath"
+    }
+
+    $privacyVerifier = Join-Path -Path $repositoryRoot -ChildPath 'scripts/verify-packaged-privacy.mjs'
+    & node $privacyVerifier --directory $installDirectory --platform windows
+    if ($LASTEXITCODE -ne 0) {
+      throw "Installed package privacy verification failed with exit code $LASTEXITCODE"
     }
 
     $applicationProcess = Start-Process -FilePath $application.FullName -PassThru

@@ -111,6 +111,9 @@ const appSource = await readText('desktop-ui/app.js');
 const styles = await readText('desktop-ui/styles.css');
 const nativeLibrary = await readText('src-tauri/src/lib.rs');
 const modelProvider = await readText('src-tauri/src/model_provider.rs');
+const assistantSkillRoutingPrompt = await readText('prompts/runtime/assistant-skill-routing.txt');
+const captureAnalysisSystemPrompt = await readText('prompts/runtime/capture-analysis-system.txt');
+const assistantSlashCommandPrompt = await readText('prompts/runtime/assistant-slash-command-system.txt');
 const nativeCreation = await readText('src-tauri/src/creation/mod.rs');
 const writingPanelSource = await readText('desktop-ui/creation/writing-panel.js');
 const executionControllerSource = await readText('desktop-ui/creation/execution-controller.js');
@@ -293,7 +296,7 @@ if (confirmedImportPositions.some((position) => position < 0)
   failures.push('confirmed third-party Skill import must evaluate, short-circuit failures, approve, then enable in order');
 }
 for (const thirdPartySkillModelPrimitive of ['skill_action=install', 'source_url', '第三方 Skill 只能导入 name、description 和 instructions']) {
-  if (!modelProvider.includes(thirdPartySkillModelPrimitive)) failures.push(`third-party Skill model contract is missing: ${thirdPartySkillModelPrimitive}`);
+  if (!assistantSkillRoutingPrompt.includes(thirdPartySkillModelPrimitive)) failures.push(`third-party Skill model contract is missing: ${thirdPartySkillModelPrimitive}`);
 }
 for (const embeddingUiPrimitive of [
   "const modelRoles = ['chat', 'analysis', 'image', 'embedding'];",
@@ -798,6 +801,13 @@ for (const verifierPrimitive of [
 if (!capturePipeline.includes('yunspire-runtime') || !capturePipeline.includes('python.exe')) {
   failures.push('Windows packaged Python runtime is not resolved by the native capture pipeline');
 }
+const manifestDirectoryReferences = capturePipeline.match(/env!\("CARGO_MANIFEST_DIR"\)/gu)?.length || 0;
+const debugGatedManifestDirectoryReferences = capturePipeline
+  .match(/#\[cfg\(debug_assertions\)\][\s\S]{0,400}?env!\("CARGO_MANIFEST_DIR"\)/gu)?.length || 0;
+if (manifestDirectoryReferences === 0
+  || manifestDirectoryReferences !== debugGatedManifestDirectoryReferences) {
+  failures.push(`CARGO_MANIFEST_DIR must be compiled only in debug builds: ${debugGatedManifestDirectoryReferences}/${manifestDirectoryReferences}`);
+}
 const windowsResources = windowsTauri.bundle?.resources || {};
 for (const [source, destination] of [
   ['target/yunspire-runtime/python/', 'runtime/python/'],
@@ -1121,10 +1131,14 @@ for (const stagedBindingConflictPrimitive of [
     failures.push(`staged attachment binding conflict rejection is missing: ${stagedBindingConflictPrimitive}`);
   }
 }
-for (const modelUnderstandingPrimitive of [
+for (const modelUnderstandingPromptPrimitive of [
   'analysis_markdown 不是简短摘要',
   'image_observations 每项必须返回 asset_id、reference_id',
   '它不是实体图谱',
+]) {
+  if (!captureAnalysisSystemPrompt.includes(modelUnderstandingPromptPrimitive)) failures.push(`model-understood source contract is missing: ${modelUnderstandingPromptPrimitive}`);
+}
+for (const modelUnderstandingPrimitive of [
   'normalize_image_observations',
   'normalize_document_relations',
 ]) {
@@ -1163,9 +1177,8 @@ if (!/<div\b[^>]*\bdata-slash-command-menu\b[^>]*\brole="listbox"[^>]*>/iu.test(
 if (!/\.slash-command-menu\s*\{[^}]*\bposition:\s*absolute[^}]*\bbottom:\s*calc\(/isu.test(styles)) {
   failures.push('slash command listbox must expand upward from the composer');
 }
-const slashPrompt = modelProvider.match(/const ASSISTANT_SLASH_COMMAND_PROMPT:\s*&str\s*=\s*"([\s\S]*?)";/u)?.[1] || '';
 for (const command of requiredSlashCommands) {
-  if (!slashPrompt.includes(`/${command}`)) failures.push(`assistant slash-command prompt is missing /${command}`);
+  if (!assistantSlashCommandPrompt.includes(`/${command}`)) failures.push(`assistant slash-command prompt is missing /${command}`);
 }
 
 const handlerSource = nativeLibrary.match(/tauri::generate_handler!\[([\s\S]*?)\]\s*(?:\)|;)/u)?.[1] || '';

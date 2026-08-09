@@ -85,18 +85,17 @@ const requiredFiles = [
   'docs/schemas/memory-reflection-job.schema.json',
   '.github/ISSUE_TEMPLATE/bug_report.yml',
   '.github/ISSUE_TEMPLATE/feature_request.yml',
-  '.github/workflows/ci.yml',
   '.github/workflows/release.yml',
-  '.github/workflows/windows-installer.yml',
   'scripts/build-macos-python-runtime.mjs',
   'scripts/build-macos-native.mjs',
+  'scripts/run-tauri-release.mjs',
   'scripts/run-native-quality.mjs',
   'scripts/generate-third-party-notices.mjs',
   'scripts/sign-windows.ps1',
   'scripts/verify-release-artifact.mjs',
   'scripts/verify-release-version.mjs',
-  'scripts/verify-release-version-contract.mjs',
   'scripts/verify-macos-helpers.mjs',
+  'scripts/verify-packaged-privacy.mjs',
   'src-tauri/tauri.macos.conf.json',
   'src-tauri/tauri.release.conf.json',
   'skills/deep-research/SKILL.md',
@@ -235,6 +234,8 @@ if (await exists('.github/workflows/release.yml')) {
     ['published immutable Release verification', /\.immutable\s*==\s*true/u],
     ['shared provenance-safe cleanup command', /verify-release-version\.mjs\s+"\$\{cleanup_arguments\[@\]\}"/u],
     ['attempt-scoped build artifacts', /attempt-\$\{\{\s*github\.run_attempt\s*\}\}/u],
+    ['release-only Tauri path remapping', /npm run tauri:release -- build/u],
+    ['installed macOS privacy verification', /verify-packaged-privacy\.mjs --directory "\$installed_app" --platform macos/u],
     ['run-provenance cleanup ownership', /RUN_PROVENANCE:\s*yunspire-release-run:/u],
     ['annotated-tag cleanup ownership', /tag_message[\s\S]*RUN_PROVENANCE/u],
     ['existing-tag verification', /--verify-tag/u],
@@ -256,11 +257,19 @@ if (await exists('.github/workflows/release.yml')) {
     failures.push('release workflow must only publish from the version-bound release/v* branch trigger');
   }
   const noSignCount = releaseWorkflow.match(/--no-sign/gu)?.length || 0;
+  const remappedBuildCount = releaseWorkflow.match(/npm run tauri:release -- build/gu)?.length || 0;
   const unsignedManifestCount = releaseWorkflow.match(/--signed\s+false/gu)?.length || 0;
+  const privacyVerifiedManifestCount = releaseWorkflow.match(/--privacy-verified\s+true/gu)?.length || 0;
   const prepublishGateCount = releaseWorkflow.match(/verify-release-version\.mjs\s+prepublish/gu)?.length || 0;
   const prepublishProvenanceCount = releaseWorkflow.match(/--run-provenance\s+"\$RUN_PROVENANCE"/gu)?.length || 0;
   if (noSignCount !== 2 || unsignedManifestCount !== 2) {
     failures.push(`release workflow must build exactly two explicitly unsigned installers; no-sign=${noSignCount} manifests=${unsignedManifestCount}`);
+  }
+  if (privacyVerifiedManifestCount !== 2) {
+    failures.push(`release workflow must record two privacy-verified installers; manifests=${privacyVerifiedManifestCount}`);
+  }
+  if (remappedBuildCount !== 2) {
+    failures.push(`release workflow must route both installers through path remapping; builds=${remappedBuildCount}`);
   }
   if (/--require-signed\s+true/u.test(releaseWorkflow)) {
     failures.push('unsigned release workflow must not require signed artifacts');
@@ -300,6 +309,10 @@ if (await exists('scripts/verify-release-version.mjs')) {
   if (stableReleaseGuards < 2) {
     failures.push('prepare and prepublish verification must reject prerelease versions from the stable Latest workflow');
   }
+  if (!releaseVerifier.includes('verifyPackagedFilePrivacy')
+      || !releaseVerifier.includes('installed-content-and-artifact-bytes-v2')) {
+    failures.push('published manifest convergence must reverify artifact bytes with the current privacy policy');
+  }
 }
 
 if (await exists('scripts/verify-release-artifact.mjs')) {
@@ -307,24 +320,44 @@ if (await exists('scripts/verify-release-artifact.mjs')) {
   if (!/requireClean:\s*option\('require-clean',\s*\{\s*fallback:\s*'true'\s*\}\)\s*===\s*'true'/u.test(artifactVerifier)) {
     failures.push('release artifact manifests must default to a clean checked-out source tree');
   }
+  if (!/privacy-verified/u.test(artifactVerifier) || !/privacyVerified:\s*true/u.test(artifactVerifier)) {
+    failures.push('release artifact manifests must require installed-content privacy verification');
+  }
+  if (!artifactVerifier.includes('verifyPackagedFilePrivacy')
+      || !artifactVerifier.includes('installed-content-and-artifact-bytes-v2')) {
+    failures.push('release artifact generation must scan container bytes and record the privacy policy');
+  }
 }
 
-if (await exists('.github/workflows/windows-installer.yml')) {
-  const windowsInstallerWorkflow = await readFile(
-    path.join(root, '.github/workflows/windows-installer.yml'),
-    'utf8',
-  );
-  const requiredWindowsCiGates = [
-    ['CI-only workflow label', /CI (?:verification|only)/iu],
-    ['shared release installer configuration', /--config\s+src-tauri\/tauri\.release\.conf\.json/u],
-    ['explicit unsigned build flag', /--no-sign/u],
-    ['silent install and startup smoke', /sign-windows\.ps1[\s\S]*VerifyUnsignedInstaller/u],
-  ];
-  for (const [label, pattern] of requiredWindowsCiGates) {
-    if (!pattern.test(windowsInstallerWorkflow)) failures.push(`Windows installer CI is missing ${label}`);
+if (await exists('scripts/run-tauri-release.mjs')) {
+  const releaseRunner = await readFile(path.join(root, 'scripts/run-tauri-release.mjs'), 'utf8');
+  for (const primitive of ['CARGO_ENCODED_RUSTFLAGS', '--remap-path-prefix=', '/workspace/yunspire', '/cargo', 'PYTHONDONTWRITEBYTECODE', 'en_US.UTF-8']) {
+    if (!releaseRunner.includes(primitive)) failures.push(`release Tauri runner is missing path remapping primitive: ${primitive}`);
   }
-  if (/actions\/upload-artifact@/u.test(windowsInstallerWorkflow)) {
-    failures.push('Windows installer CI must not upload a second distributable installer');
+}
+
+if (await exists('scripts/verify-packaged-privacy.mjs')) {
+  const privacyVerifier = await readFile(path.join(root, 'scripts/verify-packaged-privacy.mjs'), 'utf8');
+  for (const primitive of ['forbiddenDirectories', 'forbiddenFilePatterns', 'contentPatterns', 'build-machine path', 'utf16le', 'verifyPackagedFilePrivacy', 'PACKAGED_PRIVACY_OK']) {
+    if (!privacyVerifier.includes(primitive)) failures.push(`packaged privacy verifier is missing: ${primitive}`);
+  }
+  const [macosVerifier, windowsVerifier, windowsInstallerVerifier] = await Promise.all([
+    readFile(path.join(root, 'scripts/verify-macos-helpers.mjs'), 'utf8'),
+    readFile(path.join(root, 'scripts/verify-windows-release.mjs'), 'utf8'),
+    readFile(path.join(root, 'scripts/sign-windows.ps1'), 'utf8'),
+  ]);
+  if (!macosVerifier.includes("verifyPackagedPrivacy(installedApp, { platform: 'macos' })")) {
+    failures.push('macOS installed application verification must enforce packaged privacy');
+  }
+  if (!windowsVerifier.includes("verifyPackagedPrivacy(installDirectory, { platform: 'windows' })")) {
+    failures.push('Windows installed bundle verification must enforce packaged privacy');
+  }
+  if (!windowsInstallerVerifier.includes('verify-packaged-privacy.mjs')) {
+    failures.push('Windows installer startup verification must enforce packaged privacy');
+  }
+  const macosRuntimeBuilder = await readFile(path.join(root, 'scripts/build-macos-python-runtime.mjs'), 'utf8');
+  for (const primitive of ['BUILD_PATH_POLICY', 'sanitizeRuntimeBuildPaths', 'PRUNED_TEST_MODULES', "join('lib', 'python3.13', 'venv')"]) {
+    if (!macosRuntimeBuilder.includes(primitive)) failures.push(`macOS Python runtime privacy hardening is missing: ${primitive}`);
   }
 }
 
@@ -444,8 +477,14 @@ try {
 
 const packageJson = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
 const packageVersion = packageJson.version;
-if (!String(packageJson.scripts?.verify || '').includes('verify:release-version-contract')) {
-  failures.push('complete verification must run the draft Release lookup contract');
+const packagedResourceValidation = packageJson.scripts?.['validate:packaged-resources'] || '';
+for (const primitive of ['--directory skills', '--directory resources/creation']) {
+  if (!packagedResourceValidation.includes(primitive)) {
+    failures.push(`packaged resource validation is missing: ${primitive}`);
+  }
+}
+if (!String(packageJson.scripts?.build || '').includes('npm run validate:packaged-resources')) {
+  failures.push('production build must validate packaged resources before bundling');
 }
 try {
   await readReleaseVersion(root);
@@ -461,6 +500,8 @@ const versionChecks = [
   ['src-tauri/Cargo.toml', new RegExp(`^version\\s*=\\s*"${packageVersion.replaceAll('.', '\\.')}"`, 'm')],
   ['desktop-ui/index.html', new RegExp(`版本 ${packageVersion.replaceAll('.', '\\.')}`)],
   ['desktop-ui/app.js', new RegExp(`Yunspire Desktop ${packageVersion.replaceAll('.', '\\.')}`)],
+  ['skills/video-content-analysis/scripts/extract_video.py', new RegExp(`Yunspire/${packageVersion.replaceAll('.', '\\.')}`)],
+  ['skills/web-content-analysis/scripts/extract_web.py', new RegExp(`Yunspire/${packageVersion.replaceAll('.', '\\.')}`)],
   ['skills/video-content-analysis/scripts/yunspire_speech_info.plist', new RegExp(`<string>${packageVersion.replaceAll('.', '\\.')}<\\/string>`)],
   ['CHANGELOG.md', new RegExp(`^### ${packageVersion.replaceAll('.', '\\.')} (?:-|$)`, 'm')],
   ['README.md', new RegExp('当前版本为 `' + packageVersion.replaceAll('.', '\\.') + '`')],

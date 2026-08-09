@@ -1,0 +1,1 @@
+{"id":"lowercase-id","displayName":"名称","description":"说明","category":"structure|emphasis|information|comparison|sequence|conversation|navigation|media|conversion","blockKind":"container|leaf|divider|media|collection","templateMarkdown":"可编辑的 Markdown 示例"}

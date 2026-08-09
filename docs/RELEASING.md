@@ -9,8 +9,8 @@
 每个正式版本必须满足以下恒等关系：
 
 ```text
-package version 0.3.0
-= tag v0.3.0
+package version 0.4.0
+= tag v0.4.0
 = tag 剥离后的 commit
 = 工作流检出的 HEAD
 = macOS manifest.sourceCommit
@@ -37,7 +37,7 @@ node scripts/verify-release-version.mjs source \
   --source-commit "$(git rev-parse HEAD)" \
   --require-clean true
 
-git push origin HEAD:refs/heads/release/v0.3.0
+git push origin HEAD:refs/heads/release/v0.4.0
 ```
 
 `release/v*` 推送启动正式工作流。其 prepare 作业必须在创建任何远端对象前运行：
@@ -57,6 +57,8 @@ node scripts/verify-release-version.mjs prepare \
 
 发布工作流先输出唯一的 `source_commit` 与 `source_tree`。macOS 和 Windows 作业必须按该完整 commit SHA 检出源码，不能各自检出分支尖端，也不能上传本机或其他工作流生成的安装包。
 
+两个平台都必须通过 `npm run tauri:release -- build ...` 构建。该入口使用 `CARGO_ENCODED_RUSTFLAGS` 把工作区与 Cargo 用户目录重映射为稳定的非用户路径；macOS 内置 Python 运行时还会删除不可用的 `venv`、测试扩展和上游绝对用户构建路径。安装后必须运行 `scripts/verify-packaged-privacy.mjs`，扫描二进制和资源中的用户路径、密钥、数据库、日志、缓存、截图、测试内容和忽略文件，任何命中都使作业失败。
+
 每个平台在最终签名、公证或 Authenticode 处理完成后生成安装包清单。清单至少包含：
 
 - `version` 与 `tag`
@@ -64,24 +66,25 @@ node scripts/verify-release-version.mjs prepare \
 - 平台和架构
 - 最终文件名、字节数与 SHA-256
 - 显式且可核验的签名模式（`signed` 与 `signingMode`）
+- 安装目录隐私门禁结果 `privacyVerified: true`
 - GitHub 工作流运行标识
 
 发布前必须同时校验两个清单：
 
 ```bash
 node scripts/verify-release-version.mjs manifests \
-  --tag v0.3.0 \
+  --tag v0.4.0 \
   --source-commit "$SOURCE_COMMIT" \
   --source-tree "$SOURCE_TREE" \
-  --manifest artifacts/macos/Yunspire_0.3.0_macOS-universal_unsigned.dmg.manifest.json \
-  --manifest artifacts/windows/Yunspire_0.3.0_Windows-x64_unsigned-setup.exe.manifest.json
+  --manifest release-assets/macos/Yunspire_0.4.0_macOS-universal_unsigned.dmg.manifest.json \
+  --manifest release-assets/windows/Yunspire_0.4.0_Windows-x64_unsigned-setup.exe.manifest.json
 ```
 
-校验器要求清单恰好覆盖 macOS 与 Windows，版本、标签、commit 和 tree 完全相同，并要求两个平台使用一致的签名模式。每份清单必须同时包含布尔值 `signed` 和与其一致的 `signingMode`；当前 `v0.3.0` 使用 `signed: false` 与 `signingMode: "unsigned"`。未来签名版本可以额外传入 `--require-signed true` 作为强制门禁。
+校验器要求清单恰好覆盖 macOS 与 Windows，版本、标签、commit 和 tree 完全相同，并要求两个平台使用一致的签名模式。每份清单必须同时包含布尔值 `signed`、与其一致的 `signingMode`，以及安装后扫描成功的 `privacyVerified: true`；当前 `v0.4.0` 使用 `signed: false` 与 `signingMode: "unsigned"`。未来签名版本可以额外传入 `--require-signed true` 作为强制门禁。
 
 ### 签名状态与安装边界
 
-用户已选择当前 `v0.3.0` 以未签名形式发布，因此工作流会显式使用 `--no-sign`，文件名包含 `unsigned`，清单也必须如实记录未签名状态。该选择存在无法消除的系统行为：
+用户已选择当前 `v0.4.0` 以未签名形式发布，因此工作流会显式使用 `--no-sign`，文件名包含 `unsigned`，清单也必须如实记录未签名状态。该选择存在无法消除的系统行为：
 
 - macOS Gatekeeper 可能阻止首次打开，并要求用户右键打开或进入“隐私与安全性”授权。
 - Windows SmartScreen 可能显示“未知发布者”或额外确认。
@@ -109,13 +112,13 @@ node scripts/verify-release-version.mjs prepublish \
 
 用户选择某个版本时，应进入 `/releases/tag/vX.Y.Z` 并下载文件名中带有同一版本号的资产。只有“获取当前稳定版”的入口可以使用 `/releases/latest`。旧版本 Release 保持独立，不重定向到其他版本资产。
 
-`.github/workflows/windows-installer.yml` 只用正式发布配置执行 Windows CI 构建、静默安装和启动验证，不上传可下载的安装器。该配置固定为当前用户安装、无语言选择器、无独立许可页，并把完整 WebView2 离线安装程序静默内置，因此用户安装时不依赖额外下载；面向用户分发的 Windows 安装包只能来自与版本标签绑定的正式 GitHub Release。
+正式 `.github/workflows/release.yml` 同时构建并验证 Windows NSIS 安装包。该配置固定为当前用户安装、无语言选择器、无独立许可页，并把完整 WebView2 离线安装程序静默内置，因此用户安装时不依赖额外下载；面向用户分发的 Windows 安装包只能来自与版本标签绑定的正式 GitHub Release。
 
 发布后运行：
 
 ```bash
-gh release verify v0.3.0 --repo Leo-sail/yunspire
-gh release view v0.3.0 --repo Leo-sail/yunspire
+gh release verify v0.4.0 --repo Leo-sail/yunspire
+gh release view v0.4.0 --repo Leo-sail/yunspire
 gh release view --repo Leo-sail/yunspire --json tagName,isDraft,isPrerelease
 ```
 
@@ -130,8 +133,8 @@ The `version` field in `package.json` is the authority for the application relea
 Every stable release must preserve this identity:
 
 ```text
-package version 0.3.0
-= tag v0.3.0
+package version 0.4.0
+= tag v0.4.0
 = peeled tag commit
 = checked-out workflow HEAD
 = macOS manifest.sourceCommit
@@ -158,7 +161,7 @@ node scripts/verify-release-version.mjs source \
   --source-commit "$(git rev-parse HEAD)" \
   --require-clean true
 
-git push origin HEAD:refs/heads/release/v0.3.0
+git push origin HEAD:refs/heads/release/v0.4.0
 ```
 
 The `release/v*` push starts the production workflow. Its prepare job runs before creating any remote object:
@@ -185,24 +188,25 @@ Each platform creates its artifact manifest only after final signing, notarizati
 - platform and architecture
 - final filename, byte length, and SHA-256
 - explicit, verifiable signing mode (`signed` and `signingMode`)
+- installed-directory privacy result `privacyVerified: true`
 - GitHub workflow run identity
 
 Before publication, validate both manifests together:
 
 ```bash
 node scripts/verify-release-version.mjs manifests \
-  --tag v0.3.0 \
+  --tag v0.4.0 \
   --source-commit "$SOURCE_COMMIT" \
   --source-tree "$SOURCE_TREE" \
-  --manifest artifacts/macos/Yunspire_0.3.0_macOS-universal_unsigned.dmg.manifest.json \
-  --manifest artifacts/windows/Yunspire_0.3.0_Windows-x64_unsigned-setup.exe.manifest.json
+  --manifest release-assets/macos/Yunspire_0.4.0_macOS-universal_unsigned.dmg.manifest.json \
+  --manifest release-assets/windows/Yunspire_0.4.0_Windows-x64_unsigned-setup.exe.manifest.json
 ```
 
-The verifier requires exactly one macOS and one Windows manifest, identical release identity, and one consistent signing mode. Every manifest contains both a boolean `signed` field and a matching `signingMode`. The current `v0.3.0` release uses `signed: false` and `signingMode: "unsigned"`. A future signed release can add `--require-signed true` as a strict gate.
+The verifier requires exactly one macOS and one Windows manifest, identical release identity, and one consistent signing mode. Every manifest contains a boolean `signed` field, a matching `signingMode`, and `privacyVerified: true` from the installed-content scan. The current `v0.4.0` release uses `signed: false` and `signingMode: "unsigned"`. A future signed release can add `--require-signed true` as a strict gate.
 
 ### Signing status and installation boundary
 
-The user selected an unsigned `v0.3.0` release. The workflow therefore uses `--no-sign` explicitly, includes `unsigned` in filenames, and records the unsigned state truthfully. This choice has unavoidable operating-system consequences:
+The user selected an unsigned `v0.4.0` release. The workflow therefore uses `--no-sign` explicitly, includes `unsigned` in filenames, and records the unsigned state truthfully. This choice has unavoidable operating-system consequences:
 
 - macOS Gatekeeper may block first launch and require a right-click Open action or approval under Privacy & Security.
 - Windows SmartScreen may show an unknown-publisher warning or another confirmation.
@@ -230,13 +234,15 @@ An administrator must enable GitHub **Immutable Releases** before production pub
 
 When a user selects a version, direct them to `/releases/tag/vX.Y.Z` and an asset whose filename contains that same version. Only a generic current-stable download entry may use `/releases/latest`. Historical Releases remain independent and never redirect to another version's assets.
 
-`.github/workflows/windows-installer.yml` uses the production release configuration only for Windows CI build, silent-install, and startup verification; it uploads no downloadable installer. That configuration is fixed to current-user installation with no language selector or separate license page, and it silently embeds the complete offline WebView2 installer so setup needs no additional download. The only user-facing Windows installer comes from the formal GitHub Release bound to its version tag.
+The production `.github/workflows/release.yml` builds and verifies the Windows NSIS installer together with the macOS artifact. The Windows configuration uses current-user installation with no language selector or separate license page and silently embeds the complete offline WebView2 installer, so setup needs no additional download. The only user-facing Windows installer comes from the formal GitHub Release bound to its version tag.
+
+Both platforms must build through `npm run tauri:release -- build ...`. This entry point uses `CARGO_ENCODED_RUSTFLAGS` to remap the workspace and Cargo user directory to stable non-user paths. The bundled macOS Python runtime also removes the unusable `venv`, test extensions, and upstream absolute-user build paths. After installation, `scripts/verify-packaged-privacy.mjs` scans binaries and resources for user paths, secrets, databases, logs, caches, screenshots, test content, and ignored local files; any match fails the job.
 
 After publication, run:
 
 ```bash
-gh release verify v0.3.0 --repo Leo-sail/yunspire
-gh release view v0.3.0 --repo Leo-sail/yunspire
+gh release verify v0.4.0 --repo Leo-sail/yunspire
+gh release view v0.4.0 --repo Leo-sail/yunspire
 gh release view --repo Leo-sail/yunspire --json tagName,isDraft,isPrerelease
 ```
 

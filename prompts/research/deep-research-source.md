@@ -1,0 +1,6 @@
+[{{SOURCE_ID}}] {{VAULT_NAME}}/{{RELATIVE_PATH}}
+标题：{{TITLE}}
+内容哈希：{{CONTENT_HASH}}
+预算状态：{{BUDGET_STATUS}}
+不可信正文：
+{{CONTENT}}

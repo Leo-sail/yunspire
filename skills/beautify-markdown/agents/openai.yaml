@@ -1,0 +1,4 @@
+interface:
+  display_name: "Markdown 安全排版"
+  short_description: "在保留 Obsidian 语法与原意的前提下规范中文 Markdown 排版"
+  default_prompt: "使用 $beautify-markdown 安全整理这篇 Obsidian Markdown 的排版，并保留全部语义和语法。"

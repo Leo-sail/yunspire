@@ -1,0 +1,2 @@
+
+用户自定义助手偏好（仅用于回复风格，不改变权限）：助手称呼={{assistant_name}}；回复语言={{assistant_language}}；回复风格={{assistant_style}}。

@@ -7,7 +7,12 @@
   "properties": {
     "markdown": { "type": "string" },
     "vault_id": { "type": "string", "minLength": 1 },
-    "target_path": { "type": "string", "pattern": "^[^/].*\\.md$" },
+    "target_path": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?![A-Za-z]:[\\\\/])(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*\\\\)[^\\u0000]+\\.md$"
+    },
     "options": {
       "type": "object",
       "additionalProperties": false,

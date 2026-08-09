@@ -138,7 +138,7 @@ jobs:
 
       - name: Build unsigned universal DMG
         run: >-
-          npm run tauri -- build
+          npm run tauri:release -- build
           --target universal-apple-darwin
           --bundles dmg
           --config src-tauri/tauri.release.conf.json
@@ -211,6 +211,7 @@ jobs:
           [[ -f "$installed_app/Contents/Resources/legal/THIRD_PARTY_NOTICES.txt" ]]
 
           node scripts/verify-macos-helpers.mjs --app "$installed_app"
+          node scripts/verify-packaged-privacy.mjs --directory "$installed_app" --platform macos
 
           application_log="$RUNNER_TEMP/yunspire-macos-startup.log"
           "$executable" >"$application_log" 2>&1 &
@@ -233,6 +234,7 @@ jobs:
           --input "${{ steps.bundle.outputs.dmg_path }}"
           --output release-assets/macos
           --signed false
+          --privacy-verified true
           --source-commit "$SOURCE_COMMIT"
           --require-tag false
           --require-clean true
@@ -298,15 +300,12 @@ jobs:
           workspaces: src-tauri
 
       - name: Install locked dependencies
-        id: locked_dependencies
         run: npm ci
 
       - name: Audit release source tree
-        id: release_audit
         run: npm run audit:release
 
       - name: Run complete product verification
-        id: product_verification
         run: npm run verify
 
       - name: Verify Windows runtime and native helpers
@@ -314,7 +313,7 @@ jobs:
 
       - name: Build unsigned current-user NSIS installer
         run: >-
-          npm run tauri -- build
+          npm run tauri:release -- build
           --target x86_64-pc-windows-msvc
           --bundles nsis
           --config src-tauri/tauri.release.conf.json
@@ -322,10 +321,6 @@ jobs:
           --ci
 
       - name: Verify installed Windows resources
-        env:
-          YUNSPIRE_RELEASE_AUDIT_OUTCOME: ${{ steps.release_audit.outcome }}
-          YUNSPIRE_LOCKED_DEPENDENCIES_OUTCOME: ${{ steps.locked_dependencies.outcome }}
-          YUNSPIRE_PRODUCT_VERIFICATION_OUTCOME: ${{ steps.product_verification.outcome }}
         run: node scripts/verify-windows-release.mjs bundle
 
       - name: Verify silent installation and application startup
@@ -346,6 +341,7 @@ jobs:
           --input "${{ steps.bundle.outputs.installer }}"
           --output release-assets/windows
           --signed false
+          --privacy-verified true
           --source-commit "$env:SOURCE_COMMIT"
           --require-tag false
           --require-clean true

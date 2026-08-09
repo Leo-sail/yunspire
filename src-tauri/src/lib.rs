@@ -11,6 +11,7 @@ mod model_provider;
 mod obsidian;
 mod obsidian_management;
 mod policy;
+mod prompt;
 mod runtime_db;
 mod scheduler;
 mod skill_lifecycle;
@@ -91,13 +92,16 @@ fn initialize_local_runtime(
         obsidian::ensure_default_vaults_for_runtime()?;
         database.mark_default_vaults_initialized(&workspace_scope)?;
     }
-    let memory_state = app.state::<obsidian::ObsidianAdapterState>();
-    if let Err(error) = obsidian::flush_pending_long_term_memory_events_for_runtime(
-        database,
-        &workspace_scope,
-        memory_state.inner(),
-    ) {
-        log::warn!("无法重放长期记忆待写入事件：{error}");
+    if let Some(archive_path) = obsidian::archive_legacy_behavior_records_for_runtime()? {
+        log::info!(
+            "旧 Obsidian 行为记录已移出 Vault 并保留到 {}",
+            archive_path.display()
+        );
+    }
+    if let Err(error) =
+        obsidian::finalize_pending_long_term_memory_events_for_runtime(database, &workspace_scope)
+    {
+        log::warn!("无法收口 SQLite 内部长期记忆事件：{error}");
     }
     if let Err(error) = obsidian::recover_vault_batch_manifests_for_runtime(app, database) {
         log::warn!("无法完整恢复中断的跨 Vault 批次：{error}");
@@ -446,6 +450,7 @@ pub fn run() {
                 capture_pipeline::discard_capture_attachments,
                 capture_pipeline::extract_capture_source,
                 model_provider::analyze_capture_content,
+                model_provider::bind_capture_analysis_write_manifest,
                 model_provider::discard_capture_analysis_receipt,
                 model_provider::chat_with_assistant,
                 model_provider::cancel_assistant_request,

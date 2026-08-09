@@ -38,8 +38,6 @@ const WRITE_APPROVAL_TTL: Duration = Duration::from_secs(15 * 60);
 const FULL_NOTE_DIFF_PREVIEW_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_LONG_TERM_MEMORY_CONTENT_BYTES: usize = 1024 * 1024;
 const MAX_LONG_TERM_MEMORY_METADATA_BYTES: usize = 256 * 1024;
-const MAX_LONG_TERM_MEMORY_LEDGER_BYTES: usize = 8 * 1024 * 1024;
-const MAX_LONG_TERM_MEMORY_LEDGER_PARTS: usize = 128;
 const VAULT_WRITE_CAPABILITIES: &[&str] = &[
     "system:capture",
     "system:create",
@@ -54,7 +52,6 @@ const VAULT_WRITE_OPERATIONS: &[&str] = &["run", "create", "update", "generate"]
 pub struct ObsidianAdapterState {
     pending_writes: Mutex<HashMap<String, PendingWrite>>,
     pending_assets: Mutex<HashMap<String, PendingAssetWrite>>,
-    long_term_memory_write: Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -114,11 +111,31 @@ struct PendingWrite {
     source: PendingNoteSource,
     content_hash: String,
     expected_hash: Option<String>,
+    expected_absent: bool,
     previous_hash: Option<String>,
     analysis_receipt: String,
+    write_manifest_digest: Option<String>,
     execution_ticket: Option<String>,
     effect_digest: String,
     created_at: SystemTime,
+}
+
+const NOTE_WRITE_MANIFEST_VERSION: &str = "yunspire.note-write-manifest.v1";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NoteWriteManifestEntry {
+    vault_id: String,
+    relative_path: String,
+    previous: String,
+    next_content_hash: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NoteWriteManifest<'a> {
+    version: &'static str,
+    writes: &'a [NoteWriteManifestEntry],
 }
 
 #[derive(Clone)]
@@ -243,13 +260,25 @@ pub struct VaultNoteSummary {
     relative_path: String,
     title: String,
     content: String,
+    content_hash: String,
     modified_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultNoteReadFailure {
+    vault_id: String,
+    vault_name: String,
+    relative_path: String,
+    reason: String,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultNotePage {
     notes: Vec<VaultNoteSummary>,
+    failures: Vec<VaultNoteReadFailure>,
+    candidate_count: usize,
     next_after_vault_id: Option<String>,
     next_after_relative_path: Option<String>,
     has_more: bool,
@@ -406,7 +435,7 @@ pub struct LongTermMemoryEventInput {
 #[serde(rename_all = "camelCase")]
 pub struct LongTermMemoryReceipt {
     event_id: String,
-    relative_path: String,
+    relative_path: Option<String>,
     content_hash: String,
     committed_at: String,
     duplicate: bool,
@@ -538,6 +567,30 @@ fn now_string() -> String {
 
 fn hash_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn note_write_manifest_digest(mut entries: Vec<NoteWriteManifestEntry>) -> Result<String, String> {
+    entries.sort_by(|left, right| {
+        left.vault_id
+            .as_bytes()
+            .cmp(right.vault_id.as_bytes())
+            .then_with(|| {
+                left.relative_path
+                    .as_bytes()
+                    .cmp(right.relative_path.as_bytes())
+            })
+    });
+    if entries.windows(2).any(|pair| {
+        pair[0].vault_id == pair[1].vault_id && pair[0].relative_path == pair[1].relative_path
+    }) {
+        return Err("写入清单不能重复包含同一 Vault 笔记".to_string());
+    }
+    let canonical = serde_json::to_vec(&NoteWriteManifest {
+        version: NOTE_WRITE_MANIFEST_VERSION,
+        writes: &entries,
+    })
+    .map_err(|error| format!("无法序列化写入清单：{error}"))?;
+    Ok(hash_bytes(&canonical))
 }
 
 fn hash_file_streaming(path: &Path) -> Result<String, String> {
@@ -932,14 +985,7 @@ pub(crate) fn remove_vault_registration_for_runtime(vault_id: &str) -> Result<()
 }
 
 pub(crate) fn ensure_default_vaults_for_runtime() -> Result<(), String> {
-    const AGENT_DIRECTORIES: &[&str] = &[
-        "知识库",
-        "原子库",
-        "资料库",
-        "收件箱",
-        "画像",
-        "长期记忆/行为记录",
-    ];
+    const AGENT_DIRECTORIES: &[&str] = &["知识库", "原子库", "资料库", "收件箱", "画像"];
     const PERSONAL_DIRECTORIES: &[&str] = &[
         "复盘报告体系/日报",
         "复盘报告体系/周报",
@@ -951,7 +997,7 @@ pub(crate) fn ensure_default_vaults_for_runtime() -> Result<(), String> {
         "项目/计划做",
         "创作成品",
     ];
-    const AGENT_INTRODUCTION: &str = "---\nvault_role: agent\nmanaged_by: Yunspire\n---\n\n# Agent 库\n\n用于保存云枢采集、分析、长期记忆和维护的知识资产。Markdown 文件是知识事实来源，索引可以随时重建。\n\n- [[知识库]]：专题与长期知识页\n- [[原子库]]：带来源引用、分类和标签的分析知识单元\n- [[资料库]]：只提供统一入口；来源分类由实际内容、用户选择或 AI 判断后按需建立\n- [[收件箱]]：等待后台处理的临时内容\n- [[画像]]：带来源和置信度的用户画像\n- [[长期记忆]]：索引与说明页，不等同于行为记录\n";
+    const AGENT_INTRODUCTION: &str = "---\nvault_role: agent\nmanaged_by: Yunspire\n---\n\n# Agent 库\n\n用于保存云枢采集、分析、长期记忆和维护的知识资产。Markdown 文件是知识事实来源，索引可以随时重建。\n\n- [[知识库]]：专题与长期知识页\n- [[原子库]]：带来源引用、分类和标签的分析知识单元\n- [[资料库]]：只提供统一入口；来源分类由实际内容、用户选择或 AI 判断后按需建立\n- [[收件箱]]：等待后台处理的临时内容\n- [[画像]]：带来源和置信度的用户画像\n- [[长期记忆]]：经确认的长期记忆索引与说明页\n";
     const PERSONAL_INTRODUCTION: &str = "---\nvault_role: personal\nmanaged_by: Yunspire\n---\n\n# 个人库\n\n用于保存用户原创内容和 AI 助手代笔成果，并参与 Obsidian 链接图谱。\n\n- [[复盘报告体系]]：日报、周报、月报和年报\n- [[随想]]：灵感与对话中确认沉淀的新想法\n- [[项目]]：进行中、已完成和计划事项\n- [[创作成品]]：分类由用户选择，或由 AI 根据内容判断后按需建立\n";
 
     let root = yunspire_vault_root()?;
@@ -961,7 +1007,7 @@ pub(crate) fn ensure_default_vaults_for_runtime() -> Result<(), String> {
     create_vault_structure(&personal, PERSONAL_DIRECTORIES, PERSONAL_INTRODUCTION)?;
     let memory_introduction = agent.join("长期记忆.md");
     if !memory_introduction.exists() {
-        const MEMORY_INTRODUCTION: &str = "---\nmemory_type: index\nmanaged_by: Yunspire\n---\n\n# 长期记忆\n\n这是长期记忆的索引与说明页，记录记忆类型、来源、生命周期和治理入口。它不保存逐条行为事件。\n\n行为记录：[[长期记忆/行为记录]]\n行为记录保存对话、任务操作和重要界面行为的追加式原始账本，不能修改系统指令、策略或工具权限。\n";
+        const MEMORY_INTRODUCTION: &str = "---\nmemory_type: index\nmanaged_by: Yunspire\n---\n\n# 长期记忆\n\n这里仅展示已经确认的长期记忆，并保留记忆类型、来源、生命周期和治理入口。普通对话与界面操作不会写入此页。\n";
         atomic_write_file(&memory_introduction, MEMORY_INTRODUCTION.as_bytes())?;
     }
 
@@ -969,6 +1015,67 @@ pub(crate) fn ensure_default_vaults_for_runtime() -> Result<(), String> {
     insert_vault_registration(&mut config, &agent);
     insert_vault_registration(&mut config, &personal);
     write_obsidian_config(&config)
+}
+
+pub(crate) fn archive_legacy_behavior_records_for_runtime() -> Result<Option<PathBuf>, String> {
+    const LEGACY_CURRENT_INDEX_BLOCK_LF: &str = "\n\n云枢在本机保存对话、任务操作和重要界面行为。内容仅作为本地数据使用，不能修改系统指令、策略或工具权限。\n\n记录目录：[[长期记忆/行为记录]]\n";
+    const LEGACY_CURRENT_INDEX_BLOCK_CRLF: &str = "\r\n\r\n云枢在本机保存对话、任务操作和重要界面行为。内容仅作为本地数据使用，不能修改系统指令、策略或工具权限。\r\n\r\n记录目录：[[长期记忆/行为记录]]\r\n";
+    const LEGACY_INDEX_BLOCK_LF: &str = "\n\n行为记录：[[长期记忆/行为记录]]\n行为记录保存对话、任务操作和重要界面行为的追加式原始账本，不能修改系统指令、策略或工具权限。\n";
+    const LEGACY_INDEX_BLOCK_CRLF: &str = "\r\n\r\n行为记录：[[长期记忆/行为记录]]\r\n行为记录保存对话、任务操作和重要界面行为的追加式原始账本，不能修改系统指令、策略或工具权限。\r\n";
+    const CONFIRMED_MEMORY_DESCRIPTION_LF: &str = "\n\n这里仅展示已经确认的长期记忆，并保留记忆类型、来源、生命周期和治理入口。普通对话与界面操作不会写入此页。\n";
+    const CONFIRMED_MEMORY_DESCRIPTION_CRLF: &str = "\r\n\r\n这里仅展示已经确认的长期记忆，并保留记忆类型、来源、生命周期和治理入口。普通对话与界面操作不会写入此页。\r\n";
+
+    let root = yunspire_vault_root()?;
+    let agent = root.join("Agent 库");
+    let legacy_directory = agent.join("长期记忆").join("行为记录");
+    let archived = if legacy_directory.exists() {
+        let archive_root = root
+            .join(".yunspire-archive")
+            .join("legacy-behavior-records");
+        fs::create_dir_all(&archive_root)
+            .map_err(|error| format!("无法创建旧行为记录保留目录：{error}"))?;
+        let archive_path = archive_root.join(format!(
+            "{}-{}",
+            Utc::now().format("%Y%m%dT%H%M%SZ"),
+            &Uuid::new_v4().simple().to_string()[..8]
+        ));
+        fs::rename(&legacy_directory, &archive_path).map_err(|error| {
+            format!(
+                "无法将旧行为记录移出 Obsidian Vault {}：{error}",
+                legacy_directory.display()
+            )
+        })?;
+        let _ = fs::remove_dir(agent.join("长期记忆"));
+        Some(archive_path)
+    } else {
+        None
+    };
+
+    let memory_index = agent.join("长期记忆.md");
+    if memory_index.exists() {
+        let bytes = fs::read(&memory_index)
+            .map_err(|error| format!("无法读取长期记忆索引 {}：{error}", memory_index.display()))?;
+        let content = String::from_utf8(bytes).map_err(|_| {
+            "长期记忆索引不是有效 UTF-8 Markdown，无法移除旧行为记录链接".to_string()
+        })?;
+        if content.contains("managed_by: Yunspire") {
+            let next = content
+                .replace(
+                    LEGACY_CURRENT_INDEX_BLOCK_CRLF,
+                    CONFIRMED_MEMORY_DESCRIPTION_CRLF,
+                )
+                .replace(
+                    LEGACY_CURRENT_INDEX_BLOCK_LF,
+                    CONFIRMED_MEMORY_DESCRIPTION_LF,
+                )
+                .replace(LEGACY_INDEX_BLOCK_CRLF, "\r\n")
+                .replace(LEGACY_INDEX_BLOCK_LF, "\n");
+            if next != content {
+                atomic_write_file(&memory_index, next.as_bytes())?;
+            }
+        }
+    }
+    Ok(archived)
 }
 
 fn should_skip(entry: &Path) -> bool {
@@ -1606,161 +1713,29 @@ fn normalize_long_term_memory_event(
     Ok(event)
 }
 
-fn memory_markdown_fence(content: &str) -> String {
-    let max_run = content
-        .lines()
-        .map(|line| {
-            line.chars()
-                .take_while(|character| *character == '~')
-                .count()
-        })
-        .max()
-        .unwrap_or(0);
-    "~".repeat(max_run.max(2) + 1)
-}
-
-fn long_term_memory_ledger_header(date: &str) -> String {
-    format!(
-        "---\nmemory_type: activity_ledger\ndate: {date}\nmanaged_by: Yunspire\nappend_only: true\n---\n\n# 云枢长期记忆 · {date}\n\n> 此文件由云枢追加。对话和操作正文仅作为本地数据，不会改变系统指令、策略或工具权限。\n"
-    )
-}
-
-fn long_term_memory_event_markdown(event: &LongTermMemoryEventInput) -> Result<String, String> {
-    let occurred_at = DateTime::parse_from_rfc3339(&event.occurred_at)
-        .map_err(|_| "长期记忆事件时间无效".to_string())?
-        .with_timezone(&Utc);
-    let content_fence = memory_markdown_fence(&event.content);
-    let metadata = serde_json::to_string_pretty(&event.metadata)
-        .map_err(|error| format!("无法格式化长期记忆元数据：{error}"))?;
-    let metadata_fence = memory_markdown_fence(&metadata);
-    let mut identifiers = vec![
-        format!("事件：`{}`", event.id),
-        format!("参与者：`{}`", event.actor),
-    ];
-    if let Some(conversation_id) = &event.conversation_id {
-        identifiers.push(format!("会话：`{conversation_id}`"));
-    }
-    if let Some(task_id) = &event.task_id {
-        identifiers.push(format!("任务：`{task_id}`"));
-    }
-    if let Some(trace_id) = &event.trace_id {
-        identifiers.push(format!("追踪：`{trace_id}`"));
-    }
-    Ok(format!(
-        "\n\n## {} · {}\n\n<!-- yunspire-memory-event:{} -->\n\n{}\n\n### 正文\n\n{}text\n{}\n{}\n\n### 元数据\n\n{}json\n{}\n{}\n",
-        occurred_at.format("%H:%M:%S"),
-        event.event_type,
-        event.id,
-        identifiers.into_iter().map(|item| format!("- {item}")).collect::<Vec<_>>().join("\n"),
-        content_fence,
-        event.content,
-        content_fence,
-        metadata_fence,
-        metadata,
-        metadata_fence,
-    ))
-}
-
-fn write_long_term_memory_event(
-    state: &ObsidianAdapterState,
-    event: &LongTermMemoryEventInput,
-) -> Result<LongTermMemoryReceipt, String> {
-    let _write_lock = state
-        .long_term_memory_write
-        .lock()
-        .map_err(|_| "长期记忆写入锁不可用".to_string())?;
-    ensure_default_vaults_for_runtime()?;
-    let agent_root = yunspire_vault_root()?.join("Agent 库");
-    let occurred_at = DateTime::parse_from_rfc3339(&event.occurred_at)
-        .map_err(|_| "长期记忆事件时间无效".to_string())?
-        .with_timezone(&Utc);
-    let date = occurred_at.format("%Y-%m-%d").to_string();
-    let relative_directory = PathBuf::from("长期记忆")
-        .join("行为记录")
-        .join(occurred_at.format("%Y").to_string())
-        .join(occurred_at.format("%m").to_string());
-    let event_markdown = long_term_memory_event_markdown(event)?;
-    let marker = format!("<!-- yunspire-memory-event:{} -->", event.id);
-
-    for part in 1..=MAX_LONG_TERM_MEMORY_LEDGER_PARTS {
-        let file_name = if part == 1 {
-            format!("{date}.md")
-        } else {
-            format!("{date}-{part}.md")
-        };
-        let relative_path = relative_directory.join(file_name);
-        let target = agent_root.join(&relative_path);
-        let existing = match fs::read(&target) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => {
-                return Err(format!(
-                    "无法读取长期记忆账本 {}：{error}",
-                    target.display()
-                ))
-            }
-        };
-        if existing
-            .windows(marker.len())
-            .any(|window| window == marker.as_bytes())
-        {
-            return Ok(LongTermMemoryReceipt {
-                event_id: event.id.clone(),
-                relative_path: relative_path.to_string_lossy().replace('\\', "/"),
-                content_hash: hash_bytes(&existing),
-                committed_at: now_string(),
-                duplicate: true,
-            });
-        }
-        let mut next = if existing.is_empty() {
-            long_term_memory_ledger_header(&date).into_bytes()
-        } else {
-            existing
-        };
-        if next.len() + event_markdown.len() > MAX_LONG_TERM_MEMORY_LEDGER_BYTES {
-            continue;
-        }
-        next.extend_from_slice(event_markdown.as_bytes());
-        atomic_write_file(&target, &next)?;
-        return Ok(LongTermMemoryReceipt {
-            event_id: event.id.clone(),
-            relative_path: relative_path.to_string_lossy().replace('\\', "/"),
-            content_hash: hash_bytes(&next),
-            committed_at: now_string(),
-            duplicate: false,
-        });
-    }
-    Err("当天长期记忆分片数量超过安全上限".to_string())
-}
-
-pub(crate) fn flush_pending_long_term_memory_events_for_runtime(
+pub(crate) fn finalize_pending_long_term_memory_events_for_runtime(
     database: &RuntimeDatabase,
     workspace_scope: &str,
-    state: &ObsidianAdapterState,
 ) -> Result<(), String> {
     for pending in database.pending_long_term_memory_events(workspace_scope, 200)? {
-        let event =
-            match serde_json::from_value::<LongTermMemoryEventInput>(pending.payload.clone()) {
-                Ok(event) => event,
-                Err(error) => {
-                    database.fail_long_term_memory_event(
-                        workspace_scope,
-                        &pending.id,
-                        &format!("长期记忆记录格式无效：{error}"),
-                    )?;
-                    continue;
-                }
-            };
-        match write_long_term_memory_event(state, &event) {
-            Ok(receipt) => database.commit_long_term_memory_event(
-                workspace_scope,
-                &event.id,
-                &receipt.relative_path,
-                &receipt.content_hash,
-                &receipt.committed_at,
-            )?,
+        let event = match serde_json::from_value::<LongTermMemoryEventInput>(pending.payload) {
+            Ok(event) => normalize_long_term_memory_event(event),
+            Err(error) => Err(format!("长期记忆记录格式无效：{error}")),
+        };
+        match event {
+            Ok(event) => {
+                let payload = serde_json::to_vec(&event)
+                    .map_err(|error| format!("无法序列化长期记忆事件：{error}"))?;
+                let committed_at = now_string();
+                database.commit_long_term_memory_event_internal(
+                    workspace_scope,
+                    &event.id,
+                    &hash_bytes(&payload),
+                    &committed_at,
+                )?;
+            }
             Err(error) => {
-                database.fail_long_term_memory_event(workspace_scope, &event.id, &error)?
+                database.fail_long_term_memory_event(workspace_scope, &pending.id, &error)?
             }
         }
     }
@@ -1805,36 +1780,36 @@ pub(crate) fn recover_vault_batch_manifests_for_runtime(
 #[tauri::command]
 pub fn append_long_term_memory_event(
     database: State<'_, RuntimeDatabase>,
-    state: State<'_, ObsidianAdapterState>,
     event: LongTermMemoryEventInput,
 ) -> Result<LongTermMemoryReceipt, String> {
     let workspace_scope = database.local_workspace_scope()?;
     let event = normalize_long_term_memory_event(event)?;
     let payload =
         serde_json::to_value(&event).map_err(|error| format!("无法序列化长期记忆事件：{error}"))?;
-    database.stage_long_term_memory_event(
+    let duplicate = database.stage_long_term_memory_event(
         &workspace_scope,
         &event.id,
         &event.event_type,
         &event.occurred_at,
         &payload,
     )?;
-    match write_long_term_memory_event(&state, &event) {
-        Ok(receipt) => {
-            database.commit_long_term_memory_event(
-                &workspace_scope,
-                &event.id,
-                &receipt.relative_path,
-                &receipt.content_hash,
-                &receipt.committed_at,
-            )?;
-            Ok(receipt)
-        }
-        Err(error) => {
-            database.fail_long_term_memory_event(&workspace_scope, &event.id, &error)?;
-            Err(error)
-        }
-    }
+    let payload_bytes =
+        serde_json::to_vec(&event).map_err(|error| format!("无法序列化长期记忆事件：{error}"))?;
+    let committed_at = now_string();
+    let content_hash = hash_bytes(&payload_bytes);
+    database.commit_long_term_memory_event_internal(
+        &workspace_scope,
+        &event.id,
+        &content_hash,
+        &committed_at,
+    )?;
+    Ok(LongTermMemoryReceipt {
+        event_id: event.id,
+        relative_path: None,
+        content_hash,
+        committed_at,
+        duplicate,
+    })
 }
 
 fn title_from_markdown(path: &Path, content: &str) -> String {
@@ -2272,6 +2247,7 @@ pub fn list_vault_notes(
                 Ok(value) => value,
                 Err(_) => continue,
             };
+            let content_hash = hash_bytes(&bytes);
             let content = match String::from_utf8(bytes) {
                 Ok(value) => value.nfc().collect::<String>(),
                 Err(_) => continue,
@@ -2282,6 +2258,7 @@ pub fn list_vault_notes(
                 relative_path: relative,
                 title: title_from_markdown(&path, &content),
                 content,
+                content_hash,
                 modified_at: modified_string(&path),
             });
         }
@@ -2322,9 +2299,9 @@ fn collect_vault_note_candidates(
         let mut attachments = 0;
         collect_files(&root, &mut markdown, &mut attachments)?;
         for path in markdown {
-            let Ok(relative_path) = normalized_relative_path(&root, &path) else {
-                continue;
-            };
+            let relative_path = normalized_relative_path(&root, &path).map_err(|error| {
+                format!("无法规范化知识库 Markdown 路径 {}：{error}", path.display())
+            })?;
             candidates.push(VaultNoteCandidate {
                 vault_id: vault.id.clone(),
                 vault_name: vault.name.clone(),
@@ -2388,6 +2365,7 @@ fn list_vault_notes_page_inner(
         })
     });
     let mut notes = Vec::new();
+    let mut failures = Vec::new();
     let mut returned_bytes = 0_u64;
     let mut processed = 0_usize;
     let mut last_processed: Option<(String, String)> = None;
@@ -2395,7 +2373,13 @@ fn list_vault_notes_page_inner(
         let candidate = &candidates[index];
         let bytes = match read_file_limited(&candidate.path) {
             Ok(value) => value,
-            Err(_) => {
+            Err(error) => {
+                failures.push(VaultNoteReadFailure {
+                    vault_id: candidate.vault_id.clone(),
+                    vault_name: candidate.vault_name.clone(),
+                    relative_path: candidate.relative_path.clone(),
+                    reason: error,
+                });
                 last_processed =
                     Some((candidate.vault_id.clone(), candidate.relative_path.clone()));
                 index += 1;
@@ -2410,8 +2394,18 @@ fn list_vault_notes_page_inner(
         last_processed = Some((candidate.vault_id.clone(), candidate.relative_path.clone()));
         index += 1;
         processed += 1;
-        let Ok(content) = String::from_utf8(bytes) else {
-            continue;
+        let content_hash = hash_bytes(&bytes);
+        let content = match String::from_utf8(bytes) {
+            Ok(content) => content,
+            Err(error) => {
+                failures.push(VaultNoteReadFailure {
+                    vault_id: candidate.vault_id.clone(),
+                    vault_name: candidate.vault_name.clone(),
+                    relative_path: candidate.relative_path.clone(),
+                    reason: format!("不是有效 UTF-8 Markdown：{error}"),
+                });
+                continue;
+            }
         };
         let content = content.nfc().collect::<String>();
         returned_bytes = returned_bytes.saturating_add(byte_length);
@@ -2421,6 +2415,7 @@ fn list_vault_notes_page_inner(
             relative_path: candidate.relative_path.clone(),
             title: title_from_markdown(&candidate.path, &content),
             content,
+            content_hash,
             modified_at: modified_string(&candidate.path),
         });
     }
@@ -2437,6 +2432,8 @@ fn list_vault_notes_page_inner(
     }
     Ok(VaultNotePage {
         notes,
+        failures,
+        candidate_count: candidates.len(),
         next_after_vault_id,
         next_after_relative_path,
         has_more,
@@ -3645,6 +3642,8 @@ pub fn prepare_note_write(
     content: String,
     analysis_receipt: String,
     expected_hash: Option<String>,
+    expected_absent: Option<bool>,
+    write_manifest_digest: Option<String>,
     operation_context: Option<OperationContext>,
 ) -> Result<WritePreview, String> {
     prepare_note_write_inner(
@@ -3657,6 +3656,8 @@ pub fn prepare_note_write(
         content,
         analysis_receipt,
         expected_hash,
+        expected_absent,
+        write_manifest_digest,
         operation_context,
     )
 }
@@ -3674,6 +3675,8 @@ pub fn prepare_note_write_from_durable_asset(
     durable_asset_id: String,
     analysis_receipt: String,
     expected_hash: Option<String>,
+    expected_absent: Option<bool>,
+    write_manifest_digest: Option<String>,
     operation_context: Option<OperationContext>,
 ) -> Result<WritePreview, String> {
     let (descriptor, source_path) =
@@ -3695,6 +3698,8 @@ pub fn prepare_note_write_from_durable_asset(
         PendingNoteSource::Durable(source_path),
         analysis_receipt,
         expected_hash,
+        expected_absent,
+        write_manifest_digest,
         operation_context,
     )
 }
@@ -3710,6 +3715,8 @@ fn prepare_note_write_inner(
     content: String,
     analysis_receipt: String,
     expected_hash: Option<String>,
+    expected_absent: Option<bool>,
+    write_manifest_digest: Option<String>,
     operation_context: Option<OperationContext>,
 ) -> Result<WritePreview, String> {
     prepare_note_write_source_inner(
@@ -3722,6 +3729,8 @@ fn prepare_note_write_inner(
         PendingNoteSource::Text(content),
         analysis_receipt,
         expected_hash,
+        expected_absent,
+        write_manifest_digest,
         operation_context,
     )
 }
@@ -3736,10 +3745,29 @@ fn prepare_note_write_source_inner(
     relative_path: String,
     source: PendingNoteSource,
     analysis_receipt: String,
-    expected_hash: Option<String>,
+    mut expected_hash: Option<String>,
+    expected_absent: Option<bool>,
+    write_manifest_digest: Option<String>,
     operation_context: Option<OperationContext>,
 ) -> Result<WritePreview, String> {
-    analysis_state.validate("local", &analysis_receipt)?;
+    let write_manifest_digest = analysis_state.validate_write_manifest(
+        "local",
+        &analysis_receipt,
+        write_manifest_digest.as_deref(),
+    )?;
+    let expected_absent = expected_absent.unwrap_or(false);
+    if expected_absent && expected_hash.is_some() {
+        return Err("expectedHash 与 expectedAbsent 不能同时设置".to_string());
+    }
+    if write_manifest_digest.is_some() {
+        expected_hash = expected_hash
+            .as_deref()
+            .map(|value| normalize_capture_sha256(value, "expectedHash"))
+            .transpose()?;
+        if !expected_absent && expected_hash.is_none() {
+            return Err("绑定写入清单的笔记必须声明 expectedHash 或 expectedAbsent".to_string());
+        }
+    }
     let workspace_scope = database.local_workspace_scope()?;
     let (_, root) = resolve_vault(&vault_id)?;
     let (target, normalized_relative) = resolve_note_target(&root, &relative_path, true)?;
@@ -3749,6 +3777,9 @@ fn prepare_note_write_source_inner(
     let previous_hash = (!is_new_file)
         .then(|| hash_file_streaming(&target))
         .transpose()?;
+    if expected_absent && !is_new_file {
+        return Err("笔记本应不存在，但目标已被 Obsidian 或其他程序创建".to_string());
+    }
     if let Some(expected) = expected_hash.as_ref() {
         if previous_hash.as_ref() != Some(expected) {
             return Err("笔记已被 Obsidian 或其他程序修改，请重新读取后再生成变更".to_string());
@@ -3846,8 +3877,10 @@ fn prepare_note_write_source_inner(
             source,
             content_hash: next_hash.clone(),
             expected_hash,
+            expected_absent,
             previous_hash: previous_hash.clone(),
             analysis_receipt,
+            write_manifest_digest,
             execution_ticket: bound_execution.execution_ticket,
             effect_digest,
             created_at: SystemTime::now(),
@@ -3887,6 +3920,10 @@ pub fn commit_note_write(
         .get(&approval_id)
         .cloned()
         .ok_or_else(|| "审批令牌不存在或已经失效".to_string())?;
+    if pending.write_manifest_digest.is_some() {
+        return Err("绑定写入清单的笔记必须通过整批提交".to_string());
+    }
+    analysis_state.validate_write_manifest("local", &pending.analysis_receipt, None)?;
     if pending
         .created_at
         .elapsed()
@@ -3910,6 +3947,7 @@ pub fn commit_note_write(
         None
     };
     if current_hash != pending.previous_hash
+        || (pending.expected_absent && current_hash.is_some())
         || pending
             .expected_hash
             .as_ref()
@@ -3976,12 +4014,15 @@ pub fn commit_note_write(
             &[(&approval_id, &pending.effect_digest)],
         )?;
     }
-    if let Err(error) = analysis_state.consume("local", &pending.analysis_receipt) {
-        if let Some(token) = ticket_token {
-            ticket_state.release_commit(token);
+    let consumed_receipt = match analysis_state.consume("local", &pending.analysis_receipt) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            if let Some(token) = ticket_token {
+                ticket_state.release_commit(token);
+            }
+            return Err(error);
         }
-        return Err(error);
-    }
+    };
     let write_result = match &pending.source {
         PendingNoteSource::Text(content) => {
             atomic_write_file(&pending.target_path, content.as_bytes())
@@ -3991,7 +4032,7 @@ pub fn commit_note_write(
         }
     };
     if let Err(error) = write_result {
-        analysis_state.restore("local", &pending.analysis_receipt);
+        analysis_state.restore(&pending.analysis_receipt, consumed_receipt);
         if let Some(token) = ticket_token {
             ticket_state.release_commit(token);
         }
@@ -4020,7 +4061,7 @@ pub fn commit_note_write(
         } else {
             Ok(())
         };
-        analysis_state.restore("local", &pending.analysis_receipt);
+        analysis_state.restore(&pending.analysis_receipt, consumed_receipt);
         if let Some(token) = ticket_token {
             ticket_state.release_commit(token);
         }
@@ -4134,7 +4175,7 @@ fn prepare_asset_write_inner(
     trace_id: Option<String>,
     execution_ticket: Option<String>,
 ) -> Result<AssetWritePreview, String> {
-    analysis_state.validate("local", &analysis_receipt)?;
+    analysis_state.validate_unbound_write_manifest("local", &analysis_receipt)?;
     let workspace_scope = database.local_workspace_scope()?;
     let (_, root) = resolve_vault(&vault_id)?;
     let (target, normalized_relative) = resolve_asset_target(&root, &relative_path)?;
@@ -4451,6 +4492,8 @@ fn prepare_capture_vault_writes_inner(
                 raw_markdown,
                 input.analysis_receipt.clone(),
                 None,
+                Some(true),
+                None,
                 operation_context.clone(),
             )?;
             let raw_is_new_file = raw_preview.is_new_file;
@@ -4472,6 +4515,8 @@ fn prepare_capture_vault_writes_inner(
             agent_relative_path.clone(),
             agent_markdown.clone(),
             input.analysis_receipt.clone(),
+            None,
+            Some(true),
             None,
             operation_context.clone(),
         )?;
@@ -4669,7 +4714,66 @@ fn commit_capture_batch_inner(
     {
         return Err(format!("{}批次必须来自同一次完整模型分析", batch_kind.0));
     }
-    analysis_state.validate("local", &analysis_receipt)?;
+    let write_manifest_digest = batch.iter().find_map(|(_, pending)| match pending {
+        BatchPendingWrite::Note(note) => note.write_manifest_digest.clone(),
+        BatchPendingWrite::Asset(_) => None,
+    });
+    if let Some(expected_digest) = write_manifest_digest.as_deref() {
+        if !asset_approval_ids.is_empty() {
+            return Err("绑定笔记写入清单的批次不能包含清单外附件".to_string());
+        }
+        if batch.iter().any(|(_, pending)| match pending {
+            BatchPendingWrite::Note(note) => {
+                note.write_manifest_digest.as_deref() != Some(expected_digest)
+            }
+            BatchPendingWrite::Asset(_) => true,
+        }) {
+            return Err("整批 Markdown 审批必须携带同一个写入清单摘要".to_string());
+        }
+        let manifest_entries = batch
+            .iter()
+            .filter_map(|(_, pending)| match pending {
+                BatchPendingWrite::Note(note) => Some(note),
+                BatchPendingWrite::Asset(_) => None,
+            })
+            .map(|note| {
+                let previous = if note.expected_absent {
+                    if note.expected_hash.is_some() {
+                        return Err("写入清单中的笔记旧状态同时声明了 hash 与 absent".to_string());
+                    }
+                    "absent".to_string()
+                } else {
+                    let hash = note
+                        .expected_hash
+                        .as_deref()
+                        .ok_or_else(|| "绑定写入清单的笔记缺少明确的旧版本状态".to_string())?;
+                    format!("sha256:{hash}")
+                };
+                let next_content_hash = note.source.content_hash()?;
+                if next_content_hash != note.content_hash {
+                    return Err(format!(
+                        "待写入正文在审批期间发生变化：{}",
+                        note.relative_path
+                    ));
+                }
+                Ok(NoteWriteManifestEntry {
+                    vault_id: note.vault_id.clone(),
+                    relative_path: note.relative_path.clone(),
+                    previous,
+                    next_content_hash,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let actual_digest = note_write_manifest_digest(manifest_entries)?;
+        if actual_digest != expected_digest {
+            return Err("实际 Markdown 审批集合与模型分析凭证绑定的写入清单不一致".to_string());
+        }
+    }
+    analysis_state.validate_write_manifest(
+        "local",
+        &analysis_receipt,
+        write_manifest_digest.as_deref(),
+    )?;
 
     let mut targets = std::collections::HashSet::new();
     for (_, pending) in &batch {
@@ -4708,10 +4812,11 @@ fn commit_capture_batch_inner(
             ));
         }
         if let BatchPendingWrite::Note(note) = pending {
-            if note
-                .expected_hash
-                .as_ref()
-                .is_some_and(|expected| current_hash.as_ref() != Some(expected))
+            if (note.expected_absent && current_hash.is_some())
+                || note
+                    .expected_hash
+                    .as_ref()
+                    .is_some_and(|expected| current_hash.as_ref() != Some(expected))
             {
                 return Err(format!(
                     "笔记与预期版本不一致，已拒绝整批写入：{}",
@@ -4815,19 +4920,22 @@ fn commit_capture_batch_inner(
             &approvals,
         )?;
     }
-    if let Err(error) = analysis_state.consume("local", &analysis_receipt) {
-        if let (Some(token), Some(ticket_state)) = (execution_ticket.as_deref(), ticket_state) {
-            ticket_state.release_commit(token);
+    let consumed_receipt = match analysis_state.consume("local", &analysis_receipt) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            if let (Some(token), Some(ticket_state)) = (execution_ticket.as_deref(), ticket_state) {
+                ticket_state.release_commit(token);
+            }
+            return Err(error);
         }
-        return Err(error);
-    }
+    };
     let sources = batch
         .iter()
         .map(|(_, pending)| pending.batch_source())
         .collect::<Vec<_>>();
     if let Err(error) = vault_batch::commit_batch_sources(&checkpoint_dir, &mut manifest, &sources)
     {
-        analysis_state.restore("local", &analysis_receipt);
+        analysis_state.restore(&analysis_receipt, consumed_receipt);
         if let (Some(token), Some(ticket_state)) = (execution_ticket.as_deref(), ticket_state) {
             ticket_state.release_commit(token);
         }
@@ -4871,7 +4979,7 @@ fn commit_capture_batch_inner(
         relative_path: Some(primary_result.relative_path.clone()),
         detail: manifest.audit.detail.clone(),
     }) {
-        analysis_state.restore("local", &analysis_receipt);
+        analysis_state.restore(&analysis_receipt, consumed_receipt);
         if let (Some(token), Some(ticket_state)) = (execution_ticket.as_deref(), ticket_state) {
             ticket_state.release_commit(token);
         }

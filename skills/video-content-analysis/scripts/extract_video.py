@@ -22,10 +22,13 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 import media_discovery
 
 MAX_PAGE_BYTES = 12 * 1024 * 1024
-USER_AGENT = "Yunspire/0.2 local public media collector"
+USER_AGENT = "Yunspire/0.4.0 local public media collector"
 AUTH_CONTEXT = {"allowed_hosts": set(), "headers": {}}
 SENSITIVE_HEADERS = ("Cookie", "Authorization")
 PROGRESS_FILE = os.environ.get("YUNSPIRE_PROGRESS_FILE", "").strip()
+AUDIO_ONLY_SUFFIXES = {
+    ".mp3", ".m4a", ".aac", ".wav", ".aif", ".aiff", ".caf", ".flac", ".ogg",
+}
 
 
 def progress_checkpoint(label):
@@ -674,6 +677,7 @@ def apply_local_analysis(result, media, output_dir, locale):
     analysis = local_media_analysis(media, output_dir, locale)
     result["frames"] = analysis.get("frames", [])
     result["metadata"]["duration_seconds"] = analysis.get("duration_seconds", 0)
+    result["metadata"]["audio_track_available"] = bool(analysis.get("audio_path"))
     if analysis.get("frame_timestamps_ms"):
         result["metadata"]["frame_timestamps_ms"] = analysis["frame_timestamps_ms"]
     if analysis.get("frame_difference_scores"):
@@ -692,8 +696,22 @@ def apply_local_analysis(result, media, output_dir, locale):
 
 
 def completed_analysis_status(result):
-    has_analysis = bool(result.get("transcript") or result.get("frames"))
-    if not has_analysis or result.get("errors"):
+    has_transcript = bool(str(result.get("transcript") or "").strip())
+    has_frames = bool(result.get("frames"))
+    extension = str(
+        result.get("metadata", {}).get("file_extension")
+        or Path(str(result.get("media_path") or "")).suffix
+    ).lower()
+    audio_only = extension in AUDIO_ONLY_SUFFIXES
+    transcript_required = audio_only or result.get("metadata", {}).get("audio_track_available") is True
+    frames_required = not audio_only
+    if transcript_required and not has_transcript and "transcript_unavailable" not in result["errors"]:
+        result["errors"].append("transcript_unavailable")
+    if frames_required and not has_frames and "visual_frames_unavailable" not in result["errors"]:
+        result["errors"].append("visual_frames_unavailable")
+    if ((transcript_required and not has_transcript)
+            or (frames_required and not has_frames)
+            or result.get("errors")):
         return "partial"
     return "completed"
 
@@ -752,6 +770,28 @@ def main():
     if local_source.is_file():
         emit(process_local_file(local_source.resolve(), args.output_dir, args.locale))
         return
+    parsed = urlparse(args.source)
+    looks_like_local_media = (
+        local_source.suffix.lower() in media_discovery.MEDIA_SUFFIXES
+        or local_source.is_absolute()
+        or args.source.startswith(("./", "../", "~/"))
+        or "\\" in args.source
+    )
+    if parsed.scheme not in {"http", "https"} and looks_like_local_media:
+        result = base_result("")
+        result["source_kind"] = "local_file"
+        result["platform"] = "本地文件"
+        result["title"] = local_source.stem[:300]
+        result["status"] = "failed"
+        result["metadata"] = {
+            "extractor_version": 2,
+            "source_kind": "local_file",
+            "file_extension": local_source.suffix.lower(),
+        }
+        result["warnings"].append("本地媒体文件不存在或不可读取")
+        result["errors"].append("local_media_not_found")
+        emit(result)
+        return
     result = base_result(args.source)
     try:
         load_request_authorization(args.request_headers_stdin)
@@ -761,7 +801,6 @@ def main():
         result["errors"].append("authorization_invalid")
         emit(result)
         return
-    parsed = urlparse(args.source)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         result["status"] = "failed"
         result["errors"].append("invalid_video_url")
@@ -835,6 +874,7 @@ def main():
         return
     result["media_path"] = str(media)
     result["metadata"]["selected_candidate"] = selected_candidate or {}
+    result["metadata"]["file_extension"] = media.suffix.lower()
 
     for subtitle_url in subtitles[:4]:
         try:
@@ -848,6 +888,7 @@ def main():
     analysis = local_media_analysis(media, output_dir, args.locale)
     result["frames"] = analysis.get("frames", [])
     result["metadata"]["duration_seconds"] = analysis.get("duration_seconds", 0)
+    result["metadata"]["audio_track_available"] = bool(analysis.get("audio_path"))
     if analysis.get("frame_timestamps_ms"):
         result["metadata"]["frame_timestamps_ms"] = analysis["frame_timestamps_ms"]
     if analysis.get("frame_difference_scores"):
