@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import {
   validateSourceIdentity,
 } from './verify-release-version.mjs';
+import { verifyPackagedFilePrivacy } from './verify-packaged-privacy.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const [command, ...argumentsList] = process.argv.slice(2);
@@ -123,6 +124,9 @@ async function verifyArtifact() {
   const signedValue = option('signed', { fallback: 'false' });
   if (!['true', 'false'].includes(signedValue)) throw new Error('--signed must be true or false');
   const signed = signedValue === 'true';
+  if (option('privacy-verified', { fallback: 'false' }) !== 'true') {
+    throw new Error('release artifact requires --privacy-verified true after installed-content verification');
+  }
   const identity = await validateSourceIdentity({
     root,
     suppliedTag: option('tag'),
@@ -141,6 +145,9 @@ async function verifyArtifact() {
     throw new Error(`release artifact name does not identify ${platform} version ${version}: ${inputName}`);
   }
   await verifyMagic(platform, inputPath, inputStat.size);
+  const artifactPrivacy = await verifyPackagedFilePrivacy(inputPath, {
+    platform: `${platform}-artifact`,
+  });
 
   const platformName = platform === 'macos' ? 'macOS-universal' : 'Windows-x64';
   const extension = platform === 'macos' ? '.dmg' : '-setup.exe';
@@ -163,6 +170,12 @@ async function verifyArtifact() {
     architecture: platform === 'macos' ? ['arm64', 'x86_64'] : ['x86_64'],
     signed,
     signingMode: signed ? 'signed' : 'unsigned',
+    privacyVerified: true,
+    privacyVerification: {
+      policy: 'installed-content-and-artifact-bytes-v2',
+      installedContent: true,
+      artifact: artifactPrivacy,
+    },
     file: artifactName,
     bytes: inputStat.size,
     sha256: checksum,

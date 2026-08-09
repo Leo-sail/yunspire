@@ -1060,14 +1060,20 @@ fn run_sips_derivative(
     max_dimension: u32,
     windows_adapter: Option<&Path>,
 ) -> Result<(), String> {
-    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("yunspire-native")
-        .join("yunspire_image_windows.exe");
+    #[cfg(debug_assertions)]
+    let development = {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("yunspire-native")
+            .join("yunspire_image_windows.exe");
+        path.is_file().then_some(path)
+    };
+    #[cfg(not(debug_assertions))]
+    let development: Option<PathBuf> = None;
     let adapter = windows_adapter
         .map(Path::to_path_buf)
         .or_else(|| env::var_os("YUNSPIRE_WINDOWS_IMAGE_ADAPTER").map(PathBuf::from))
-        .or_else(|| development.is_file().then_some(development))
+        .or(development)
         .ok_or_else(|| {
             "Windows 图片分析派生器未随安装包部署；原图未改动且本次模型图片输入已阻止".to_string()
         })?;
@@ -1298,12 +1304,15 @@ fn capture_image_analysis_input(
 
 #[cfg(target_os = "windows")]
 fn windows_image_derivative_adapter(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("yunspire-native")
-        .join("yunspire_image_windows.exe");
-    if development.is_file() {
-        return Ok(development);
+    #[cfg(debug_assertions)]
+    {
+        let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("yunspire-native")
+            .join("yunspire_image_windows.exe");
+        if development.is_file() {
+            return Ok(development);
+        }
     }
     let relative = Path::new("skills")
         .join("document-content-analysis")
@@ -1691,11 +1700,14 @@ fn helper_script(app: &tauri::AppHandle, kind: &str) -> Result<PathBuf, String> 
         _ => return Err("不支持的采集来源类型".to_string()),
     };
     let relative_path = relative.iter().copied().collect::<PathBuf>();
-    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join(&relative_path);
-    if cfg!(debug_assertions) && development.exists() {
-        return Ok(development);
+    #[cfg(debug_assertions)]
+    {
+        let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(&relative_path);
+        if development.exists() {
+            return Ok(development);
+        }
     }
     let bundled = app
         .path()
@@ -1704,11 +1716,7 @@ fn helper_script(app: &tauri::AppHandle, kind: &str) -> Result<PathBuf, String> 
     if bundled.is_file() {
         return Ok(bundled);
     }
-    Err(format!(
-        "采集技能脚本不存在：{}；打包资源：{}",
-        development.display(),
-        bundled.display()
-    ))
+    Err(format!("采集技能脚本不存在：{}", bundled.display()))
 }
 
 #[cfg(any(not(target_os = "macos"), debug_assertions))]
@@ -1762,13 +1770,16 @@ fn python_executable(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     }
     #[cfg(target_os = "windows")]
     {
-        let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("yunspire-runtime")
-            .join("python")
-            .join("python.exe");
-        if development.is_file() {
-            return Ok(development);
+        #[cfg(debug_assertions)]
+        {
+            let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("yunspire-runtime")
+                .join("python")
+                .join("python.exe");
+            if development.is_file() {
+                return Ok(development);
+            }
         }
         let relative = Path::new("runtime").join("python").join("python.exe");
         let bundled = app
@@ -1912,16 +1923,21 @@ fn configure_macos_native_helpers_for_mode(
                 .env_remove("YUNSPIRE_MACOS_ALLOW_RUNTIME_COMPILE");
             return Ok(());
         }
-        let development_pdf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("yunspire-native")
-            .join("macos")
-            .join("yunspire-pdf");
+        #[cfg(debug_assertions)]
+        let development_pdf = Some(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("yunspire-native")
+                .join("macos")
+                .join("yunspire-pdf"),
+        );
+        #[cfg(not(debug_assertions))]
+        let development_pdf: Option<PathBuf> = None;
         let pdf = env::var_os("YUNSPIRE_MACOS_PDF_ADAPTER")
             .map(PathBuf::from)
             .filter(|value| value.is_file())
             .or_else(|| bundled_pdf.is_file().then_some(bundled_pdf))
-            .or_else(|| development_pdf.is_file().then_some(development_pdf));
+            .or_else(|| development_pdf.filter(|value| value.is_file()));
         if let Some(pdf) = pdf {
             command.env("YUNSPIRE_MACOS_PDF_ADAPTER", pdf);
         }
@@ -1960,21 +1976,26 @@ fn configure_macos_native_helpers_for_mode(
         return Ok(());
     }
 
-    let development_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("yunspire-native")
-        .join("macos");
-    let development_media = development_directory.join("yunspire-media");
-    let development_speech_app = development_directory.join("Yunspire Speech Helper.app");
-    let development_speech_executable = development_speech_app
-        .join("Contents")
-        .join("MacOS")
-        .join("yunspire-speech");
+    #[cfg(debug_assertions)]
+    let development_directory = Some(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("yunspire-native")
+            .join("macos"),
+    );
+    #[cfg(not(debug_assertions))]
+    let development_directory: Option<PathBuf> = None;
+    let development_media = development_directory
+        .as_ref()
+        .map(|directory| directory.join("yunspire-media"));
+    let development_speech_app = development_directory
+        .as_ref()
+        .map(|directory| directory.join("Yunspire Speech Helper.app"));
     let media = env::var_os("YUNSPIRE_MACOS_MEDIA_ADAPTER")
         .map(PathBuf::from)
         .filter(|value| value.is_file())
         .or_else(|| bundled_media.is_file().then_some(bundled_media))
-        .or_else(|| development_media.is_file().then_some(development_media));
+        .or_else(|| development_media.filter(|value| value.is_file()));
     let speech_app = env::var_os("YUNSPIRE_MACOS_SPEECH_HELPER_APP")
         .map(PathBuf::from)
         .filter(|value| {
@@ -1990,8 +2011,14 @@ fn configure_macos_native_helpers_for_mode(
                 .then_some(bundled_speech_app)
         })
         .or_else(|| {
-            (development_speech_app.is_dir() && development_speech_executable.is_file())
-                .then_some(development_speech_app)
+            development_speech_app.filter(|value| {
+                value.is_dir()
+                    && value
+                        .join("Contents")
+                        .join("MacOS")
+                        .join("yunspire-speech")
+                        .is_file()
+            })
         });
     if let Some(media) = media {
         command.env("YUNSPIRE_MACOS_MEDIA_ADAPTER", media);

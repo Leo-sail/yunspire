@@ -1,3 +1,5 @@
+import { promptText } from '../prompt-registry.js';
+
 const NORMALIZED_CATALOG = Symbol('yunspire.normalizedWritingResources');
 
 export const WRITING_RESOURCE_COUNTS = Object.freeze({
@@ -57,6 +59,15 @@ function resourceName(value, path) {
   return name;
 }
 
+function resourcePrompt(value, path, expectedRef) {
+  const promptRef = requiredString(value.promptRef, `${path}.promptRef`, { maximum: 160 });
+  if (promptRef !== expectedRef) fail(`${path}.promptRef`, `must equal "${expectedRef}"`);
+  return {
+    promptRef,
+    instruction: requiredString(promptText(promptRef), `${path}.promptRef content`, { minimum: 24, maximum: 4_000 }),
+  };
+}
+
 function stringList(value, path, { minimum = 1, maximum = 30, allowed = null } = {}) {
   if (!Array.isArray(value)) fail(path, 'expected an array');
   const result = value.map((item, index) => requiredString(item, `${path}[${index}]`, { maximum: 160 }));
@@ -73,12 +84,13 @@ function stringList(value, path, { minimum = 1, maximum = 30, allowed = null } =
 function normalizePattern(value, index) {
   const path = `writingPatterns[${index}]`;
   if (!isRecord(value)) fail(path, 'expected an object');
+  const id = resourceId(value.id, `${path}.id`);
   return {
-    id: resourceId(value.id, `${path}.id`),
+    id,
     name: resourceName(value.name, `${path}.name`),
     category: requiredString(value.category, `${path}.category`, { minimum: 2, maximum: 80 }),
     description: requiredString(value.description, `${path}.description`, { minimum: 8, maximum: 500 }),
-    instruction: requiredString(value.instruction, `${path}.instruction`, { minimum: 24, maximum: 4_000 }),
+    ...resourcePrompt(value, path, `writing-resources.patterns.${id}`),
     contentTypes: stringList(value.contentTypes, `${path}.contentTypes`, { allowed: CONTENT_TYPES }),
     purposes: stringList(value.purposes, `${path}.purposes`),
     signals: stringList(value.signals, `${path}.signals`, { minimum: 2, maximum: 20 }),
@@ -89,11 +101,12 @@ function normalizePattern(value, index) {
 function normalizeVoice(value, index) {
   const path = `voices[${index}]`;
   if (!isRecord(value)) fail(path, 'expected an object');
+  const id = resourceId(value.id, `${path}.id`);
   return {
-    id: resourceId(value.id, `${path}.id`),
+    id,
     name: resourceName(value.name, `${path}.name`),
     description: requiredString(value.description, `${path}.description`, { minimum: 8, maximum: 500 }),
-    instruction: requiredString(value.instruction, `${path}.instruction`, { minimum: 24, maximum: 4_000 }),
+    ...resourcePrompt(value, path, `writing-resources.voices.${id}`),
     contentTypes: stringList(value.contentTypes, `${path}.contentTypes`, { allowed: CONTENT_TYPES }),
     signals: stringList(value.signals, `${path}.signals`, { minimum: 2, maximum: 20 }),
     avoid: stringList(value.avoid, `${path}.avoid`, { minimum: 1, maximum: 20 }),
@@ -103,11 +116,12 @@ function normalizeVoice(value, index) {
 function normalizePurposePreset(value, index) {
   const path = `purposePresets[${index}]`;
   if (!isRecord(value)) fail(path, 'expected an object');
+  const id = resourceId(value.id, `${path}.id`);
   return {
-    id: resourceId(value.id, `${path}.id`),
+    id,
     name: resourceName(value.name, `${path}.name`),
     description: requiredString(value.description, `${path}.description`, { minimum: 8, maximum: 500 }),
-    instruction: requiredString(value.instruction, `${path}.instruction`, { minimum: 24, maximum: 4_000 }),
+    ...resourcePrompt(value, path, `writing-resources.purpose-presets.${id}`),
     contentTypes: stringList(value.contentTypes, `${path}.contentTypes`, { allowed: CONTENT_TYPES }),
     signals: stringList(value.signals, `${path}.signals`, { minimum: 2, maximum: 20 }),
     recommendedPatternIds: stringList(value.recommendedPatternIds, `${path}.recommendedPatternIds`, { minimum: 2, maximum: 12 }),

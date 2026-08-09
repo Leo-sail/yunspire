@@ -6,6 +6,7 @@ use crate::obsidian::{
     resolve_vault_for_runtime, OperationContext, OperationEvent, VaultDescriptor,
 };
 use crate::policy::{ApplicationCommand, CommandBudget, PolicyDecision, PolicyOutcome};
+use crate::prompt::render_prompt_template;
 use crate::task_runtime::{
     NativeRuntimeTask, RuntimeReadOnlyCapabilityResult, RuntimeScheduleDispatchAckInput,
     RuntimeTaskCompletionContract, RuntimeTaskCompletionContractInput, RuntimeTaskCompletionMode,
@@ -52,7 +53,7 @@ const MAX_INBOUND_RECORD_BYTES: usize = 512 * 1024;
 const MAX_RUNTIME_PLAN_BYTES: usize = 256 * 1024;
 const MAX_RUNTIME_EVIDENCE_BYTES: usize = 256 * 1024;
 const DEFAULT_LOCAL_WORKSPACE_SCOPE: &str = "local";
-const CURRENT_SCHEMA_VERSION: i64 = 41;
+const CURRENT_SCHEMA_VERSION: i64 = 42;
 const APPLICATION_AUTHORIZATION_VERSION: i64 = 1;
 const VAULT_INDEX_DEBOUNCE_MS: i64 = 300;
 const VAULT_INDEX_MAX_ATTEMPTS: i64 = 5;
@@ -66,6 +67,8 @@ const MIN_NEURAL_EMBEDDING_SIMILARITY: f64 = 0.1;
 const MAX_NEURAL_EMBEDDING_INPUT_CHARS: usize = 24_000;
 const NEURAL_EMBEDDING_BATCH_SIZE: usize = 32;
 const MAX_NEURAL_EMBEDDING_REFRESH_NOTES: usize = 64;
+const NEURAL_NOTE_EMBEDDING_PROMPT_TEMPLATE: &str =
+    include_str!("../../prompts/runtime/search/neural-note-embedding.template.txt");
 const NEURAL_RRF_WEIGHT: f64 = 2.0;
 const LOCAL_VECTOR_RRF_WEIGHT_WITH_NEURAL: f64 = 0.5;
 const RRF_K: f64 = 60.0;
@@ -1400,7 +1403,7 @@ impl RuntimeDatabase {
         event_type: &str,
         occurred_at: &str,
         payload: &Value,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let serialized = serde_json::to_string(payload)
             .map_err(|error| format!("无法序列化长期记忆投递记录：{error}"))?;
         if serialized.len() > MAX_RECORD_BYTES {
@@ -1428,7 +1431,8 @@ impl RuntimeDatabase {
             if existing_user != workspace_scope || existing_payload != serialized {
                 return Err("长期记忆事件 ID 已被其他内容占用".to_string());
             }
-            if state != "committed" {
+            let duplicate = state == "committed";
+            if !duplicate {
                 connection
                     .execute(
                         "UPDATE long_term_memory_events
@@ -1438,7 +1442,7 @@ impl RuntimeDatabase {
                     )
                     .map_err(|error| format!("无法恢复长期记忆投递：{error}"))?;
             }
-            return Ok(());
+            return Ok(duplicate);
         }
         let now = Utc::now().to_rfc3339();
         connection
@@ -1449,7 +1453,7 @@ impl RuntimeDatabase {
                 params![event_id, workspace_scope, event_type, occurred_at, serialized, now],
             )
             .map_err(|error| format!("无法暂存长期记忆事件：{error}"))?;
-        Ok(())
+        Ok(false)
     }
 
     pub(crate) fn pending_long_term_memory_events(
@@ -1484,11 +1488,10 @@ impl RuntimeDatabase {
             .collect())
     }
 
-    pub(crate) fn commit_long_term_memory_event(
+    pub(crate) fn commit_long_term_memory_event_internal(
         &self,
         workspace_scope: &str,
         event_id: &str,
-        relative_path: &str,
         content_hash: &str,
         committed_at: &str,
     ) -> Result<(), String> {
@@ -1499,18 +1502,12 @@ impl RuntimeDatabase {
         let changed = connection
             .execute(
                 "UPDATE long_term_memory_events
-                 SET state='committed', vault_relative_path=?3, content_hash=?4,
-                     committed_at=?5, last_error=NULL, updated_at=?5
+                 SET state='committed', vault_relative_path=NULL, content_hash=?3,
+                     committed_at=?4, last_error=NULL, updated_at=?4
                  WHERE id=?1 AND workspace_scope=?2",
-                params![
-                    event_id,
-                    workspace_scope,
-                    relative_path,
-                    content_hash,
-                    committed_at
-                ],
+                params![event_id, workspace_scope, content_hash, committed_at],
             )
-            .map_err(|error| format!("无法确认长期记忆已写入：{error}"))?;
+            .map_err(|error| format!("无法确认长期记忆事件已保存到 SQLite：{error}"))?;
         if changed == 1 {
             Ok(())
         } else {
@@ -12889,6 +12886,32 @@ fn run_migrations(connection: &Connection) -> Result<(), String> {
             )
             .map_err(|error| format!("SQLite migration 41 失败：{error}"))?;
     }
+    if version < 42 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 UPDATE memory_records
+                    SET state='draft'
+                  WHERE state='active'
+                    AND (
+                      (
+                        track='user_episode'
+                        AND length(id)=45
+                        AND id LIKE 'user-episode-%'
+                        AND substr(id, 14) NOT GLOB '*[^0-9a-f]*'
+                      )
+                      OR (
+                        track='agent_case'
+                        AND length(id)=43
+                        AND id LIKE 'agent-case-%'
+                        AND substr(id, 12) NOT GLOB '*[^0-9a-f]*'
+                      )
+                    );
+                 PRAGMA user_version=42;
+                 COMMIT;",
+            )
+            .map_err(|error| format!("SQLite migration 42 无法收紧自动对话记忆状态：{error}"))?;
+    }
     Ok(())
 }
 
@@ -14967,9 +14990,17 @@ fn neural_note_embedding_input(
         .nfc()
         .take(MAX_NEURAL_EMBEDDING_INPUT_CHARS)
         .collect::<String>();
-    format!(
-        "title: {title}\npath: {relative_path}\ntags: {tags_json}\nwiki_links: {wiki_links_json}\ncontent:\n{content}"
+    render_prompt_template(
+        NEURAL_NOTE_EMBEDDING_PROMPT_TEMPLATE,
+        &[
+            ("title", title),
+            ("relative_path", relative_path),
+            ("tags_json", tags_json),
+            ("wiki_links_json", wiki_links_json),
+            ("content", &content),
+        ],
     )
+    .expect("bundled neural note embedding Prompt must be valid")
     .nfc()
     .take(crate::model_provider::MAX_EMBEDDING_INPUT_CHARS)
     .collect()

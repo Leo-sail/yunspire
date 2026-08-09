@@ -1,0 +1,3 @@
+【条目 {{ENTRY_NUMBER}}｜{{ENTRY_ID}}｜{{ENTRY_TIME}}】
+{{ENTRY_CONTENT}}
+【条目 {{ENTRY_NUMBER}} 结束】

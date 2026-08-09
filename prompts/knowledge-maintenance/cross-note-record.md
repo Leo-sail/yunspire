@@ -1,0 +1,8 @@
+[{{SOURCE_ID}}] {{VAULT_NAME}}/{{RELATIVE_PATH}}
+标题：{{TITLE}}
+正文 SHA-256：{{CONTENT_HASH}}
+主题：{{TOPICS}}
+实体：{{ENTITIES}}
+关键结论：{{KEY_CONCLUSIONS}}
+摘要：{{SUMMARY}}
+已有 Wiki Link：{{EXISTING_LINKS}}

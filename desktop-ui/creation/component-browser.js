@@ -107,7 +107,7 @@ export function normalizeComponentManifest(value, index = 0) {
   const manifest = {
     schemaVersion: '1.0',
     manifestType: 'component',
-    catalogVersion: stringValue(source.catalogVersion, '0.3.0', 40),
+    catalogVersion: stringValue(source.catalogVersion, '0.4.0', 40),
     id,
     version: stringValue(source.version, '1.0.0', 40),
     displayName: stringValue(source.displayName || source.name || definition?.name, id, 80),
@@ -139,7 +139,7 @@ export function normalizeComponentManifest(value, index = 0) {
       targets: uniqueStrings(source.compatibility?.targets, 3).filter((item) => ['markdown', 'html', 'wechatRichText'].includes(item)).length
         ? uniqueStrings(source.compatibility.targets, 3).filter((item) => ['markdown', 'html', 'wechatRichText'].includes(item))
         : ['markdown', 'html', 'wechatRichText'],
-      minRuntimeVersion: stringValue(source.compatibility?.minRuntimeVersion, '0.3.0', 40),
+      minRuntimeVersion: stringValue(source.compatibility?.minRuntimeVersion, '0.4.0', 40),
     },
     source: { ...FIRST_PARTY_SOURCE, ...(isRecord(source.source) ? source.source : {}) },
     license: { ...FIRST_PARTY_LICENSE, ...(isRecord(source.license) ? source.license : {}) },

@@ -1,0 +1,4 @@
+interface:
+  display_name: "音视频内容分析"
+  short_description: "采集并分析公开或已授权媒体，生成转录、关键帧与知识笔记"
+  default_prompt: "使用 $video-content-analysis 分析这个音视频来源，并生成带转录、关键帧和出处的知识笔记。"

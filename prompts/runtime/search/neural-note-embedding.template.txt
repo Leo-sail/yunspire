@@ -1,0 +1,6 @@
+title: {{title}}
+path: {{relative_path}}
+tags: {{tags_json}}
+wiki_links: {{wiki_links_json}}
+content:
+{{content}}

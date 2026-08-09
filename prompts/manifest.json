@@ -1,0 +1,2536 @@
+{
+  "schemaVersion": "1.0",
+  "generatedBy": "node scripts/validate-prompts.mjs --write",
+  "prompts": [
+    {
+      "id": "assistant.attachment-only-request",
+      "path": "prompts/assistant/attachment-only-request.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.background-intent-review",
+      "path": "prompts/assistant/background-intent-review.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "INTENT",
+        "ORIGINAL_MESSAGE"
+      ]
+    },
+    {
+      "id": "assistant.background.report-delivery-request",
+      "path": "prompts/assistant/background/report-delivery-request.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "CONNECTOR_TYPE",
+        "REPORT_TITLE"
+      ]
+    },
+    {
+      "id": "assistant.background.report-request",
+      "path": "prompts/assistant/background/report-request.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "REPORT_LABEL"
+      ]
+    },
+    {
+      "id": "assistant.background.report-subscription-request",
+      "path": "prompts/assistant/background/report-subscription-request.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "BASE_REQUEST",
+        "SUBSCRIPTION_NAME"
+      ]
+    },
+    {
+      "id": "assistant.background.scheduled-capture-request",
+      "path": "prompts/assistant/background/scheduled-capture-request.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "SCHEDULE_NAME",
+        "SOURCE"
+      ]
+    },
+    {
+      "id": "assistant.capabilities.capture.description",
+      "path": "prompts/assistant/capabilities/capture/description.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.capture.name",
+      "path": "prompts/assistant/capabilities/capture/name.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.create.description",
+      "path": "prompts/assistant/capabilities/create/description.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.create.name",
+      "path": "prompts/assistant/capabilities/create/name.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.dashboard.description",
+      "path": "prompts/assistant/capabilities/dashboard/description.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.dashboard.name",
+      "path": "prompts/assistant/capabilities/dashboard/name.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.delete.description",
+      "path": "prompts/assistant/capabilities/delete/description.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.delete.name",
+      "path": "prompts/assistant/capabilities/delete/name.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.external.description",
+      "path": "prompts/assistant/capabilities/external/description.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.external.name",
+      "path": "prompts/assistant/capabilities/external/name.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.image.description",
+      "path": "prompts/assistant/capabilities/image/description.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.image.name",
+      "path": "prompts/assistant/capabilities/image/name.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.inbox.description",
+      "path": "prompts/assistant/capabilities/inbox/description.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.inbox.name",
+      "path": "prompts/assistant/capabilities/inbox/name.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.knowledge-maintenance.description",
+      "path": "prompts/assistant/capabilities/knowledge-maintenance/description.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.knowledge-maintenance.name",
+      "path": "prompts/assistant/capabilities/knowledge-maintenance/name.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.logs.description",
+      "path": "prompts/assistant/capabilities/logs/description.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.logs.name",
+      "path": "prompts/assistant/capabilities/logs/name.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.optimization-hint",
+      "path": "prompts/assistant/capabilities/optimization-hint.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "DESCRIPTION",
+        "HINT"
+      ]
+    },
+    {
+      "id": "assistant.capabilities.optimization.description",
+      "path": "prompts/assistant/capabilities/optimization/description.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.optimization.name",
+      "path": "prompts/assistant/capabilities/optimization/name.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.reports.description",
+      "path": "prompts/assistant/capabilities/reports/description.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.reports.name",
+      "path": "prompts/assistant/capabilities/reports/name.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.research.description",
+      "path": "prompts/assistant/capabilities/research/description.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.research.name",
+      "path": "prompts/assistant/capabilities/research/name.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.schedule.description",
+      "path": "prompts/assistant/capabilities/schedule/description.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.schedule.name",
+      "path": "prompts/assistant/capabilities/schedule/name.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.search.description",
+      "path": "prompts/assistant/capabilities/search/description.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.search.name",
+      "path": "prompts/assistant/capabilities/search/name.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.settings.description",
+      "path": "prompts/assistant/capabilities/settings/description.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.settings.name",
+      "path": "prompts/assistant/capabilities/settings/name.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.skills.custom-fallback",
+      "path": "prompts/assistant/capabilities/skills/custom-fallback.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.skills.description",
+      "path": "prompts/assistant/capabilities/skills/description.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.skills.name",
+      "path": "prompts/assistant/capabilities/skills/name.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.tasks.description",
+      "path": "prompts/assistant/capabilities/tasks/description.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.tasks.name",
+      "path": "prompts/assistant/capabilities/tasks/name.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.vaults.description",
+      "path": "prompts/assistant/capabilities/vaults/description.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.capabilities.vaults.name",
+      "path": "prompts/assistant/capabilities/vaults/name.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.collection-suffix",
+      "path": "prompts/assistant/collection-suffix.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.context-attachment-metadata",
+      "path": "prompts/assistant/context-attachment-metadata.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ATTACHMENTS"
+      ]
+    },
+    {
+      "id": "assistant.context-compacted-message",
+      "path": "prompts/assistant/context-compacted-message.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "COMPACTION_MODE",
+        "SUMMARY"
+      ]
+    },
+    {
+      "id": "assistant.context-compaction-modes.local",
+      "path": "prompts/assistant/context-compaction-modes/local.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.context-compaction-modes.model",
+      "path": "prompts/assistant/context-compaction-modes/model.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.context-compression-batch",
+      "path": "prompts/assistant/context-compression-batch.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "BATCH_COUNT",
+        "BATCH_NUMBER",
+        "CONVERSATION_CONTENT"
+      ]
+    },
+    {
+      "id": "assistant.context-compression-consolidation",
+      "path": "prompts/assistant/context-compression-consolidation.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "PARTIAL_ANALYSES_JSON"
+      ]
+    },
+    {
+      "id": "assistant.context-local-fallback-entry",
+      "path": "prompts/assistant/context-local-fallback-entry.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ENTRY_NUMBER",
+        "EXCERPT"
+      ]
+    },
+    {
+      "id": "assistant.context-local-fallback",
+      "path": "prompts/assistant/context-local-fallback.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ENTRIES"
+      ]
+    },
+    {
+      "id": "assistant.context-message-segment",
+      "path": "prompts/assistant/context-message-segment.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "CONTENT",
+        "MESSAGE_NUMBER",
+        "SEGMENT_COUNT",
+        "SEGMENT_NUMBER"
+      ]
+    },
+    {
+      "id": "assistant.context-message",
+      "path": "prompts/assistant/context-message.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ATTACHMENT_METADATA",
+        "CONTENT",
+        "ROLE"
+      ]
+    },
+    {
+      "id": "assistant.conversation-attachment-context",
+      "path": "prompts/assistant/conversation-attachment-context.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ATTACHMENT_RECORDS"
+      ]
+    },
+    {
+      "id": "assistant.current-attachment-context",
+      "path": "prompts/assistant/current-attachment-context.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.execution-observation",
+      "path": "prompts/assistant/execution-observation.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "INTENT",
+        "OBSERVATION_NUMBER",
+        "RESULT",
+        "STATE"
+      ]
+    },
+    {
+      "id": "assistant.execution-observations",
+      "path": "prompts/assistant/execution-observations.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "OBSERVATIONS"
+      ]
+    },
+    {
+      "id": "assistant.execution-review",
+      "path": "prompts/assistant/execution-review.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ORIGINAL_GOAL"
+      ]
+    },
+    {
+      "id": "assistant.handoffs.capture-cancel",
+      "path": "prompts/assistant/handoffs/capture-cancel.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "SOURCE_LABEL"
+      ]
+    },
+    {
+      "id": "assistant.handoffs.capture-new",
+      "path": "prompts/assistant/handoffs/capture-new.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.handoffs.capture-retry",
+      "path": "prompts/assistant/handoffs/capture-retry.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "SOURCE"
+      ]
+    },
+    {
+      "id": "assistant.handoffs.capture-source",
+      "path": "prompts/assistant/handoffs/capture-source.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "SOURCE"
+      ]
+    },
+    {
+      "id": "assistant.handoffs.knowledge-maintenance",
+      "path": "prompts/assistant/handoffs/knowledge-maintenance.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.handoffs.optimization-revise",
+      "path": "prompts/assistant/handoffs/optimization-revise.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "STYLE"
+      ]
+    },
+    {
+      "id": "assistant.handoffs.report-plan",
+      "path": "prompts/assistant/handoffs/report-plan.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.handoffs.schedule-delete",
+      "path": "prompts/assistant/handoffs/schedule-delete.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "SCHEDULE_ID",
+        "SCHEDULE_NAME"
+      ]
+    },
+    {
+      "id": "assistant.handoffs.schedule-edit",
+      "path": "prompts/assistant/handoffs/schedule-edit.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "FOLDER",
+        "FREQUENCY",
+        "RUN_TIME",
+        "SCHEDULE_ID",
+        "SCHEDULE_NAME",
+        "SOURCES",
+        "VAULT_NAME"
+      ]
+    },
+    {
+      "id": "assistant.handoffs.schedule-new",
+      "path": "prompts/assistant/handoffs/schedule-new.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.handoffs.skill-create",
+      "path": "prompts/assistant/handoffs/skill-create.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.handoffs.skill-edit",
+      "path": "prompts/assistant/handoffs/skill-edit.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "SKILL_NAME"
+      ]
+    },
+    {
+      "id": "assistant.handoffs.skill-install",
+      "path": "prompts/assistant/handoffs/skill-install.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.handoffs.skill-manage",
+      "path": "prompts/assistant/handoffs/skill-manage.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.historical-image-context",
+      "path": "prompts/assistant/historical-image-context.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "IMAGE_NAMES"
+      ]
+    },
+    {
+      "id": "assistant.image-analysis-initial",
+      "path": "prompts/assistant/image-analysis-initial.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.image-analysis-input",
+      "path": "prompts/assistant/image-analysis-input.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "IMAGE_NAME",
+        "INSTRUCTION"
+      ]
+    },
+    {
+      "id": "assistant.image-analysis-key-points",
+      "path": "prompts/assistant/image-analysis-key-points.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "KEY_POINTS"
+      ]
+    },
+    {
+      "id": "assistant.image-analysis-record",
+      "path": "prompts/assistant/image-analysis-record.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ANALYZED_AT",
+        "IMAGE_NAME",
+        "KEY_POINTS",
+        "MODEL_ID",
+        "SUMMARY",
+        "TAGS",
+        "VISIBLE_TEXT"
+      ]
+    },
+    {
+      "id": "assistant.image-analysis-referenced",
+      "path": "prompts/assistant/image-analysis-referenced.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "USER_REQUEST"
+      ]
+    },
+    {
+      "id": "assistant.image-analysis-tags",
+      "path": "prompts/assistant/image-analysis-tags.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "TAGS"
+      ]
+    },
+    {
+      "id": "assistant.image-analysis-visible-text",
+      "path": "prompts/assistant/image-analysis-visible-text.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "VISIBLE_TEXT"
+      ]
+    },
+    {
+      "id": "assistant.report-delivery-intent-review",
+      "path": "prompts/assistant/report-delivery-intent-review.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ASSET_ID",
+        "BYTE_LENGTH",
+        "DELIVERY_MESSAGE",
+        "SHA256"
+      ]
+    },
+    {
+      "id": "assistant.suggestions.continue-writing",
+      "path": "prompts/assistant/suggestions/continue-writing.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.suggestions.explore-knowledge-connection",
+      "path": "prompts/assistant/suggestions/explore-knowledge-connection.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.suggestions.recover-unorganized-knowledge",
+      "path": "prompts/assistant/suggestions/recover-unorganized-knowledge.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "assistant.task-recovery-intent-review",
+      "path": "prompts/assistant/task-recovery-intent-review.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "INTENT",
+        "ORIGINAL_GOAL"
+      ]
+    },
+    {
+      "id": "assistant.task-retry-intent-review",
+      "path": "prompts/assistant/task-retry-intent-review.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "INTENT",
+        "ORIGINAL_GOAL"
+      ]
+    },
+    {
+      "id": "assistant.text-attachment-analysis-batch",
+      "path": "prompts/assistant/text-attachment-analysis-batch.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ATTACHMENT_NAME",
+        "BATCH_CONTENT",
+        "BATCH_COUNT",
+        "BATCH_NUMBER"
+      ]
+    },
+    {
+      "id": "assistant.text-attachment-analysis-record",
+      "path": "prompts/assistant/text-attachment-analysis-record.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ANALYSIS_MARKDOWN",
+        "ATTACHMENT_NAMES",
+        "COLLECTION_SUFFIX",
+        "COMPLETED_CHUNKS",
+        "ENTITIES",
+        "KEY_POINTS",
+        "TAGS",
+        "TOTAL_CHUNKS"
+      ]
+    },
+    {
+      "id": "assistant.text-attachment-entities",
+      "path": "prompts/assistant/text-attachment-entities.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ENTITIES"
+      ]
+    },
+    {
+      "id": "assistant.text-attachment-key-points",
+      "path": "prompts/assistant/text-attachment-key-points.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "KEY_POINTS"
+      ]
+    },
+    {
+      "id": "assistant.text-attachment-tags",
+      "path": "prompts/assistant/text-attachment-tags.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "TAGS"
+      ]
+    },
+    {
+      "id": "assistant.unanalyzed-attachment-record",
+      "path": "prompts/assistant/unanalyzed-attachment-record.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ATTACHMENT_NAME",
+        "ATTACHMENT_TYPE"
+      ]
+    },
+    {
+      "id": "assistant.unavailable-image-context",
+      "path": "prompts/assistant/unavailable-image-context.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "IMAGE_NAMES"
+      ]
+    },
+    {
+      "id": "capture.analysis-asset-id",
+      "path": "prompts/capture/analysis-asset-id.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ASSET_ID",
+        "ASSET_NUMBER"
+      ]
+    },
+    {
+      "id": "capture.analysis-asset-ids",
+      "path": "prompts/capture/analysis-asset-ids.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ASSET_IDS"
+      ]
+    },
+    {
+      "id": "capture.analysis-consolidation",
+      "path": "prompts/capture/analysis-consolidation.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ANALYSES_JSON",
+        "ASSET_IDS_SECTION",
+        "BATCH_SCOPE",
+        "CONSOLIDATION_SCOPE",
+        "LABEL"
+      ]
+    },
+    {
+      "id": "capture.analysis-scopes.all-batches",
+      "path": "prompts/capture/analysis-scopes/all-batches.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "capture.analysis-scopes.final",
+      "path": "prompts/capture/analysis-scopes/final.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "capture.analysis-scopes.hierarchical",
+      "path": "prompts/capture/analysis-scopes/hierarchical.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "capture.analysis-scopes.partial-batches",
+      "path": "prompts/capture/analysis-scopes/partial-batches.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "capture.inbound-classification",
+      "path": "prompts/capture/inbound-classification.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "AVAILABLE_EVIDENCE_KINDS",
+        "EVIDENCE_PAYLOAD_JSON"
+      ]
+    },
+    {
+      "id": "capture.local-visual-analysis-batch",
+      "path": "prompts/capture/local-visual-analysis-batch.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "BATCH_NUMBER",
+        "LABEL",
+        "VISUAL_MANIFEST"
+      ]
+    },
+    {
+      "id": "capture.remote-visual-analysis-batch",
+      "path": "prompts/capture/remote-visual-analysis-batch.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "BATCH_COUNT",
+        "BATCH_NUMBER",
+        "LABEL",
+        "VISUAL_MANIFEST"
+      ]
+    },
+    {
+      "id": "capture.source-context.extraction-diagnostics",
+      "path": "prompts/capture/source-context/extraction-diagnostics.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "DIAGNOSTICS"
+      ]
+    },
+    {
+      "id": "capture.source-context.frame-timestamps",
+      "path": "prompts/capture/source-context/frame-timestamps.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "TIMESTAMPS"
+      ]
+    },
+    {
+      "id": "capture.source-context.local-images",
+      "path": "prompts/capture/source-context/local-images.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "IMAGE_COUNT"
+      ]
+    },
+    {
+      "id": "capture.source-context.local-media",
+      "path": "prompts/capture/source-context/local-media.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "MEDIA_COUNT"
+      ]
+    },
+    {
+      "id": "capture.source-context.video-title",
+      "path": "prompts/capture/source-context/video-title.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "TITLE"
+      ]
+    },
+    {
+      "id": "capture.sticky-note-entry",
+      "path": "prompts/capture/sticky-note-entry.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ENTRY_CONTENT",
+        "ENTRY_ID",
+        "ENTRY_NUMBER",
+        "ENTRY_TIME"
+      ]
+    },
+    {
+      "id": "capture.sticky-note-organization",
+      "path": "prompts/capture/sticky-note-organization.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "DATE",
+        "ENTRIES",
+        "ENTRY_COUNT"
+      ]
+    },
+    {
+      "id": "capture.sticky-note-write-file",
+      "path": "prompts/capture/sticky-note-write-file.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "FILE_COUNT",
+        "FILE_NUMBER",
+        "NEW_SECTION",
+        "NEXT_HASH",
+        "PREVIOUS_HASH",
+        "RELATIVE_PATH"
+      ]
+    },
+    {
+      "id": "capture.sticky-note-write-manifest",
+      "path": "prompts/capture/sticky-note-write-manifest.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ENTRY_COUNT",
+        "FILES",
+        "FILE_COUNT"
+      ]
+    },
+    {
+      "id": "capture.text-analysis-batch",
+      "path": "prompts/capture/text-analysis-batch.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "BATCH_CONTENT",
+        "BATCH_COUNT",
+        "BATCH_NUMBER",
+        "LABEL"
+      ]
+    },
+    {
+      "id": "capture.visual-analysis-batch",
+      "path": "prompts/capture/visual-analysis-batch.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "BATCH_COUNT",
+        "BATCH_NUMBER",
+        "LABEL",
+        "VISUAL_MANIFEST"
+      ]
+    },
+    {
+      "id": "capture.visual-manifest-context",
+      "path": "prompts/capture/visual-manifest-context.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "CONTEXT"
+      ]
+    },
+    {
+      "id": "capture.visual-manifest-item",
+      "path": "prompts/capture/visual-manifest-item.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ASSET_ID",
+        "CONTEXT",
+        "ITEM_NUMBER",
+        "LABEL"
+      ]
+    },
+    {
+      "id": "capture.visual-manifest",
+      "path": "prompts/capture/visual-manifest.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ITEMS"
+      ]
+    },
+    {
+      "id": "creation.content-types.article",
+      "path": "prompts/creation/content-types/article.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.content-types.contract",
+      "path": "prompts/creation/content-types/contract.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.content-types.paper",
+      "path": "prompts/creation/content-types/paper.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.content-types.wechat",
+      "path": "prompts/creation/content-types/wechat.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.content-types.xiaohongshu",
+      "path": "prompts/creation/content-types/xiaohongshu.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.evidence-brief-consolidation",
+      "path": "prompts/creation/evidence-brief-consolidation.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "BATCH_COUNT",
+        "BATCH_NUMBER",
+        "PARTIAL_BRIEFS"
+      ]
+    },
+    {
+      "id": "creation.evidence-brief-separator",
+      "path": "prompts/creation/evidence-brief-separator.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.evidence-brief",
+      "path": "prompts/creation/evidence-brief.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "BATCH_COUNT",
+        "BATCH_NUMBER",
+        "EVIDENCE"
+      ]
+    },
+    {
+      "id": "creation.evidence-source-separator",
+      "path": "prompts/creation/evidence-source-separator.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.evidence-source",
+      "path": "prompts/creation/evidence-source.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "CONTENT",
+        "RELATIVE_PATH",
+        "SOURCE_INDEX",
+        "TITLE",
+        "VAULT_ID",
+        "VAULT_NAME"
+      ]
+    },
+    {
+      "id": "creation.grounded-from-briefs",
+      "path": "prompts/creation/grounded-from-briefs.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "EVIDENCE_BRIEFS",
+        "PROMPT_PREFIX"
+      ]
+    },
+    {
+      "id": "creation.grounded-prefix",
+      "path": "prompts/creation/grounded-prefix.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "CONTENT_TYPE",
+        "TYPE_INSTRUCTION",
+        "USER_REQUIREMENT",
+        "WRITING_GUIDANCE"
+      ]
+    },
+    {
+      "id": "creation.grounded-with-evidence",
+      "path": "prompts/creation/grounded-with-evidence.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "EVIDENCE",
+        "PROMPT_PREFIX"
+      ]
+    },
+    {
+      "id": "creation.partial-brief-separator",
+      "path": "prompts/creation/partial-brief-separator.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.requested-title",
+      "path": "prompts/creation/requested-title.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "TITLE"
+      ]
+    },
+    {
+      "id": "creation.resource-generation",
+      "path": "prompts/creation/resource-generation.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "CONTENT_TYPE",
+        "RESOURCE_KIND",
+        "RESOURCE_SCHEMA",
+        "USER_REQUIREMENT"
+      ]
+    },
+    {
+      "id": "creation.resource-schemas.component",
+      "path": "prompts/creation/resource-schemas/component.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.resource-schemas.template",
+      "path": "prompts/creation/resource-schemas/template.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.resource-schemas.theme",
+      "path": "prompts/creation/resource-schemas/theme.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-chunk",
+      "path": "prompts/creation/rewrite-chunk.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "BATCH_RULE",
+        "FACTS_RULE",
+        "NUMBERS_RULE",
+        "PROTECTED_SPANS",
+        "REFERENCES_RULE",
+        "REWRITE_INSTRUCTION",
+        "REWRITE_LABEL",
+        "RHYTHM",
+        "SOURCE_CONTENT",
+        "SPOKEN_STYLE",
+        "STRENGTH"
+      ]
+    },
+    {
+      "id": "creation.rewrite-controls.rhythm-alternating",
+      "path": "prompts/creation/rewrite-controls/rhythm-alternating.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-controls.rhythm-light",
+      "path": "prompts/creation/rewrite-controls/rhythm-light.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-controls.rhythm-preserve",
+      "path": "prompts/creation/rewrite-controls/rhythm-preserve.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-controls.rhythm-strong",
+      "path": "prompts/creation/rewrite-controls/rhythm-strong.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-controls.spoken-conversational",
+      "path": "prompts/creation/rewrite-controls/spoken-conversational.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-controls.spoken-formal",
+      "path": "prompts/creation/rewrite-controls/spoken-formal.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-controls.spoken-natural",
+      "path": "prompts/creation/rewrite-controls/spoken-natural.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-controls.spoken-strong",
+      "path": "prompts/creation/rewrite-controls/spoken-strong.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-controls.strength-light",
+      "path": "prompts/creation/rewrite-controls/strength-light.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-controls.strength-standard",
+      "path": "prompts/creation/rewrite-controls/strength-standard.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-controls.strength-structural",
+      "path": "prompts/creation/rewrite-controls/strength-structural.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-labels.concise",
+      "path": "prompts/creation/rewrite-labels/concise.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-labels.humanize",
+      "path": "prompts/creation/rewrite-labels/humanize.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-labels.narrative",
+      "path": "prompts/creation/rewrite-labels/narrative.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-labels.spoken",
+      "path": "prompts/creation/rewrite-labels/spoken.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-modes.concise",
+      "path": "prompts/creation/rewrite-modes/concise.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-modes.humanize",
+      "path": "prompts/creation/rewrite-modes/humanize.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-modes.narrative",
+      "path": "prompts/creation/rewrite-modes/narrative.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-modes.spoken",
+      "path": "prompts/creation/rewrite-modes/spoken.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-rules.allow-restructure",
+      "path": "prompts/creation/rewrite-rules/allow-restructure.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-rules.batch-boundary",
+      "path": "prompts/creation/rewrite-rules/batch-boundary.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "BATCH_COUNT",
+        "BATCH_NUMBER"
+      ]
+    },
+    {
+      "id": "creation.rewrite-rules.preserve-facts",
+      "path": "prompts/creation/rewrite-rules/preserve-facts.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-rules.preserve-numbers",
+      "path": "prompts/creation/rewrite-rules/preserve-numbers.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-rules.preserve-references",
+      "path": "prompts/creation/rewrite-rules/preserve-references.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.rewrite-rules.protected-span",
+      "path": "prompts/creation/rewrite-rules/protected-span.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "PROTECTED_SPAN"
+      ]
+    },
+    {
+      "id": "creation.rewrite-rules.protected-spans",
+      "path": "prompts/creation/rewrite-rules/protected-spans.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "PROTECTED_SPANS"
+      ]
+    },
+    {
+      "id": "creation.selection-actions.imitate",
+      "path": "prompts/creation/selection-actions/imitate.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.selection-actions.polish",
+      "path": "prompts/creation/selection-actions/polish.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.selection-actions.rewrite",
+      "path": "prompts/creation/selection-actions/rewrite.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.ungrounded-draft",
+      "path": "prompts/creation/ungrounded-draft.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "REQUESTED_TITLE",
+        "USER_REQUIREMENT"
+      ]
+    },
+    {
+      "id": "creation.verification-batch",
+      "path": "prompts/creation/verification-batch.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "TASKS"
+      ]
+    },
+    {
+      "id": "creation.verification-task",
+      "path": "prompts/creation/verification-task.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "SOURCE_ID",
+        "SOURCE_PATH",
+        "SOURCE_TEXT",
+        "TASK_ID",
+        "TASK_JSON"
+      ]
+    },
+    {
+      "id": "creation.writing-guidance-intro",
+      "path": "prompts/creation/writing-guidance-intro.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.writing-guidance-item",
+      "path": "prompts/creation/writing-guidance-item.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "GUIDANCE_INSTRUCTION",
+        "GUIDANCE_LABEL",
+        "GUIDANCE_NAME"
+      ]
+    },
+    {
+      "id": "creation.writing-guidance-labels.pattern",
+      "path": "prompts/creation/writing-guidance-labels/pattern.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.writing-guidance-labels.purpose",
+      "path": "prompts/creation/writing-guidance-labels/purpose.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "creation.writing-guidance-labels.voice",
+      "path": "prompts/creation/writing-guidance-labels/voice.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "deep-research.check-contradictions",
+      "path": "prompts/deep-research/check-contradictions.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "deep-research.plan",
+      "path": "prompts/deep-research/plan.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "deep-research.reflect",
+      "path": "prompts/deep-research/reflect.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "deep-research.synthesize",
+      "path": "prompts/deep-research/synthesize.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "knowledge-maintenance.cross-note-link-suggestion",
+      "path": "prompts/knowledge-maintenance/cross-note-link-suggestion.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ENTITIES",
+        "FROM_PATH",
+        "FROM_SOURCE_ID",
+        "SUGGESTION_NUMBER",
+        "TOPICS",
+        "TO_PATH",
+        "TO_SOURCE_ID"
+      ]
+    },
+    {
+      "id": "knowledge-maintenance.cross-note-no-suggestions",
+      "path": "prompts/knowledge-maintenance/cross-note-no-suggestions.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "knowledge-maintenance.cross-note-record",
+      "path": "prompts/knowledge-maintenance/cross-note-record.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "CONTENT_HASH",
+        "ENTITIES",
+        "EXISTING_LINKS",
+        "KEY_CONCLUSIONS",
+        "RELATIVE_PATH",
+        "SOURCE_ID",
+        "SUMMARY",
+        "TITLE",
+        "TOPICS",
+        "VAULT_NAME"
+      ]
+    },
+    {
+      "id": "knowledge-maintenance.cross-note-review",
+      "path": "prompts/knowledge-maintenance/cross-note-review.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "LINK_SUGGESTIONS",
+        "NOTE_COUNT",
+        "NOTE_RECORDS"
+      ]
+    },
+    {
+      "id": "knowledge-maintenance.note-analysis",
+      "path": "prompts/knowledge-maintenance/note-analysis.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "CONTENT_HASH",
+        "NOTE_CONTENT",
+        "NOTE_COUNT",
+        "NOTE_NUMBER",
+        "RELATIVE_PATH",
+        "SOURCE_ID",
+        "TITLE",
+        "VAULT_NAME"
+      ]
+    },
+    {
+      "id": "reflection.capability-item",
+      "path": "prompts/reflection/capability-item.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "CAPABILITY_ID",
+        "CAPABILITY_NAME",
+        "CAPABILITY_STATE",
+        "DESCRIPTION"
+      ]
+    },
+    {
+      "id": "reflection.capability-states.disabled",
+      "path": "prompts/reflection/capability-states/disabled.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "reflection.capability-states.enabled",
+      "path": "prompts/reflection/capability-states/enabled.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "reflection.evidence-event",
+      "path": "prompts/reflection/evidence-event.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ACTOR",
+        "CONTENT",
+        "EVENT_TYPE",
+        "METADATA_JSON",
+        "OCCURRED_AT"
+      ]
+    },
+    {
+      "id": "reflection.incremental-review",
+      "path": "prompts/reflection/incremental-review.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ASSISTANT_PROFILE_JSON",
+        "CAPABILITIES",
+        "CORRECTION_COUNT",
+        "EVIDENCE",
+        "EVIDENCE_COUNT",
+        "FAILED_TASK_COUNT",
+        "SKILL_EFFECTS",
+        "SKILL_EFFECT_COUNT"
+      ]
+    },
+    {
+      "id": "reflection.skill-effect-no-error",
+      "path": "prompts/reflection/skill-effect-no-error.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "reflection.skill-effect",
+      "path": "prompts/reflection/skill-effect.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "DETAIL",
+        "OUTCOME",
+        "SKILL_ID",
+        "SKILL_VERSION"
+      ]
+    },
+    {
+      "id": "reflection.skill-effects-empty",
+      "path": "prompts/reflection/skill-effects-empty.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "reports.request-context",
+      "path": "prompts/reports/request-context.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "REQUEST_CONTEXT"
+      ]
+    },
+    {
+      "id": "research.deep-research-source",
+      "path": "prompts/research/deep-research-source.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "BUDGET_STATUS",
+        "CONTENT",
+        "CONTENT_HASH",
+        "RELATIVE_PATH",
+        "SOURCE_ID",
+        "TITLE",
+        "VAULT_NAME"
+      ]
+    },
+    {
+      "id": "research.deep-research",
+      "path": "prompts/research/deep-research.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "PER_SOURCE_CHARACTER_BUDGET",
+        "QUERY",
+        "SOURCES",
+        "SOURCE_BUDGET"
+      ]
+    },
+    {
+      "id": "research.source-budget-complete",
+      "path": "prompts/research/source-budget-complete.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "CHARACTER_COUNT"
+      ]
+    },
+    {
+      "id": "research.source-budget-truncated",
+      "path": "prompts/research/source-budget-truncated.md",
+      "runtime": "renderer",
+      "kind": "template",
+      "placeholders": [
+        "ORIGINAL_CHARACTER_COUNT",
+        "READ_CHARACTER_COUNT"
+      ]
+    },
+    {
+      "id": "runtime.approved-skill-execution-system",
+      "path": "prompts/runtime/approved-skill-execution-system.txt",
+      "runtime": "native",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "runtime.assistant-capability-catalog",
+      "path": "prompts/runtime/assistant-capability-catalog.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "capabilities"
+      ]
+    },
+    {
+      "id": "runtime.assistant-context-omission",
+      "path": "prompts/runtime/assistant-context-omission.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "omitted_messages"
+      ]
+    },
+    {
+      "id": "runtime.assistant-permanent-delete-routing",
+      "path": "prompts/runtime/assistant-permanent-delete-routing.txt",
+      "runtime": "native",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "runtime.assistant-profile-context",
+      "path": "prompts/runtime/assistant-profile-context.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "assistant_language",
+        "assistant_name",
+        "assistant_style"
+      ]
+    },
+    {
+      "id": "runtime.assistant-research-routing",
+      "path": "prompts/runtime/assistant-research-routing.txt",
+      "runtime": "native",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "runtime.assistant-runtime.attachment-default-kind",
+      "path": "prompts/runtime/assistant-runtime/attachment-default-kind.txt",
+      "runtime": "native",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "runtime.assistant-runtime.attachment-image-header",
+      "path": "prompts/runtime/assistant-runtime/attachment-image-header.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "name"
+      ]
+    },
+    {
+      "id": "runtime.assistant-runtime.attachment-records",
+      "path": "prompts/runtime/assistant-runtime/attachment-records.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "attachment_records"
+      ]
+    },
+    {
+      "id": "runtime.assistant-runtime.attachment-unnamed",
+      "path": "prompts/runtime/assistant-runtime/attachment-unnamed.txt",
+      "runtime": "native",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "runtime.assistant-runtime.attachment-unread",
+      "path": "prompts/runtime/assistant-runtime/attachment-unread.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "kind",
+        "name"
+      ]
+    },
+    {
+      "id": "runtime.assistant-runtime.attachment-visible-text",
+      "path": "prompts/runtime/assistant-runtime/attachment-visible-text.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "visible_text"
+      ]
+    },
+    {
+      "id": "runtime.assistant-skill-routing",
+      "path": "prompts/runtime/assistant-skill-routing.txt",
+      "runtime": "native",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "runtime.assistant-slash-command-system",
+      "path": "prompts/runtime/assistant-slash-command-system.txt",
+      "runtime": "native",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "runtime.assistant-system",
+      "path": "prompts/runtime/assistant-system.txt",
+      "runtime": "native",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "runtime.capture-analysis-image-bindings",
+      "path": "prompts/runtime/capture-analysis-image-bindings.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "image_bindings"
+      ]
+    },
+    {
+      "id": "runtime.capture-analysis-image-sources",
+      "path": "prompts/runtime/capture-analysis-image-sources.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "image_urls"
+      ]
+    },
+    {
+      "id": "runtime.capture-analysis-system",
+      "path": "prompts/runtime/capture-analysis-system.txt",
+      "runtime": "native",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "runtime.capture-analysis-user",
+      "path": "prompts/runtime/capture-analysis-user.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "binding_context",
+        "content",
+        "image_context"
+      ]
+    },
+    {
+      "id": "runtime.memory.agent-case-content",
+      "path": "prompts/runtime/memory/agent-case-content.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "action",
+        "intent",
+        "outcome",
+        "state"
+      ]
+    },
+    {
+      "id": "runtime.memory.agent-case-title",
+      "path": "prompts/runtime/memory/agent-case-title.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "action",
+        "intent"
+      ]
+    },
+    {
+      "id": "runtime.memory.agent-section",
+      "path": "prompts/runtime/memory/agent-section.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "memories"
+      ]
+    },
+    {
+      "id": "runtime.memory.context-header",
+      "path": "prompts/runtime/memory/context-header.txt",
+      "runtime": "native",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "runtime.memory.context-item",
+      "path": "prompts/runtime/memory/context-item.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "content",
+        "title",
+        "track"
+      ]
+    },
+    {
+      "id": "runtime.memory.response-style-content",
+      "path": "prompts/runtime/memory/response-style-content.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "style"
+      ]
+    },
+    {
+      "id": "runtime.memory.response-style-title",
+      "path": "prompts/runtime/memory/response-style-title.txt",
+      "runtime": "native",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "runtime.memory.user-episode-content",
+      "path": "prompts/runtime/memory/user-episode-content.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "outcome",
+        "state",
+        "user_message"
+      ]
+    },
+    {
+      "id": "runtime.memory.user-episode-title",
+      "path": "prompts/runtime/memory/user-episode-title.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "summary"
+      ]
+    },
+    {
+      "id": "runtime.memory.user-section",
+      "path": "prompts/runtime/memory/user-section.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "memories"
+      ]
+    },
+    {
+      "id": "runtime.model-provider.assistant-attachment-text",
+      "path": "prompts/runtime/model-provider/assistant-attachment-text.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "name",
+        "text"
+      ]
+    },
+    {
+      "id": "runtime.model-provider.assistant-image-attachment",
+      "path": "prompts/runtime/model-provider/assistant-image-attachment.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "name"
+      ]
+    },
+    {
+      "id": "runtime.model-provider.assistant-received-attachment",
+      "path": "prompts/runtime/model-provider/assistant-received-attachment.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "name"
+      ]
+    },
+    {
+      "id": "runtime.model-provider.default-assistant-language",
+      "path": "prompts/runtime/model-provider/default-assistant-language.txt",
+      "runtime": "native",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "runtime.model-provider.default-assistant-name",
+      "path": "prompts/runtime/model-provider/default-assistant-name.txt",
+      "runtime": "native",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "runtime.model-provider.default-assistant-style",
+      "path": "prompts/runtime/model-provider/default-assistant-style.txt",
+      "runtime": "native",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "runtime.search.neural-note-embedding",
+      "path": "prompts/runtime/search/neural-note-embedding.template.txt",
+      "runtime": "native",
+      "kind": "template",
+      "placeholders": [
+        "content",
+        "relative_path",
+        "tags_json",
+        "title",
+        "wiki_links_json"
+      ]
+    },
+    {
+      "id": "shared.none",
+      "path": "prompts/shared/none.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "shared.unnamed-attachment",
+      "path": "prompts/shared/unnamed-attachment.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.academic-problematization",
+      "path": "prompts/writing-resources/patterns/academic-problematization.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.action-checklist",
+      "path": "prompts/writing-resources/patterns/action-checklist.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.analogy-explanation",
+      "path": "prompts/writing-resources/patterns/analogy-explanation.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.brand-origin-story",
+      "path": "prompts/writing-resources/patterns/brand-origin-story.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.business-proposal",
+      "path": "prompts/writing-resources/patterns/business-proposal.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.case-retrospective",
+      "path": "prompts/writing-resources/patterns/case-retrospective.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.character-profile",
+      "path": "prompts/writing-resources/patterns/character-profile.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.chronological-narrative",
+      "path": "prompts/writing-resources/patterns/chronological-narrative.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.citation-integration",
+      "path": "prompts/writing-resources/patterns/citation-integration.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.closed-loop-retrospective",
+      "path": "prompts/writing-resources/patterns/closed-loop-retrospective.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.conclusion-first",
+      "path": "prompts/writing-resources/patterns/conclusion-first.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.contract-elements",
+      "path": "prompts/writing-resources/patterns/contract-elements.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.contrast-tradeoff",
+      "path": "prompts/writing-resources/patterns/contrast-tradeoff.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.conversational-explanation",
+      "path": "prompts/writing-resources/patterns/conversational-explanation.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.data-interpretation",
+      "path": "prompts/writing-resources/patterns/data-interpretation.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.decision-memo",
+      "path": "prompts/writing-resources/patterns/decision-memo.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.definition-boundaries",
+      "path": "prompts/writing-resources/patterns/definition-boundaries.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.dialectical-synthesis",
+      "path": "prompts/writing-resources/patterns/dialectical-synthesis.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.editorial-compression",
+      "path": "prompts/writing-resources/patterns/editorial-compression.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.evidence-chain",
+      "path": "prompts/writing-resources/patterns/evidence-chain.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.execution-roadmap",
+      "path": "prompts/writing-resources/patterns/execution-roadmap.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.fact-preserving-rewrite",
+      "path": "prompts/writing-resources/patterns/fact-preserving-rewrite.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.hook-and-payoff",
+      "path": "prompts/writing-resources/patterns/hook-and-payoff.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.hypothesis-testing",
+      "path": "prompts/writing-resources/patterns/hypothesis-testing.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.imrad-argument",
+      "path": "prompts/writing-resources/patterns/imrad-argument.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.iterative-variants",
+      "path": "prompts/writing-resources/patterns/iterative-variants.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.launch-rhythm",
+      "path": "prompts/writing-resources/patterns/launch-rhythm.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.literature-weaving",
+      "path": "prompts/writing-resources/patterns/literature-weaving.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.logical-bridging",
+      "path": "prompts/writing-resources/patterns/logical-bridging.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.misconception-correction",
+      "path": "prompts/writing-resources/patterns/misconception-correction.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.multi-perspective-review",
+      "path": "prompts/writing-resources/patterns/multi-perspective-review.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.narrative-arc",
+      "path": "prompts/writing-resources/patterns/narrative-arc.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.natural-language-humanizing",
+      "path": "prompts/writing-resources/patterns/natural-language-humanizing.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.problem-cause-solution",
+      "path": "prompts/writing-resources/patterns/problem-cause-solution.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.procedural-tutorial",
+      "path": "prompts/writing-resources/patterns/procedural-tutorial.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.product-value-translation",
+      "path": "prompts/writing-resources/patterns/product-value-translation.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.progressive-decomposition",
+      "path": "prompts/writing-resources/patterns/progressive-decomposition.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.pyramid-argument",
+      "path": "prompts/writing-resources/patterns/pyramid-argument.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.question-led-dialogue",
+      "path": "prompts/writing-resources/patterns/question-led-dialogue.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.reciprocal-obligations",
+      "path": "prompts/writing-resources/patterns/reciprocal-obligations.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.research-abstract",
+      "path": "prompts/writing-resources/patterns/research-abstract.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.risk-clauses-first",
+      "path": "prompts/writing-resources/patterns/risk-clauses-first.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.risk-matrix",
+      "path": "prompts/writing-resources/patterns/risk-matrix.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.scene-led-opening",
+      "path": "prompts/writing-resources/patterns/scene-led-opening.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.structural-style-transfer",
+      "path": "prompts/writing-resources/patterns/structural-style-transfer.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.thesis-unfolding",
+      "path": "prompts/writing-resources/patterns/thesis-unfolding.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.user-journey-story",
+      "path": "prompts/writing-resources/patterns/user-journey-story.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.voice-harmonization",
+      "path": "prompts/writing-resources/patterns/voice-harmonization.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.wechat-deep-dive",
+      "path": "prompts/writing-resources/patterns/wechat-deep-dive.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.wechat-opinion-note",
+      "path": "prompts/writing-resources/patterns/wechat-opinion-note.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.xiaohongshu-curated-list",
+      "path": "prompts/writing-resources/patterns/xiaohongshu-curated-list.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.xiaohongshu-experience-note",
+      "path": "prompts/writing-resources/patterns/xiaohongshu-experience-note.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.patterns.xiaohongshu-pitfall-guide",
+      "path": "prompts/writing-resources/patterns/xiaohongshu-pitfall-guide.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.purpose-presets.academic-argument",
+      "path": "prompts/writing-resources/purpose-presets/academic-argument.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.purpose-presets.brand-storytelling",
+      "path": "prompts/writing-resources/purpose-presets/brand-storytelling.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.purpose-presets.contract-drafting",
+      "path": "prompts/writing-resources/purpose-presets/contract-drafting.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.purpose-presets.edit-improve",
+      "path": "prompts/writing-resources/purpose-presets/edit-improve.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.purpose-presets.explain-complex",
+      "path": "prompts/writing-resources/purpose-presets/explain-complex.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.purpose-presets.knowledge-synthesis",
+      "path": "prompts/writing-resources/purpose-presets/knowledge-synthesis.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.purpose-presets.persuade-decision",
+      "path": "prompts/writing-resources/purpose-presets/persuade-decision.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.purpose-presets.professional-report",
+      "path": "prompts/writing-resources/purpose-presets/professional-report.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.purpose-presets.social-engagement",
+      "path": "prompts/writing-resources/purpose-presets/social-engagement.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.voices.clear-analyst",
+      "path": "prompts/writing-resources/voices/clear-analyst.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.voices.decisive-advocate",
+      "path": "prompts/writing-resources/voices/decisive-advocate.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.voices.restrained-professional",
+      "path": "prompts/writing-resources/voices/restrained-professional.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.voices.vivid-narrator",
+      "path": "prompts/writing-resources/voices/vivid-narrator.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    },
+    {
+      "id": "writing-resources.voices.warm-guide",
+      "path": "prompts/writing-resources/voices/warm-guide.md",
+      "runtime": "renderer",
+      "kind": "static",
+      "placeholders": []
+    }
+  ]
+}

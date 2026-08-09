@@ -1,0 +1,4 @@
+意图：{{intent}}
+动作：{{action}}
+状态：{{state}}
+结果：{{outcome}}

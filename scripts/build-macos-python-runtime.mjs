@@ -37,6 +37,17 @@ const FRAMEWORK_BINARY_RELATIVE_PATH = 'Python';
 const LICENSE_RELATIVE_PATH = 'lib/python3.13/LICENSE.txt';
 const INSTALLER_LICENSE_RELATIVE_PATH = 'Resources/Python.app/Contents/Resources/PYTHON_INSTALLER_LICENSE.rtf';
 const SYSTEM_CERTIFICATE_FILE = '/etc/ssl/cert.pem';
+const BUILD_PATH_POLICY = 'no-absolute-user-build-paths-v1';
+const BUILD_PATH_REPLACEMENTS = [
+  [['', 'Users', 'ambv', ''].join('/'), '/vendor/src/'],
+];
+const FORBIDDEN_BUILD_PATH_PATTERNS = [
+  /\/Users\/[A-Za-z0-9._-]{1,64}\//gu,
+  /\/home\/[A-Za-z0-9._-]{1,64}\//gu,
+  /[A-Za-z]:\\Users\\[^\\\u0000-\u001f]{1,128}\\/gu,
+  /\/private\/tmp\/[A-Za-z0-9._-]+\//gu,
+];
+const PRUNED_TEST_MODULES = ['_ctypes_test', 'xxsubtype'];
 
 if (process.platform !== 'darwin') {
   console.log(`MACOS_PYTHON_RUNTIME_SKIPPED platform=${process.platform}`);
@@ -113,6 +124,55 @@ async function removeNamedEntries(directory, names) {
   }
 }
 
+function replaceEqualLength(bytes, sourceText, replacementText) {
+  const source = Buffer.from(sourceText, 'utf8');
+  const replacement = Buffer.from(replacementText, 'utf8');
+  if (source.length !== replacement.length) {
+    throw new Error(`runtime 路径替换必须保持字节长度：${sourceText} -> ${replacementText}`);
+  }
+  let offset = 0;
+  let replacements = 0;
+  while (offset < bytes.length) {
+    const index = bytes.indexOf(source, offset);
+    if (index < 0) break;
+    replacement.copy(bytes, index);
+    replacements += 1;
+    offset = index + source.length;
+  }
+  return replacements;
+}
+
+function assertNoBuildPaths(bytes, path) {
+  const text = bytes.toString('latin1');
+  for (const pattern of FORBIDDEN_BUILD_PATH_PATTERNS) {
+    pattern.lastIndex = 0;
+    if (pattern.test(text)) throw new Error(`Python runtime 仍含有绝对用户构建路径：${path}`);
+  }
+}
+
+async function sanitizeRuntimeBuildPaths(directory) {
+  let replacementCount = 0;
+  for (const entry of await collectEntries(directory)) {
+    if (entry.type !== 'file') continue;
+    const bytes = await readFile(entry.path);
+    let changed = false;
+    for (const [source, replacement] of BUILD_PATH_REPLACEMENTS) {
+      const count = replaceEqualLength(bytes, source, replacement);
+      replacementCount += count;
+      changed ||= count > 0;
+    }
+    assertNoBuildPaths(bytes, entry.path);
+    if (changed) await writeFile(entry.path, bytes);
+  }
+  return replacementCount;
+}
+
+async function assertRuntimeBuildPathsSanitized(directory) {
+  for (const entry of await collectEntries(directory)) {
+    if (entry.type === 'file') assertNoBuildPaths(await readFile(entry.path), entry.path);
+  }
+}
+
 async function archiveIsValid() {
   if (!await isFile(archivePath)) return false;
   const value = await readFile(archivePath);
@@ -143,7 +203,7 @@ async function downloadArchive() {
   const response = await fetch(DOWNLOAD_URL, {
     redirect: 'follow',
     signal: AbortSignal.timeout(20 * 60_000),
-    headers: { 'User-Agent': 'Yunspire macOS build/0.3' },
+    headers: { 'User-Agent': 'Yunspire macOS build/0.4' },
   });
   if (!response.ok || response.url !== DOWNLOAD_URL) {
     throw new Error(`无法从 Python 官方地址下载 macOS 运行时：HTTP ${response.status} ${response.url}`);
@@ -223,6 +283,7 @@ async function pruneRuntime() {
     join('lib', 'python3.13', 'site-packages'),
     join('lib', 'python3.13', 'test'),
     join('lib', 'python3.13', 'tkinter'),
+    join('lib', 'python3.13', 'venv'),
   ];
   for (const path of removable) {
     await rm(join(runtimeDirectory, path), { recursive: true, force: true });
@@ -231,7 +292,7 @@ async function pruneRuntime() {
   const dynamicDirectory = join(runtimeDirectory, 'lib', 'python3.13', 'lib-dynload');
   for (const entry of await readdir(dynamicDirectory, { withFileTypes: true })) {
     if (!entry.isFile()) continue;
-    if (/^(?:_tkinter|_test|xxlimited|_xxtestfuzz)/u.test(entry.name)) {
+    if (/^(?:_ctypes_test|_tkinter|_test|xxlimited|xxsubtype|_xxtestfuzz)/u.test(entry.name)) {
       await rm(join(dynamicDirectory, entry.name), { force: true });
     }
   }
@@ -467,12 +528,104 @@ async function runtimeIsCurrent(builderSha256) {
       && manifest.archiveMd5 === EXPECTED_MD5
       && manifest.licenseSha256 === EXPECTED_LICENSE_SHA256
       && manifest.installerLicenseSha256 === EXPECTED_INSTALLER_LICENSE_SHA256
+      && manifest.buildPathPolicy === BUILD_PATH_POLICY
+      && JSON.stringify(manifest.prunedTestModules) === JSON.stringify(PRUNED_TEST_MODULES)
       && manifest.builderSha256 === builderSha256
       && await sha256(licensePath) === EXPECTED_LICENSE_SHA256
       && await sha256(installerLicensePath) === EXPECTED_INSTALLER_LICENSE_SHA256;
   } catch {
     return false;
   }
+}
+
+async function runtimeSourceIsTrusted() {
+  if (!await isFile(manifestPath)
+    || !await isFile(pythonExecutable)
+    || !await isFile(frameworkBinary)
+    || !await isFile(licensePath)
+    || !await isFile(installerLicensePath)) return false;
+  try {
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    if (manifest.schema !== RUNTIME_SCHEMA
+      || manifest.version !== PYTHON_VERSION
+      || manifest.sourceUrl !== DOWNLOAD_URL
+      || manifest.archiveByteLength !== EXPECTED_ARCHIVE_BYTES
+      || manifest.archiveSha256 !== EXPECTED_SHA256
+      || manifest.archiveMd5 !== EXPECTED_MD5
+      || manifest.sourceSignature?.signer !== 'Developer ID Installer: Python Software Foundation (BMM5U3QVKW)'
+      || manifest.sourceSignature?.notarization !== 'trusted'
+      || await sha256(licensePath) !== EXPECTED_LICENSE_SHA256
+      || await sha256(installerLicensePath) !== EXPECTED_INSTALLER_LICENSE_SHA256) return false;
+    const metrics = await runtimeMetrics(runtimeDirectory);
+    if (metrics.payloadByteLength !== manifest.payloadByteLength
+      || metrics.payloadFileCount !== manifest.payloadFileCount
+      || metrics.payloadSha256 !== manifest.payloadSha256
+      || metrics.symlinkCount !== manifest.symlinkCount) return false;
+    const machOFiles = await candidateMachOFiles(runtimeDirectory);
+    if (machOFiles.length !== manifest.machOFileCount) return false;
+    assertRelocated(machOFiles);
+    assertUniversal2(pythonExecutable, 'Python launcher');
+    assertUniversal2(frameworkBinary, 'Python framework');
+    for (const path of machOFiles) {
+      run('/usr/bin/codesign', ['--verify', '--strict', path], `Mach-O ad-hoc 签名复核 ${path}`);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function finalizeRuntime(builderSha256, { relocate }) {
+  await pruneRuntime();
+  await materializeSymlinks(runtimeDirectory);
+  const sanitizedBuildPathCount = await sanitizeRuntimeBuildPaths(runtimeDirectory);
+  await chmod(pythonExecutable, 0o755);
+  const machOFiles = await candidateMachOFiles(runtimeDirectory);
+  if (machOFiles.length < 70) {
+    throw new Error(`Python macOS runtime Mach-O 文件数量异常：${machOFiles.length}`);
+  }
+  if (relocate) await relocateMachOFiles(machOFiles);
+  assertRelocated(machOFiles);
+  assertUniversal2(pythonExecutable, 'Python launcher');
+  assertUniversal2(frameworkBinary, 'Python framework');
+  signMachOFiles(machOFiles);
+  const smoke = await smokeRuntime(runtimeDirectory);
+  const metrics = await runtimeMetrics(runtimeDirectory);
+  if (metrics.symlinkCount !== 0) {
+    throw new Error(`Python macOS runtime 打包前仍含有 ${metrics.symlinkCount} 个符号链`);
+  }
+  const manifest = {
+    schema: RUNTIME_SCHEMA,
+    version: PYTHON_VERSION,
+    architectures: EXPECTED_ARCHITECTURES,
+    sourceUrl: DOWNLOAD_URL,
+    archiveByteLength: EXPECTED_ARCHIVE_BYTES,
+    archiveSha256: EXPECTED_SHA256,
+    archiveMd5: EXPECTED_MD5,
+    sourceSignature: {
+      signer: 'Developer ID Installer: Python Software Foundation (BMM5U3QVKW)',
+      notarization: 'trusted',
+    },
+    licenseFile: LICENSE_RELATIVE_PATH,
+    licenseSha256: EXPECTED_LICENSE_SHA256,
+    installerLicenseFile: INSTALLER_LICENSE_RELATIVE_PATH,
+    installerLicenseSha256: EXPECTED_INSTALLER_LICENSE_SHA256,
+    executable: EXECUTABLE_RELATIVE_PATH,
+    frameworkBinary: FRAMEWORK_BINARY_RELATIVE_PATH,
+    relocationPrefix: RELOCATION_PREFIX,
+    certificateFile: SYSTEM_CERTIFICATE_FILE,
+    buildPathPolicy: BUILD_PATH_POLICY,
+    sanitizedBuildPathCount,
+    prunedTestModules: PRUNED_TEST_MODULES,
+    payloadByteLength: metrics.payloadByteLength,
+    payloadFileCount: metrics.payloadFileCount,
+    payloadSha256: metrics.payloadSha256,
+    symlinkCount: metrics.symlinkCount,
+    machOFileCount: machOFiles.length,
+    pythonExecutableSmoke: smoke,
+    builderSha256,
+  };
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
 }
 
 async function buildRuntime(builderSha256) {
@@ -500,52 +653,7 @@ async function buildRuntime(builderSha256) {
     });
     await mkdir(dirname(installerLicensePath), { recursive: true });
     await copyFile(sourceInstallerLicense, installerLicensePath);
-    await pruneRuntime();
-    await materializeSymlinks(runtimeDirectory);
-    await chmod(pythonExecutable, 0o755);
-    const machOFiles = await candidateMachOFiles(runtimeDirectory);
-    if (machOFiles.length < 70) {
-      throw new Error(`Python macOS runtime Mach-O 文件数量异常：${machOFiles.length}`);
-    }
-    await relocateMachOFiles(machOFiles);
-    assertRelocated(machOFiles);
-    assertUniversal2(pythonExecutable, 'Python launcher');
-    assertUniversal2(frameworkBinary, 'Python framework');
-    signMachOFiles(machOFiles);
-    const smoke = await smokeRuntime(runtimeDirectory);
-    const metrics = await runtimeMetrics(runtimeDirectory);
-    if (metrics.symlinkCount !== 0) {
-      throw new Error(`Python macOS runtime 打包前仍含有 ${metrics.symlinkCount} 个符号链`);
-    }
-    const manifest = {
-      schema: RUNTIME_SCHEMA,
-      version: PYTHON_VERSION,
-      architectures: EXPECTED_ARCHITECTURES,
-      sourceUrl: DOWNLOAD_URL,
-      archiveByteLength: EXPECTED_ARCHIVE_BYTES,
-      archiveSha256: EXPECTED_SHA256,
-      archiveMd5: EXPECTED_MD5,
-      sourceSignature: {
-        signer: 'Developer ID Installer: Python Software Foundation (BMM5U3QVKW)',
-        notarization: 'trusted',
-      },
-      licenseFile: LICENSE_RELATIVE_PATH,
-      licenseSha256: EXPECTED_LICENSE_SHA256,
-      installerLicenseFile: INSTALLER_LICENSE_RELATIVE_PATH,
-      installerLicenseSha256: EXPECTED_INSTALLER_LICENSE_SHA256,
-      executable: EXECUTABLE_RELATIVE_PATH,
-      frameworkBinary: FRAMEWORK_BINARY_RELATIVE_PATH,
-      relocationPrefix: RELOCATION_PREFIX,
-      certificateFile: SYSTEM_CERTIFICATE_FILE,
-      payloadByteLength: metrics.payloadByteLength,
-      payloadFileCount: metrics.payloadFileCount,
-      payloadSha256: metrics.payloadSha256,
-      symlinkCount: metrics.symlinkCount,
-      machOFileCount: machOFiles.length,
-      pythonExecutableSmoke: smoke,
-      builderSha256,
-    };
-    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    await finalizeRuntime(builderSha256, { relocate: true });
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
@@ -562,7 +670,9 @@ async function verifyRuntime(builderSha256) {
     || manifest.sourceSignature?.signer !== 'Developer ID Installer: Python Software Foundation (BMM5U3QVKW)'
     || manifest.sourceSignature?.notarization !== 'trusted'
     || manifest.licenseSha256 !== EXPECTED_LICENSE_SHA256
-    || manifest.installerLicenseSha256 !== EXPECTED_INSTALLER_LICENSE_SHA256) {
+    || manifest.installerLicenseSha256 !== EXPECTED_INSTALLER_LICENSE_SHA256
+    || manifest.buildPathPolicy !== BUILD_PATH_POLICY
+    || JSON.stringify(manifest.prunedTestModules) !== JSON.stringify(PRUNED_TEST_MODULES)) {
     throw new Error('macOS Python runtime manifest 与固定来源不一致');
   }
   if (await sha256(licensePath) !== EXPECTED_LICENSE_SHA256
@@ -579,6 +689,15 @@ async function verifyRuntime(builderSha256) {
   for (const path of machOFiles) {
     run('/usr/bin/codesign', ['--verify', '--strict', path], `Mach-O ad-hoc 签名复核 ${path}`);
   }
+  await assertRuntimeBuildPathsSanitized(runtimeDirectory);
+  for (const moduleName of PRUNED_TEST_MODULES) {
+    const remaining = (await readdir(join(runtimeDirectory, 'lib', 'python3.13', 'lib-dynload')))
+      .find((entry) => entry.startsWith(`${moduleName}.`) || entry === moduleName);
+    if (remaining) throw new Error(`macOS Python runtime 仍含有测试模块：${remaining}`);
+  }
+  if (await stat(join(runtimeDirectory, 'lib', 'python3.13', 'venv')).catch(() => null)) {
+    throw new Error('macOS Python runtime 仍含有不可用的 venv 模块');
+  }
   const metrics = await runtimeMetrics(runtimeDirectory);
   if (metrics.payloadByteLength !== manifest.payloadByteLength
     || metrics.payloadFileCount !== manifest.payloadFileCount
@@ -592,6 +711,9 @@ async function verifyRuntime(builderSha256) {
 
 await mkdir(outputRoot, { recursive: true });
 const builderSha256 = digest('sha256', await readFile(import.meta.filename));
-if (!await runtimeIsCurrent(builderSha256)) await buildRuntime(builderSha256);
+if (!await runtimeIsCurrent(builderSha256)) {
+  if (await runtimeSourceIsTrusted()) await finalizeRuntime(builderSha256, { relocate: false });
+  else await buildRuntime(builderSha256);
+}
 const manifest = await verifyRuntime(builderSha256);
 console.log(`MACOS_PYTHON_RUNTIME_OK version=${manifest.version} architectures=${manifest.architectures.join(',')} machos=${manifest.machOFileCount}`);

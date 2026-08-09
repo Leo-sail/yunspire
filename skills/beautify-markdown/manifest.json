@@ -1,7 +1,7 @@
 {
   "id": "beautify-markdown",
   "display_name": "自动美化排版",
-  "description": "安全优化中文 Obsidian Markdown 的结构、间距、图片说明和可读性，不改变原意并保留所有 Obsidian 语法。",
+  "description": "安全优化中文 Obsidian Markdown 的结构、间距和可读性，不改变原意并保留所有 Obsidian 语法。",
   "status": "active",
   "user_editable": true,
   "instructions_path": "skills/beautify-markdown/SKILL.md",

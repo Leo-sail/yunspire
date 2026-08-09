@@ -6,6 +6,16 @@ This file records material public-version changes only. It excludes local valida
 
 ## 中文
 
+### 0.4.0 - 2026-08-09
+
+- 行为记录不再进入用户界面、长期记忆或 Obsidian；升级时会把旧行为记录移出 Vault，记忆页只展示已经确认并可召回的结构化内容。
+- 便签改为直接本地保存，并增加一键整理：只处理尚未整理的灵感，按自然日合并写入一个 Obsidian Markdown 文件，已处理内容不会重复发送给 AI助手。
+- 知识库默认按 Obsidian 文件夹浏览，输入搜索词后再展示匹配文件；“原生图谱”直接在云枢内读取 Markdown/Wiki Link 关系并渲染交互图谱，移除失效的外部打开按钮。
+- 文章模板、排版主题和内容组件统一按分类浏览，主题与组件预览缩小约一半并重做密度、留白、边界和响应式布局。
+- 工作台增加按时段变化的欢迎语、准确日期时间和“整理知识库”入口；继续工作、最近更新与知识库健康中的空白方形占位图标已移除。
+- 303 个模型 Prompt 全部迁移为独立文件并纳入清单校验；5 个第一方 Skill 按专业工作流、边界、输入输出、失败恢复和参考资料重新定义。
+- 清理 Storybook、测试源码、测试专用工作流、过时空操作和本机构建残留，统一生成不包含 Vault、数据库、密钥、日志、缓存、截图或机器路径的 macOS/Windows 纯净安装包。
+
 ### 0.3.0 - 2026-08-08
 
 - 重构桌面端整体信息架构和视觉层级，统一总览、AI助手、采集、知识、创作、回望、操作日志与设置，并在常用桌面宽度下消除横向溢出。
@@ -57,6 +67,16 @@ This file records material public-version changes only. It excludes local valida
 - 完成纯净发布边界、双语文档、架构图和 GitHub 协作模板。
 
 ## English
+
+### 0.4.0 - 2026-08-09
+
+- Stopped exposing activity records in the UI, long-term memory, or Obsidian. Upgrades move legacy activity records outside the Vault, and memory surfaces show only confirmed recallable records.
+- Changed sticky notes to save locally without Assistant processing and added one-click organization that handles only unresolved ideas and writes one daily Obsidian Markdown file without reprocessing completed items.
+- Made the Knowledge page folder-first until a search is submitted. Native Graph now renders local Markdown and Wiki Link relationships interactively inside Yunspire, with the disabled external-open action removed.
+- Unified article templates, typography themes, and content components under categorized browsing, while reducing theme/component previews by roughly half and refining density, spacing, borders, and responsive layout.
+- Added a time-aware Workbench greeting with exact date/time and a Knowledge Maintenance entry, and removed blank square placeholders from Continue Working, Recent Updates, and Knowledge Health.
+- Moved all 303 model prompts into standalone files with manifest validation and rewrote five first-party Skills with detailed workflows, boundaries, I/O contracts, failure recovery, and references.
+- Removed Storybook, test source, test-only workflows, obsolete no-op code, and local build residue, producing clean macOS and Windows installers that exclude Vaults, databases, keys, logs, caches, screenshots, and machine-specific paths.
 
 ### 0.3.0 - 2026-08-08
 

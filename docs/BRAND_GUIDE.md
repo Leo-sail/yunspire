@@ -1,6 +1,6 @@
 # 云枢品牌指南 / Yunspire Brand Guide
 
-当前版本 / Current version: `0.3.0`
+当前版本 / Current version: `0.4.0`
 
 ## 中文
 

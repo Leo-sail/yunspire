@@ -518,6 +518,104 @@ def _is_external_markdown_image(target):
         return False
 
 
+def _markdown_link_occurrences(path, text):
+    ignored_ranges = _markdown_ignored_ranges(text)
+    definitions = _markdown_reference_definitions(text, ignored_ranges)
+    source_identity = hashlib.sha256(
+        (path.name + "\0" + text).encode("utf-8")
+    ).hexdigest()
+    occurrences = []
+    cursor = 0
+    while cursor < len(text):
+        containing = _range_containing(cursor, ignored_ranges)
+        if containing:
+            cursor = containing[1]
+            continue
+        if text[cursor] != "[" or _markdown_is_escaped(text, cursor):
+            cursor += 1
+            continue
+        if cursor > 0 and text[cursor - 1] == "!" and not _markdown_is_escaped(text, cursor - 1):
+            cursor += 1
+            continue
+        label_end = _markdown_closing_bracket(text, cursor, ignored_ranges)
+        if label_end is None:
+            cursor += 1
+            continue
+        after = label_end + 1
+        line_start = text.rfind("\n", 0, cursor) + 1
+        if after < len(text) and text[after] == ":" and not text[line_start:cursor].strip():
+            cursor = after + 1
+            continue
+
+        raw_label = text[cursor + 1 : label_end]
+        syntax = None
+        target = None
+        title = ""
+        occurrence_end = after
+        definition = None
+        if after < len(text) and text[after] == "(":
+            inline = _markdown_inline_destination(text, after)
+            if inline:
+                syntax = "inline"
+                target = _markdown_unescape(
+                    text[inline["destination_start"] : inline["destination_end"]]
+                )
+                title = inline["title"]
+                occurrence_end = inline["end"]
+        elif after < len(text) and text[after] == "[":
+            reference_end = _markdown_closing_bracket(text, after, ignored_ranges)
+            if reference_end is not None:
+                raw_reference = text[after + 1 : reference_end] or raw_label
+                definition = definitions.get(_markdown_label_key(raw_reference))
+                if definition:
+                    syntax = "reference"
+                    target = definition["target"]
+                    title = definition["title"]
+                    occurrence_end = reference_end + 1
+        else:
+            definition = definitions.get(_markdown_label_key(raw_label))
+            if definition:
+                syntax = "shortcut_reference"
+                target = definition["target"]
+                title = definition["title"]
+        if not syntax or target is None:
+            cursor = max(after, cursor + 1)
+            continue
+
+        line = text.count("\n", 0, cursor) + 1
+        previous_newline = text.rfind("\n", 0, cursor)
+        column = cursor - previous_newline
+        identity = "\x1f".join(
+            (source_identity, str(cursor), str(occurrence_end), str(target))
+        )
+        occurrences.append(
+            {
+                "link_id": "markdown-link-"
+                + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24],
+                "source": "markdown_link",
+                "source_part": path.name,
+                "display_text": _markdown_unescape(raw_label),
+                "target": target,
+                "title_text": title,
+                "syntax": syntax,
+                "text_offset_start": cursor,
+                "text_offset_end": occurrence_end,
+                "provenance": {
+                    "source_kind": "markdown_link",
+                    "source_part": path.name,
+                    "text_offset_start": cursor,
+                    "text_offset_end": occurrence_end,
+                    "line": line,
+                    "column": column,
+                    "definition": dict(definition) if definition else None,
+                },
+                "policy": link_policy(target),
+            }
+        )
+        cursor = occurrence_end
+    return occurrences
+
+
 def _markdown_image_occurrences(path, text):
     ignored_ranges = _markdown_ignored_ranges(text)
     definitions = _markdown_reference_definitions(text, ignored_ranges)
@@ -723,6 +821,20 @@ def extract_markdown(path, source, external_asset_directory=None):
 
         rendered = _render_localized_markdown(source, references)
         structured = text_structure(path, rendered, "markdown")
+        markdown_links = _markdown_link_occurrences(path, rendered)
+        markdown_link_ranges = [
+            (link["text_offset_start"], link["text_offset_end"])
+            for link in markdown_links
+        ]
+        structured["links"] = [
+            link
+            for link in structured["links"]
+            if not any(
+                start <= link.get("text_offset_start", -1) < end
+                for start, end in markdown_link_ranges
+            )
+        ]
+        structured["links"].extend(markdown_links)
         image_links = []
         for reference in references:
             policy = link_policy(reference["source_url"])
@@ -749,6 +861,10 @@ def extract_markdown(path, source, external_asset_directory=None):
             )
         structured["links"].extend(image_links)
         links_by_line = {}
+        for link in markdown_links:
+            links_by_line.setdefault(link["provenance"]["line"], []).append(
+                link["link_id"]
+            )
         for reference in references:
             rendered_start = reference["placement"]["rendered_markdown_offset_start"]
             rendered_line = rendered.count("\n", 0, rendered_start) + 1
@@ -1665,8 +1781,9 @@ def extract_pdf(path, attachment_output_directory=None):
             temporary.cleanup()
 
 
-def empty_result(path, warning=None, error=None):
+def empty_result(path, warning=None, error=None, status="failed"):
     return {
+        "status": status,
         "path": str(path),
         "type": path.suffix.lower(),
         "text": "",
@@ -1684,7 +1801,10 @@ def empty_result(path, warning=None, error=None):
 def extract_one(path, external_asset_directory=None):
     suffix = path.suffix.lower()
     if suffix in MEDIA_SUFFIXES:
-        return {**empty_result(path), "delegated_to": "video-content-analysis"}
+        return {
+            **empty_result(path, status="delegated"),
+            "delegated_to": "video-content-analysis",
+        }
 
     warnings = []
     attachments = []
@@ -1741,7 +1861,10 @@ def extract_one(path, external_asset_directory=None):
         text = f"![{path.name}](attachment://{path.name})"
         warnings.append("图片已读取为视觉分析附件")
     else:
-        return empty_result(path, warning=f"暂不支持的文件类型：{suffix or '无扩展名'}")
+        return empty_result(
+            path,
+            error=f"暂不支持的文件类型：{suffix or '无扩展名'}",
+        )
 
     external_candidates, external_localized, external_failures = (
         external_image_contract(structured)
@@ -1756,6 +1879,7 @@ def extract_one(path, external_asset_directory=None):
         else None
     )
     return {
+        "status": "failed" if errors else "completed",
         "path": str(path),
         "type": suffix,
         "text": text,

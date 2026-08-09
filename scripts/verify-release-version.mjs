@@ -10,6 +10,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { verifyPackagedFilePrivacy } from './verify-packaged-privacy.mjs';
 
 const execFileAsync = promisify(execFile);
 export const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -551,6 +552,12 @@ export async function verifyReleaseManifests({
       throw new Error(`${manifestPath} signingMode ${manifest.signingMode || 'missing'} does not match signed=${manifest.signed}`);
     }
     if (requireSigned && manifest.signed !== true) throw new Error(`${manifestPath} is not marked as a signed artifact`);
+    if (manifest.privacyVerified !== true) throw new Error(`${manifestPath} is not marked as privacy verified`);
+    const privacyVerification = manifest.privacyVerification;
+    if (privacyVerification?.policy !== 'installed-content-and-artifact-bytes-v2'
+      || privacyVerification.installedContent !== true) {
+      throw new Error(`${manifestPath} does not record installed-content and artifact-byte privacy verification`);
+    }
     signingModes.add(manifest.signingMode);
     if (!['macos', 'windows'].includes(manifest.platform)) {
       throw new Error(`${manifestPath} has unsupported platform ${manifest.platform || 'missing'}`);
@@ -564,6 +571,16 @@ export async function verifyReleaseManifests({
     const artifactStat = await stat(artifactPath);
     if (!artifactStat.isFile() || artifactStat.size !== manifest.bytes) {
       throw new Error(`${manifestPath} byte length does not match ${manifest.file}`);
+    }
+    const artifactPrivacy = await verifyPackagedFilePrivacy(artifactPath, {
+      platform: `${manifest.platform}-artifact`,
+    });
+    const recordedArtifactPrivacy = privacyVerification.artifact;
+    if (recordedArtifactPrivacy?.platform !== artifactPrivacy.platform
+      || recordedArtifactPrivacy.fileCount !== artifactPrivacy.fileCount
+      || recordedArtifactPrivacy.byteLength !== artifactPrivacy.byteLength
+      || recordedArtifactPrivacy.symlinkCount !== artifactPrivacy.symlinkCount) {
+      throw new Error(`${manifestPath} artifact privacy report does not match ${manifest.file}`);
     }
     const artifactDigest = await sha256(artifactPath);
     if (artifactDigest !== manifest.sha256) throw new Error(`${manifestPath} SHA-256 does not match ${manifest.file}`);

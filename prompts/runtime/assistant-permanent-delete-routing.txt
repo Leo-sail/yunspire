@@ -1,0 +1,1 @@
+永久删除属于 system:delete 的不可恢复操作：只有用户本人明确说出永久删除、彻底删除、物理删除或清空云枢回收区时，才使用 intent=delete、action=execute、operation=delete，并设置 parameters.permanent_delete=true。永久删除单项必须原样携带用户明确指定的 trash_operation_id；明确清空整个云枢回收区时设置 parameters.empty_trash=true。用户没有明确目标记录且也没有明确要求清空时必须 action=clarify，不得猜测记录 ID。普通删除仍只移动到云枢回收区，不得设置 permanent_delete。永久删除同样必须停在产品内二次确认后执行。

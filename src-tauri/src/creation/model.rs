@@ -1,4 +1,4 @@
-//! Stable data contracts for the v0.3 creation runtime.
+//! Stable data contracts for the v0.4 creation runtime.
 //!
 //! These structures mirror the JSON Schemas in `docs/schemas`. Markdown is
 //! the canonical authority; blocks, validation receipts and readiness reports
@@ -11,7 +11,7 @@ use serde_json::Value;
 
 pub const CREATION_SCHEMA_VERSION: &str = "2.0";
 pub const MANIFEST_SCHEMA_VERSION: &str = "1.0";
-pub const CREATION_RUNTIME_VERSION: &str = "0.3.0";
+pub const CREATION_RUNTIME_VERSION: &str = "0.4.0";
 
 fn creation_schema_version() -> String {
     CREATION_SCHEMA_VERSION.to_string()

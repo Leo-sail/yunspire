@@ -5,6 +5,148 @@ import { resolve } from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
+const outputSchema = JSON.parse(
+  await readFile(new URL("../output.schema.json", import.meta.url), "utf8"),
+);
+
+function childPath(path, key) {
+  return path === "/" ? `/${key}` : `${path}/${key}`;
+}
+
+function schemaReference(reference) {
+  if (typeof reference !== "string" || !reference.startsWith("#/")) {
+    throw new Error(`不支持的 JSON Schema 引用：${reference}`);
+  }
+  return reference.slice(2).split("/").reduce((value, segment) => (
+    value?.[segment.replaceAll("~1", "/").replaceAll("~0", "~")]
+  ), outputSchema);
+}
+
+function matchesType(value, type) {
+  if (type === "null") return value === null;
+  if (type === "array") return Array.isArray(value);
+  if (type === "object") return value !== null && typeof value === "object" && !Array.isArray(value);
+  if (type === "integer") return Number.isInteger(value);
+  if (type === "number") return typeof value === "number" && Number.isFinite(value);
+  return typeof value === type;
+}
+
+function sameJsonValue(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function validateSchemaValue(value, schema, path, errors) {
+  if (!schema || typeof schema !== "object") {
+    errors.push(`${path} 的 schema 无效`);
+    return;
+  }
+  if (schema.$ref) {
+    validateSchemaValue(value, schemaReference(schema.$ref), path, errors);
+    return;
+  }
+  if (Array.isArray(schema.oneOf)) {
+    const matched = schema.oneOf.filter((candidate) => {
+      const candidateErrors = [];
+      validateSchemaValue(value, candidate, path, candidateErrors);
+      return candidateErrors.length === 0;
+    });
+    if (matched.length !== 1) errors.push(`${path} 必须且只能匹配一个 oneOf 分支`);
+    return;
+  }
+
+  const acceptedTypes = Array.isArray(schema.type) ? schema.type : [schema.type].filter(Boolean);
+  if (acceptedTypes.length && !acceptedTypes.some((type) => matchesType(value, type))) {
+    errors.push(`${path} 类型必须为 ${acceptedTypes.join(" 或 ")}`);
+    return;
+  }
+  if (Object.hasOwn(schema, "const") && !sameJsonValue(value, schema.const)) {
+    errors.push(`${path} 必须等于 ${JSON.stringify(schema.const)}`);
+  }
+  if (Array.isArray(schema.enum) && !schema.enum.some((item) => sameJsonValue(value, item))) {
+    errors.push(`${path} 不在允许的枚举值中`);
+  }
+
+  if (typeof value === "string") {
+    if (Number.isInteger(schema.minLength) && value.length < schema.minLength) {
+      errors.push(`${path} 长度不能小于 ${schema.minLength}`);
+    }
+    if (Number.isInteger(schema.maxLength) && value.length > schema.maxLength) {
+      errors.push(`${path} 长度不能大于 ${schema.maxLength}`);
+    }
+    if (schema.pattern && !new RegExp(schema.pattern, "u").test(value)) {
+      errors.push(`${path} 不符合格式 ${schema.pattern}`);
+    }
+    if (schema.format === "uri") {
+      try {
+        const parsed = new URL(value);
+        if (!parsed.protocol) throw new Error("missing protocol");
+      } catch {
+        errors.push(`${path} 必须是有效 URI`);
+      }
+    }
+    if (schema.format === "date-time"
+      && (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u.test(value)
+        || !Number.isFinite(Date.parse(value)))) {
+      errors.push(`${path} 必须是有效 date-time`);
+    }
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (typeof schema.minimum === "number" && value < schema.minimum) {
+      errors.push(`${path} 不能小于 ${schema.minimum}`);
+    }
+    if (typeof schema.maximum === "number" && value > schema.maximum) {
+      errors.push(`${path} 不能大于 ${schema.maximum}`);
+    }
+  }
+
+  if (Array.isArray(value)) {
+    if (Number.isInteger(schema.minItems) && value.length < schema.minItems) {
+      errors.push(`${path} 数量不能少于 ${schema.minItems}`);
+    }
+    if (Number.isInteger(schema.maxItems) && value.length > schema.maxItems) {
+      errors.push(`${path} 数量不能多于 ${schema.maxItems}`);
+    }
+    if (schema.uniqueItems) {
+      const identities = value.map((item) => JSON.stringify(item));
+      if (new Set(identities).size !== identities.length) errors.push(`${path} 不能包含重复项`);
+    }
+    if (schema.items) {
+      value.forEach((item, index) => {
+        validateSchemaValue(item, schema.items, childPath(path, index), errors);
+      });
+    }
+  }
+
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    for (const required of schema.required || []) {
+      if (!Object.hasOwn(value, required)) errors.push(`${path} 缺少必填字段 ${required}`);
+    }
+    const properties = schema.properties || {};
+    for (const [key, propertySchema] of Object.entries(properties)) {
+      if (Object.hasOwn(value, key)) {
+        validateSchemaValue(value[key], propertySchema, childPath(path, key), errors);
+      }
+    }
+    if (schema.additionalProperties === false) {
+      for (const key of Object.keys(value)) {
+        if (!Object.hasOwn(properties, key)) errors.push(`${childPath(path, key)} 是未声明字段`);
+      }
+    }
+  }
+
+  for (const conjunct of schema.allOf || []) {
+    validateSchemaValue(value, conjunct, path, errors);
+  }
+  if (schema.if) {
+    const conditionErrors = [];
+    validateSchemaValue(value, schema.if, path, conditionErrors);
+    if (conditionErrors.length === 0 && schema.then) {
+      validateSchemaValue(value, schema.then, path, errors);
+    }
+  }
+}
+
 const workflowStages = [
   "plan",
   "evidence_collection",
@@ -34,10 +176,19 @@ function requireReference(index, id, context, errors) {
 }
 
 export function validateResearchResult(result) {
-  const errors = [];
   if (!result || typeof result !== "object" || Array.isArray(result)) {
     return { valid: false, errors: ["研究结果必须是 JSON 对象"] };
   }
+  const schemaErrors = [];
+  validateSchemaValue(result, outputSchema, "/", schemaErrors);
+  if (schemaErrors.length) {
+    return {
+      valid: false,
+      errors: schemaErrors.map((error) => `output.schema.json ${error}`),
+    };
+  }
+
+  const errors = [];
 
   const sources = Array.isArray(result.sources) ? result.sources : [];
   const evidence = Array.isArray(result.evidence) ? result.evidence : [];
@@ -153,6 +304,12 @@ export function validateResearchResult(result) {
   }
   if (result.status === "policy_denied" && result.policy_result?.decision !== "deny") {
     errors.push("策略拒绝状态必须包含 deny 决策");
+  }
+  if (result.status === "awaiting_checkpoint" && result.policy_result?.decision !== "requires_approval") {
+    errors.push("等待检查点状态必须包含 requires_approval 决策");
+  }
+  if (result.policy_result?.decision === "requires_approval" && result.status !== "awaiting_checkpoint") {
+    errors.push("requires_approval 决策必须返回 awaiting_checkpoint 状态");
   }
 
   return { valid: errors.length === 0, errors };

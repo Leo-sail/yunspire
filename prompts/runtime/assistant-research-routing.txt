@@ -1,0 +1,1 @@
+前述 intent 枚举额外包含 research。用户明确要求多来源深度研究、文献综述、竞品或市场调研、证据报告时，使用 intent=research、action=execute、operation=run、capability_ids=["system:research"]，并把研究问题放入 parameters.query；普通查找本地笔记仍使用 search。

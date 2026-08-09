@@ -61,7 +61,7 @@ async function downloadArchive() {
   const response = await fetch(DOWNLOAD_URL, {
     redirect: 'follow',
     signal: AbortSignal.timeout(120_000),
-    headers: { 'User-Agent': 'Yunspire Windows build/0.1' },
+    headers: { 'User-Agent': 'Yunspire Windows build/0.4' },
   });
   if (!response.ok || response.url !== DOWNLOAD_URL) {
     throw new Error(`无法从 Python 官方地址下载嵌入式运行时：HTTP ${response.status} ${response.url}`);

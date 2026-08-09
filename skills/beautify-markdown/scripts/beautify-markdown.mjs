@@ -8,6 +8,19 @@ const input = await new Promise((resolve, reject) => {
   process.stdin.on("error", reject);
 });
 
+let source = String(input);
+let cjkSpacing = !process.argv.includes("--no-cjk-spacing");
+try {
+  const envelope = JSON.parse(source);
+  if (envelope && typeof envelope === "object" && !Array.isArray(envelope)
+    && typeof envelope.markdown === "string") {
+    source = envelope.markdown;
+    if (envelope.options?.cjk_spacing === false) cjkSpacing = false;
+  }
+} catch {
+  // Raw Markdown remains the default CLI input format.
+}
+
 const protectedBlocks = [];
 const protect = (value) => {
   const token = `YUNSPIREPROTECTED${protectedBlocks.length}TOKEN`;
@@ -15,7 +28,7 @@ const protect = (value) => {
   return token;
 };
 
-let markdown = String(input).replace(/\r\n?/g, "\n");
+let markdown = source.replace(/\r\n?/g, "\n");
 markdown = markdown.replace(/^---\n[\s\S]*?\n---(?=\n|$)/, protect);
 markdown = markdown.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, protect);
 markdown = markdown.replace(/`[^`\n]+`|\$\$[\s\S]*?\$\$|\$[^$\n]+\$/g, protect);
@@ -31,9 +44,11 @@ markdown = markdown
   .replace(/([^\n])\n(> )/g, "$1\n\n$2")
   .replace(/(^> .*$(?:\n^> .*$)*)\n(?!\n)/gm, "$1\n\n");
 
-markdown = markdown
-  .replace(/([\u3400-\u9fff])([A-Za-z0-9])/g, "$1 $2")
-  .replace(/([A-Za-z0-9])([\u3400-\u9fff])/g, "$1 $2");
+if (cjkSpacing) {
+  markdown = markdown
+    .replace(/([\u3400-\u9fff])([A-Za-z0-9])/g, "$1 $2")
+    .replace(/([A-Za-z0-9])([\u3400-\u9fff])/g, "$1 $2");
+}
 
 markdown = markdown.replace(/YUNSPIREPROTECTED(\d+)TOKEN/g, (_, index) => protectedBlocks[Number(index)]);
 process.stdout.write(`${markdown.trim()}\n`);

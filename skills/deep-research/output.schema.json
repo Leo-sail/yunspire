@@ -333,7 +333,7 @@
       "additionalProperties": false,
       "required": ["decision", "rules_checked", "effective_network_origins", "effective_vault_ids", "reasons"],
       "properties": {
-        "decision": { "type": "string", "enum": ["allow", "allow_with_reduced_scope", "deny"] },
+        "decision": { "type": "string", "enum": ["allow", "allow_with_reduced_scope", "requires_approval", "deny"] },
         "rules_checked": {
           "type": "array",
           "items": { "type": "string", "minLength": 1, "maxLength": 300 },

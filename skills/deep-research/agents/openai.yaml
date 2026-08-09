@@ -1,0 +1,4 @@
+interface:
+  display_name: "受控深度研究"
+  short_description: "在策略与预算边界内完成可回溯的证据研究、引用和矛盾核验"
+  default_prompt: "使用 $deep-research 对这个问题进行可审计的多来源研究，并明确证据、矛盾和不确定性。"

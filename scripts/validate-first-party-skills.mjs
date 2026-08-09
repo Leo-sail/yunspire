@@ -35,6 +35,53 @@ async function filesUnder(directory) {
 const skillDirectories = (await readdir(root, { withFileTypes: true })).filter((entry) => entry.isDirectory());
 for (const entry of skillDirectories) {
   const skillRoot = join(root, entry.name);
+  const skillPath = join(skillRoot, "SKILL.md");
+  const skillSource = await readFile(skillPath, "utf8");
+  const lineCount = skillSource.split(/\r?\n/u).length;
+  if (lineCount > 500) throw new Error(`${entry.name}: SKILL.md 必须少于 500 行`);
+  const frontmatter = skillSource.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/u)?.[1];
+  if (!frontmatter) throw new Error(`${entry.name}: SKILL.md 缺少 YAML frontmatter`);
+  const frontmatterFields = frontmatter.split(/\r?\n/u).filter(Boolean).map((line) => {
+    const separator = line.indexOf(":");
+    if (separator <= 0) throw new Error(`${entry.name}: SKILL.md frontmatter 必须使用单行字段`);
+    return [line.slice(0, separator).trim(), line.slice(separator + 1).trim()];
+  });
+  const frontmatterKeys = frontmatterFields.map(([key]) => key);
+  if (frontmatterKeys.join(",") !== "name,description") {
+    throw new Error(`${entry.name}: SKILL.md frontmatter 只能按顺序包含 name 和 description`);
+  }
+  const frontmatterValues = Object.fromEntries(frontmatterFields);
+  if (frontmatterValues.name !== entry.name) throw new Error(`${entry.name}: SKILL.md name 必须与目录名一致`);
+  if (frontmatterValues.description.length < 120 || !/\bUse when\b/u.test(frontmatterValues.description)) {
+    throw new Error(`${entry.name}: description 必须详细说明能力和触发场景`);
+  }
+  const referencedFiles = [...skillSource.matchAll(/\]\((references\/[a-z0-9-]+\.md)\)/gu)].map((match) => match[1]);
+  if (!referencedFiles.length) throw new Error(`${entry.name}: SKILL.md 必须按渐进披露原则引用 references/ 契约`);
+  for (const referencedFile of new Set(referencedFiles)) {
+    const referencedPath = join(skillRoot, referencedFile);
+    const exists = await stat(referencedPath).then((value) => value.isFile()).catch(() => false);
+    if (!exists) throw new Error(`${entry.name}: 引用文件不存在：${referencedFile}`);
+  }
+  const agentMetadataPath = join(skillRoot, "agents", "openai.yaml");
+  const agentMetadata = await readFile(agentMetadataPath, "utf8");
+  const agentInterface = {};
+  for (const field of ["display_name", "short_description", "default_prompt"]) {
+    const match = agentMetadata.match(new RegExp(`^\\s{2}${field}: "([^"\\n]+)"$`, "mu"));
+    if (!match) {
+      throw new Error(`${entry.name}: agents/openai.yaml 的 ${field} 必须是带引号的单行字符串`);
+    }
+    agentInterface[field] = match[1];
+  }
+  const shortDescriptionLength = [...agentInterface.short_description].length;
+  if (shortDescriptionLength < 25 || shortDescriptionLength > 64) {
+    throw new Error(`${entry.name}: agents/openai.yaml short_description 必须为 25 到 64 个字符`);
+  }
+  if (!agentMetadata.includes(`$${entry.name}`)) {
+    throw new Error(`${entry.name}: agents/openai.yaml default_prompt 必须显式调用 $${entry.name}`);
+  }
+  if (/\b(?:icon|brand_color)\s*:/u.test(agentMetadata)) {
+    throw new Error(`${entry.name}: 未提供品牌资产时不得自行添加图标或品牌色`);
+  }
   const originPath = join(skillRoot, "origin.json");
   const origin = JSON.parse(await readFile(originPath, "utf8"));
   if (origin.owner !== "Yunspire" || origin.policy !== "yunspire_first_party" || origin.implementation !== "independently_designed") {

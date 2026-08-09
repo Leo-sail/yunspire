@@ -1,0 +1,1 @@
+{{ENTRY_NUMBER}}. {{EXCERPT}}
