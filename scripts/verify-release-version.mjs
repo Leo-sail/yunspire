@@ -17,6 +17,8 @@ export const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.met
 const releaseVersionPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u;
 const commitPattern = /^[0-9a-f]{40}$/u;
 const versionCapture = '([0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?)';
+const githubReleaseVisibilityAttempts = 15;
+const githubReleaseVisibilityDelayMs = 2_000;
 
 function extractVersion(text, pattern) {
   return text.match(pattern)?.[1] || null;
@@ -29,6 +31,10 @@ function plistStringValue(text, key) {
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+async function waitForGitHubVisibility() {
+  await new Promise((resolve) => setTimeout(resolve, githubReleaseVisibilityDelayMs));
 }
 
 function normalizedCommit(value, label) {
@@ -390,7 +396,12 @@ export async function verifyPrepublish({
     sourceCommit: identity.sourceCommit,
     provenance,
   });
-  const matchingReleases = await remoteReleasesByTag(repository, identity.tag);
+  let matchingReleases = [];
+  for (let visibilityAttempt = 1; visibilityAttempt <= githubReleaseVisibilityAttempts; visibilityAttempt += 1) {
+    matchingReleases = await remoteReleasesByTag(repository, identity.tag);
+    if (matchingReleases.length !== 0 || visibilityAttempt === githubReleaseVisibilityAttempts) break;
+    await waitForGitHubVisibility();
+  }
   if (matchingReleases.length !== 1) {
     throw new Error(`GitHub Release ${identity.tag} must resolve to exactly one draft; found ${matchingReleases.length}`);
   }

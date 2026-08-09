@@ -302,6 +302,10 @@ if (await exists('scripts/verify-release-version.mjs')) {
       || !/preserved-draft/u.test(releaseVerifier)) {
     failures.push('release verification and failure recovery must share draft-aware lookup and numeric-ID inspection');
   }
+  if (!/githubReleaseVisibilityAttempts/u.test(prepublishVerifier)
+      || !/await waitForGitHubVisibility\(\)/u.test(prepublishVerifier)) {
+    failures.push('prepublish verification must tolerate bounded GitHub draft visibility delay');
+  }
   if (/method:\s*'DELETE'/u.test(releaseVerifier)) {
     failures.push('automatic failure recovery must not delete a Release or annotated tag after client-side inspection');
   }
