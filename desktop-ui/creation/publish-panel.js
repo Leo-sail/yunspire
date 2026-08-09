@@ -144,7 +144,7 @@ export function createReadinessReport(value, options = {}) {
     },
     output: options.output || null,
     generatedAt: now,
-    engineVersion: stringValue(options.engineVersion, '0.4.0', 40),
+    engineVersion: stringValue(options.engineVersion, '0.4.1', 40),
   };
 }
 
@@ -189,7 +189,7 @@ export function normalizeReadinessReport(value, document = {}, options = {}) {
     },
     output: isRecord(source.output) ? source.output : null,
     generatedAt: validDateTime(source.generatedAt, new Date().toISOString()),
-    engineVersion: stringValue(source.engineVersion, '0.4.0', 40),
+    engineVersion: stringValue(source.engineVersion, '0.4.1', 40),
   };
 }
 

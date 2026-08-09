@@ -6,6 +6,10 @@ This file records material public-version changes only. It excludes local valida
 
 ## 中文
 
+### 0.4.1 - 2026-08-09
+
+- 修复部分 OpenAI 兼容网关在内部转发 Responses 流时返回 HTTP 500、导致 AI助手直接失败的问题：云枢会识别 `responses stream error` / `response.failed`，停止重复发送相同请求，并仅重试一次去除流式、结构化输出、采样和令牌限制参数的最小非流式请求；同时拒绝失败事件前的残缺输出，并在错误信息中脱敏 API 密钥。
+
 ### 0.4.0 - 2026-08-09
 
 - 行为记录不再进入用户界面、长期记忆或 Obsidian；升级时会把旧行为记录移出 Vault，记忆页只展示已经确认并可召回的结构化内容。
@@ -67,6 +71,10 @@ This file records material public-version changes only. It excludes local valida
 - 完成纯净发布边界、双语文档、架构图和 GitHub 协作模板。
 
 ## English
+
+### 0.4.1 - 2026-08-09
+
+- Fixed Assistant failures when some OpenAI-compatible gateways returned HTTP 500 while forwarding a Responses stream. Yunspire now recognizes `responses stream error` / `response.failed`, avoids repeating the same request, and performs one minimal non-streaming retry without streaming, structured-output, sampling, or token-limit parameters. It also rejects partial output preceding a failure event and redacts API keys from error details.
 
 ### 0.4.0 - 2026-08-09
 

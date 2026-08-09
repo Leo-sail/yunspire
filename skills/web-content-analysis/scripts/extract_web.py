@@ -993,7 +993,7 @@ def download_external_image(source_url, output_root, remaining_bytes):
         raise ImageLocalizationError("aggregate_byte_budget_exceeded", "网页图片累计响应超过 1 GB 安全边界")
     redirect_chain = []
     request = Request(source_url, headers={
-        "User-Agent": "Yunspire/0.4.0 local knowledge capture",
+        "User-Agent": "Yunspire/0.4.1 local knowledge capture",
         "Accept": "image/avif,image/webp,image/png,image/jpeg,image/gif,image/*;q=0.8",
         "Accept-Encoding": "identity",
     })
@@ -1360,7 +1360,7 @@ def main():
         load_request_authorization(args.request_headers_stdin)
         validated_url = validate_public_url(args.url)
         request = Request(validated_url, headers={
-            "User-Agent": "Yunspire/0.4.0 local knowledge capture",
+            "User-Agent": "Yunspire/0.4.1 local knowledge capture",
             "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1",
             "Accept-Encoding": "identity",
         })

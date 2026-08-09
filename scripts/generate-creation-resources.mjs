@@ -13,7 +13,7 @@ const runtimeBundlePath = resolve(creationRoot, "catalog/runtime-bundle.json");
 const writingResourcesPath = resolve(creationRoot, "catalog/writing-resources.json");
 
 const CATALOG_VERSION = "0.4.0";
-const RUNTIME_VERSION = "0.4.0";
+const RUNTIME_VERSION = "0.4.1";
 const MIN_RUNTIME_VERSION = "0.1.2";
 const REPOSITORY = "https://github.com/Leo-sail/yunspire";
 

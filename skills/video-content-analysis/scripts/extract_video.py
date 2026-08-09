@@ -22,7 +22,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 import media_discovery
 
 MAX_PAGE_BYTES = 12 * 1024 * 1024
-USER_AGENT = "Yunspire/0.4.0 local public media collector"
+USER_AGENT = "Yunspire/0.4.1 local public media collector"
 AUTH_CONTEXT = {"allowed_hosts": set(), "headers": {}}
 SENSITIVE_HEADERS = ("Cookie", "Authorization")
 PROGRESS_FILE = os.environ.get("YUNSPIRE_PROGRESS_FILE", "").strip()

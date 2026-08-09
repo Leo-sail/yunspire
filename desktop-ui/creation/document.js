@@ -484,7 +484,7 @@ function normalizeValidationReceipt(value, now, hasBody) {
       blockId: cleanString(issue?.blockId, '', 160) || null,
     })),
     validatedAt: validDateTime(source.validatedAt, now),
-    validatorVersion: cleanString(source.validatorVersion, '0.4.0', 80),
+    validatorVersion: cleanString(source.validatorVersion, '0.4.1', 80),
     contentHash: /^sha256:[a-f0-9]{64}$/u.test(source.contentHash || '') ? source.contentHash : null,
   };
 }

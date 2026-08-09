@@ -11,7 +11,7 @@ use serde_json::Value;
 
 pub const CREATION_SCHEMA_VERSION: &str = "2.0";
 pub const MANIFEST_SCHEMA_VERSION: &str = "1.0";
-pub const CREATION_RUNTIME_VERSION: &str = "0.4.0";
+pub const CREATION_RUNTIME_VERSION: &str = "0.4.1";
 
 fn creation_schema_version() -> String {
     CREATION_SCHEMA_VERSION.to_string()

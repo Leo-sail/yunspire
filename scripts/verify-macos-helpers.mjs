@@ -322,7 +322,7 @@ async function smokeInstalledDocumentCapture(application, pythonDirectory) {
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'yunspire-installed-capture-'));
   try {
     const source = join(temporaryRoot, '云枢安装后采集冒烟.txt');
-    const marker = 'Yunspire installed capture smoke v0.4.0';
+    const marker = 'Yunspire installed capture smoke v0.4.1';
     await writeFile(source, `${marker}\n`, 'utf8');
     const executable = join(pythonDirectory, PYTHON_EXECUTABLE);
     const script = join(

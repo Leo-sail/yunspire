@@ -9,8 +9,8 @@
 每个正式版本必须满足以下恒等关系：
 
 ```text
-package version 0.4.0
-= tag v0.4.0
+package version 0.4.1
+= tag v0.4.1
 = tag 剥离后的 commit
 = 工作流检出的 HEAD
 = macOS manifest.sourceCommit
@@ -37,7 +37,7 @@ node scripts/verify-release-version.mjs source \
   --source-commit "$(git rev-parse HEAD)" \
   --require-clean true
 
-git push origin HEAD:refs/heads/release/v0.4.0
+git push origin HEAD:refs/heads/release/v0.4.1
 ```
 
 `release/v*` 推送启动正式工作流。其 prepare 作业必须在创建任何远端对象前运行：
@@ -73,18 +73,18 @@ node scripts/verify-release-version.mjs prepare \
 
 ```bash
 node scripts/verify-release-version.mjs manifests \
-  --tag v0.4.0 \
+  --tag v0.4.1 \
   --source-commit "$SOURCE_COMMIT" \
   --source-tree "$SOURCE_TREE" \
-  --manifest release-assets/macos/Yunspire_0.4.0_macOS-universal_unsigned.dmg.manifest.json \
-  --manifest release-assets/windows/Yunspire_0.4.0_Windows-x64_unsigned-setup.exe.manifest.json
+  --manifest release-assets/macos/Yunspire_0.4.1_macOS-universal_unsigned.dmg.manifest.json \
+  --manifest release-assets/windows/Yunspire_0.4.1_Windows-x64_unsigned-setup.exe.manifest.json
 ```
 
-校验器要求清单恰好覆盖 macOS 与 Windows，版本、标签、commit 和 tree 完全相同，并要求两个平台使用一致的签名模式。每份清单必须同时包含布尔值 `signed`、与其一致的 `signingMode`，以及安装后扫描成功的 `privacyVerified: true`；当前 `v0.4.0` 使用 `signed: false` 与 `signingMode: "unsigned"`。未来签名版本可以额外传入 `--require-signed true` 作为强制门禁。
+校验器要求清单恰好覆盖 macOS 与 Windows，版本、标签、commit 和 tree 完全相同，并要求两个平台使用一致的签名模式。每份清单必须同时包含布尔值 `signed`、与其一致的 `signingMode`，以及安装后扫描成功的 `privacyVerified: true`；当前 `v0.4.1` 使用 `signed: false` 与 `signingMode: "unsigned"`。未来签名版本可以额外传入 `--require-signed true` 作为强制门禁。
 
 ### 签名状态与安装边界
 
-用户已选择当前 `v0.4.0` 以未签名形式发布，因此工作流会显式使用 `--no-sign`，文件名包含 `unsigned`，清单也必须如实记录未签名状态。该选择存在无法消除的系统行为：
+用户已选择当前 `v0.4.1` 以未签名形式发布，因此工作流会显式使用 `--no-sign`，文件名包含 `unsigned`，清单也必须如实记录未签名状态。该选择存在无法消除的系统行为：
 
 - macOS Gatekeeper 可能阻止首次打开，并要求用户右键打开或进入“隐私与安全性”授权。
 - Windows SmartScreen 可能显示“未知发布者”或额外确认。
@@ -117,8 +117,8 @@ node scripts/verify-release-version.mjs prepublish \
 发布后运行：
 
 ```bash
-gh release verify v0.4.0 --repo Leo-sail/yunspire
-gh release view v0.4.0 --repo Leo-sail/yunspire
+gh release verify v0.4.1 --repo Leo-sail/yunspire
+gh release view v0.4.1 --repo Leo-sail/yunspire
 gh release view --repo Leo-sail/yunspire --json tagName,isDraft,isPrerelease
 ```
 
@@ -133,8 +133,8 @@ The `version` field in `package.json` is the authority for the application relea
 Every stable release must preserve this identity:
 
 ```text
-package version 0.4.0
-= tag v0.4.0
+package version 0.4.1
+= tag v0.4.1
 = peeled tag commit
 = checked-out workflow HEAD
 = macOS manifest.sourceCommit
@@ -161,7 +161,7 @@ node scripts/verify-release-version.mjs source \
   --source-commit "$(git rev-parse HEAD)" \
   --require-clean true
 
-git push origin HEAD:refs/heads/release/v0.4.0
+git push origin HEAD:refs/heads/release/v0.4.1
 ```
 
 The `release/v*` push starts the production workflow. Its prepare job runs before creating any remote object:
@@ -195,18 +195,18 @@ Before publication, validate both manifests together:
 
 ```bash
 node scripts/verify-release-version.mjs manifests \
-  --tag v0.4.0 \
+  --tag v0.4.1 \
   --source-commit "$SOURCE_COMMIT" \
   --source-tree "$SOURCE_TREE" \
-  --manifest release-assets/macos/Yunspire_0.4.0_macOS-universal_unsigned.dmg.manifest.json \
-  --manifest release-assets/windows/Yunspire_0.4.0_Windows-x64_unsigned-setup.exe.manifest.json
+  --manifest release-assets/macos/Yunspire_0.4.1_macOS-universal_unsigned.dmg.manifest.json \
+  --manifest release-assets/windows/Yunspire_0.4.1_Windows-x64_unsigned-setup.exe.manifest.json
 ```
 
-The verifier requires exactly one macOS and one Windows manifest, identical release identity, and one consistent signing mode. Every manifest contains a boolean `signed` field, a matching `signingMode`, and `privacyVerified: true` from the installed-content scan. The current `v0.4.0` release uses `signed: false` and `signingMode: "unsigned"`. A future signed release can add `--require-signed true` as a strict gate.
+The verifier requires exactly one macOS and one Windows manifest, identical release identity, and one consistent signing mode. Every manifest contains a boolean `signed` field, a matching `signingMode`, and `privacyVerified: true` from the installed-content scan. The current `v0.4.1` release uses `signed: false` and `signingMode: "unsigned"`. A future signed release can add `--require-signed true` as a strict gate.
 
 ### Signing status and installation boundary
 
-The user selected an unsigned `v0.4.0` release. The workflow therefore uses `--no-sign` explicitly, includes `unsigned` in filenames, and records the unsigned state truthfully. This choice has unavoidable operating-system consequences:
+The user selected an unsigned `v0.4.1` release. The workflow therefore uses `--no-sign` explicitly, includes `unsigned` in filenames, and records the unsigned state truthfully. This choice has unavoidable operating-system consequences:
 
 - macOS Gatekeeper may block first launch and require a right-click Open action or approval under Privacy & Security.
 - Windows SmartScreen may show an unknown-publisher warning or another confirmation.
@@ -241,8 +241,8 @@ Both platforms must build through `npm run tauri:release -- build ...`. This ent
 After publication, run:
 
 ```bash
-gh release verify v0.4.0 --repo Leo-sail/yunspire
-gh release view v0.4.0 --repo Leo-sail/yunspire
+gh release verify v0.4.1 --repo Leo-sail/yunspire
+gh release view v0.4.1 --repo Leo-sail/yunspire
 gh release view --repo Leo-sail/yunspire --json tagName,isDraft,isPrerelease
 ```
 

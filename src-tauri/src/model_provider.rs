@@ -1626,6 +1626,48 @@ fn should_retry_without_stream_options(status: StatusCode, bytes: &[u8]) -> bool
         .any(|marker| message.contains(marker))
 }
 
+fn should_retry_after_responses_stream_failure(status: StatusCode, bytes: &[u8]) -> bool {
+    if !status.is_server_error() {
+        return false;
+    }
+    let message = String::from_utf8_lossy(bytes).to_lowercase();
+    message.contains("responses stream error")
+        || message.contains("response stream error")
+        || message.contains("response.failed")
+        || (message.contains("responses")
+            && message.contains("stream")
+            && message.contains("failed"))
+}
+
+fn model_response_accept_header(request_body: &Value) -> &'static str {
+    if request_body
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "text/event-stream"
+    } else {
+        "application/json"
+    }
+}
+
+fn minimal_assistant_compatibility_body(request_body: &Value) -> Value {
+    let mut fallback_body = request_body.clone();
+    if let Some(object) = fallback_body.as_object_mut() {
+        object.insert("stream".to_string(), Value::Bool(false));
+        for field in [
+            "stream_options",
+            "response_format",
+            "temperature",
+            "max_tokens",
+            "max_completion_tokens",
+        ] {
+            object.remove(field);
+        }
+    }
+    fallback_body
+}
+
 fn should_retry_model_status(status: StatusCode) -> bool {
     matches!(
         status,
@@ -1681,10 +1723,26 @@ async fn wait_until_model_request_cancelled(cancellation: &AtomicBool) {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CancellableModelRetryPolicy {
+    Standard,
+    AvoidInternalServerError,
+}
+
+fn should_retry_cancellable_model_status(
+    status: StatusCode,
+    policy: CancellableModelRetryPolicy,
+) -> bool {
+    should_retry_model_status(status)
+        && (policy == CancellableModelRetryPolicy::Standard
+            || status != StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 async fn send_cancellable_model_request_with_retry(
     request: reqwest::RequestBuilder,
     label: &str,
     cancellation: &AtomicBool,
+    retry_policy: CancellableModelRetryPolicy,
 ) -> Result<reqwest::Response, String> {
     let mut last_error = None;
     for attempt in 1..=3 {
@@ -1701,7 +1759,10 @@ async fn send_cancellable_model_request_with_retry(
             }
         };
         match response {
-            Ok(response) if attempt < 3 && should_retry_model_status(response.status()) => {
+            Ok(response)
+                if attempt < 3
+                    && should_retry_cancellable_model_status(response.status(), retry_policy) =>
+            {
                 tokio::select! {
                     _ = wait_for_model_retry(attempt) => {},
                     _ = wait_until_model_request_cancelled(cancellation) => {
@@ -2086,6 +2147,63 @@ fn model_stream_text_fragment(payload: &Value) -> Option<String> {
     (!content.is_empty()).then_some(content)
 }
 
+fn compact_model_stream_error(value: &str) -> Option<String> {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return None;
+    }
+    let mut limited = compact.chars().take(240).collect::<String>();
+    if compact.chars().count() > 240 {
+        limited.push('…');
+    }
+    Some(limited)
+}
+
+fn model_stream_error(payload: &Value) -> Option<(String, bool)> {
+    let event_type = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let response_status = payload
+        .pointer("/response/status")
+        .or_else(|| payload.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let responses_failed = event_type == "response.failed" || response_status == "failed";
+    let responses_incomplete =
+        event_type == "response.incomplete" || response_status == "incomplete";
+    let top_level_error =
+        event_type == "error" || payload.get("error").is_some_and(|error| !error.is_null());
+    if !responses_failed && !responses_incomplete && !top_level_error {
+        return None;
+    }
+    let message = [
+        payload.pointer("/response/error/message"),
+        payload.pointer("/error/message"),
+        payload.get("message"),
+        payload.pointer("/response/incomplete_details/reason"),
+        payload.pointer("/incomplete_details/reason"),
+        payload.get("error").filter(|value| value.is_string()),
+        payload.pointer("/response/error/code"),
+        payload.pointer("/error/code"),
+        payload.get("code"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(Value::as_str)
+    .map(str::to_string)
+    .unwrap_or_else(|| {
+        if responses_failed {
+            "Responses 请求失败，但上游未返回具体原因".to_string()
+        } else if responses_incomplete {
+            "Responses 请求未完整结束，但上游未返回具体原因".to_string()
+        } else {
+            "模型流返回错误，但上游未返回具体原因".to_string()
+        }
+    });
+    Some((message, responses_failed))
+}
+
 fn emit_decoded_model_delta(
     app: &AppHandle,
     request_id: &str,
@@ -2130,6 +2248,8 @@ struct CancellableModelResponse {
     usage: Option<Value>,
     finish_reason: String,
     diagnostic_bytes: Vec<u8>,
+    stream_error: Option<String>,
+    responses_stream_failed: bool,
 }
 
 impl CancellableModelResponse {
@@ -2137,7 +2257,23 @@ impl CancellableModelResponse {
         &self.diagnostic_bytes
     }
 
-    fn take_response_text(&mut self) -> Result<String, String> {
+    fn should_retry_responses_compatibility(&self) -> bool {
+        self.response_text.trim().is_empty()
+            && (self.responses_stream_failed
+                || should_retry_after_responses_stream_failure(
+                    self.status,
+                    self.diagnostic_bytes(),
+                ))
+    }
+
+    fn take_response_text(&mut self, api_key: &str) -> Result<String, String> {
+        if let Some(error) = self.stream_error.take() {
+            let error = sanitized_model_stream_error(&error, api_key);
+            if self.response_text.trim().is_empty() {
+                return Err(format!("AI助手模型流返回失败：{error}"));
+            }
+            return Err(format!("AI助手模型流在输出过程中失败：{error}"));
+        }
         if self.response_text.trim().is_empty() {
             if matches!(self.finish_reason.as_str(), "length" | "max_tokens") {
                 return Err("AI助手模型已耗尽输出 token 上限，未生成最终意图结果".to_string());
@@ -2148,6 +2284,41 @@ impl CancellableModelResponse {
     }
 }
 
+fn sanitized_model_stream_error(message: &str, api_key: &str) -> String {
+    let redacted = if api_key.is_empty() {
+        message.to_string()
+    } else {
+        message.replace(api_key, "[已隐藏]")
+    };
+    compact_model_stream_error(&redacted)
+        .unwrap_or_else(|| "模型流返回错误，但上游未返回具体原因".to_string())
+}
+
+fn cancellable_model_response_error(
+    prefix: &str,
+    response: &CancellableModelResponse,
+    api_key: &str,
+) -> String {
+    if !response.status.is_success() {
+        return model_request_error(
+            prefix,
+            response.status,
+            response.diagnostic_bytes(),
+            api_key,
+        );
+    }
+    response
+        .stream_error
+        .as_deref()
+        .map(|error| {
+            format!(
+                "{prefix}流返回失败：{}",
+                sanitized_model_stream_error(error, api_key)
+            )
+        })
+        .unwrap_or_else(|| format!("{prefix}没有返回可用文本"))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn absorb_model_stream_payload(
     payload: Value,
@@ -2155,6 +2326,8 @@ fn absorb_model_stream_payload(
     direct_text: &mut Option<String>,
     usage: &mut serde_json::Map<String, Value>,
     finish_reason: &mut String,
+    stream_error: &mut Option<String>,
+    responses_stream_failed: &mut bool,
     field_decoder: &mut Option<JsonFieldDeltaDecoder>,
     app: &AppHandle,
     request_id: &str,
@@ -2163,6 +2336,13 @@ fn absorb_model_stream_payload(
     provider_sequence: &mut u64,
 ) {
     merge_assistant_usage_payload(usage, &payload);
+    if let Some((error, is_responses_failure)) = model_stream_error(&payload) {
+        *responses_stream_failed |= is_responses_failure;
+        if stream_error.is_none() {
+            *stream_error = Some(error);
+        }
+        return;
+    }
     if let Some(reason) = payload
         .pointer("/choices/0/finish_reason")
         .or_else(|| payload.get("done_reason"))
@@ -2232,6 +2412,8 @@ async fn read_cancellable_model_response(
     let mut direct_json_bytes = Vec::new();
     let mut usage = serde_json::Map::new();
     let mut finish_reason = String::new();
+    let mut stream_error = None;
+    let mut responses_stream_failed = false;
     let mut diagnostic_bytes = Vec::new();
     let mut received_bytes = 0usize;
     loop {
@@ -2256,6 +2438,8 @@ async fn read_cancellable_model_response(
                     &mut direct_text,
                     &mut usage,
                     &mut finish_reason,
+                    &mut stream_error,
+                    &mut responses_stream_failed,
                     &mut field_decoder,
                     app,
                     request_id,
@@ -2296,6 +2480,8 @@ async fn read_cancellable_model_response(
                 &mut direct_text,
                 &mut usage,
                 &mut finish_reason,
+                &mut stream_error,
+                &mut responses_stream_failed,
                 &mut field_decoder,
                 app,
                 request_id,
@@ -2331,6 +2517,8 @@ async fn read_cancellable_model_response(
         usage: (!usage.is_empty()).then_some(Value::Object(usage)),
         finish_reason,
         diagnostic_bytes,
+        stream_error,
+        responses_stream_failed,
     })
 }
 
@@ -2340,12 +2528,15 @@ async fn send_and_read_cancellable_model_request(
     label: &str,
     request_id: &str,
     cancellation: &AtomicBool,
+    retry_policy: CancellableModelRetryPolicy,
     app: &AppHandle,
     started: Instant,
     stream_json_field: Option<&str>,
     provider_sequence: &mut u64,
 ) -> Result<CancellableModelResponse, String> {
-    let response = send_cancellable_model_request_with_retry(request, label, cancellation).await?;
+    let response =
+        send_cancellable_model_request_with_retry(request, label, cancellation, retry_policy)
+            .await?;
     read_cancellable_model_response(
         response,
         request_id,
@@ -3554,6 +3745,7 @@ async fn execute_approved_skill_model_inner(
         "Skill 模型请求",
         request_id,
         cancellation,
+        CancellableModelRetryPolicy::Standard,
         app,
         started,
         None,
@@ -3574,6 +3766,7 @@ async fn execute_approved_skill_model_inner(
             "Skill 模型流式 usage 兼容重试",
             request_id,
             cancellation,
+            CancellableModelRetryPolicy::Standard,
             app,
             started,
             None,
@@ -3597,6 +3790,7 @@ async fn execute_approved_skill_model_inner(
             "Skill 模型兼容重试",
             request_id,
             cancellation,
+            CancellableModelRetryPolicy::Standard,
             app,
             started,
             None,
@@ -3613,7 +3807,7 @@ async fn execute_approved_skill_model_inner(
             configured.api_key.trim(),
         ));
     }
-    let response_text = response.take_response_text()?;
+    let response_text = response.take_response_text(configured.api_key.trim())?;
     let (output_text, output_data, warnings) = parse_approved_skill_model_output(&response_text)?;
     let usage = assistant_usage_summary_from_attempts(
         request_id,
@@ -4158,25 +4352,33 @@ async fn chat_with_assistant_inner(
         .redirect(Policy::none())
         .build()
         .map_err(|error| format!("无法初始化 AI助手请求：{error}"))?;
-    let mut request = client
-        .post(endpoint.clone())
-        .header(ACCEPT, "application/json")
-        .header(CONTENT_TYPE, "application/json")
-        .json(&request_body);
-    request = match provider.as_str() {
-        "anthropic" => request
-            .header("x-api-key", key)
-            .header("anthropic-version", "2023-06-01"),
-        "ollama" if key.is_empty() => request,
-        _ => request.header(AUTHORIZATION, format!("Bearer {key}")),
+    let build_request = |body: &Value| {
+        let request = client
+            .post(endpoint.clone())
+            .header(ACCEPT, model_response_accept_header(body))
+            .header(CONTENT_TYPE, "application/json")
+            .json(body);
+        match provider.as_str() {
+            "anthropic" => request
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01"),
+            "ollama" if key.is_empty() => request,
+            _ => request.header(AUTHORIZATION, format!("Bearer {key}")),
+        }
     };
     let mut provider_sequence = 0u64;
     let mut usage_attempts = Vec::new();
+    let assistant_retry_policy = if matches!(provider.as_str(), "anthropic" | "ollama") {
+        CancellableModelRetryPolicy::Standard
+    } else {
+        CancellableModelRetryPolicy::AvoidInternalServerError
+    };
     let mut response = send_and_read_cancellable_model_request(
-        request,
+        build_request(&request_body),
         "AI助手模型请求",
         request_id,
         cancellation,
+        assistant_retry_policy,
         app,
         started,
         Some("reply"),
@@ -4192,17 +4394,12 @@ async fn chat_with_assistant_inner(
         if let Some(object) = fallback_body.as_object_mut() {
             object.remove("stream_options");
         }
-        let fallback_request = client
-            .post(endpoint.clone())
-            .header(ACCEPT, "application/json")
-            .header(CONTENT_TYPE, "application/json")
-            .header(AUTHORIZATION, format!("Bearer {key}"))
-            .json(&fallback_body);
         response = send_and_read_cancellable_model_request(
-            fallback_request,
+            build_request(&fallback_body),
             "AI助手流式 usage 兼容重试",
             request_id,
             cancellation,
+            assistant_retry_policy,
             app,
             started,
             Some("reply"),
@@ -4221,17 +4418,12 @@ async fn chat_with_assistant_inner(
             object.remove("temperature");
             object.remove("stream_options");
         }
-        let mut fallback_request = client
-            .post(endpoint.clone())
-            .header(ACCEPT, "application/json")
-            .header(CONTENT_TYPE, "application/json")
-            .json(&fallback_body);
-        fallback_request = fallback_request.header(AUTHORIZATION, format!("Bearer {key}"));
         response = send_and_read_cancellable_model_request(
-            fallback_request,
+            build_request(&fallback_body),
             "AI助手模型兼容重试",
             request_id,
             cancellation,
+            assistant_retry_policy,
             app,
             started,
             Some("reply"),
@@ -4240,39 +4432,65 @@ async fn chat_with_assistant_inner(
         .await?;
         record_assistant_usage_attempt(&mut usage_attempts, &response);
     }
+    let mut responses_compatibility_original_error = None;
+    let mut used_responses_compatibility = false;
+    if provider != "anthropic"
+        && provider != "ollama"
+        && response.should_retry_responses_compatibility()
+    {
+        let original_error = cancellable_model_response_error("AI助手模型接口", &response, key);
+        let fallback_body = minimal_assistant_compatibility_body(&request_body);
+        response = match send_and_read_cancellable_model_request(
+            build_request(&fallback_body),
+            "AI助手 Responses 非流式兼容重试",
+            request_id,
+            cancellation,
+            assistant_retry_policy,
+            app,
+            started,
+            Some("reply"),
+            &mut provider_sequence,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(fallback_error) => {
+                return Err(format!(
+                    "{original_error}；非流式最小兼容重试失败：{fallback_error}"
+                ));
+            }
+        };
+        responses_compatibility_original_error = Some(original_error);
+        used_responses_compatibility = true;
+        record_assistant_usage_attempt(&mut usage_attempts, &response);
+    }
     if !response.status.is_success() {
-        return Err(model_request_error(
+        let fallback_error = model_request_error(
             "AI助手模型接口",
             response.status,
             response.diagnostic_bytes(),
             key,
-        ));
+        );
+        return Err(responses_compatibility_original_error
+            .map(|original| format!("{original}；非流式最小兼容重试失败：{fallback_error}"))
+            .unwrap_or(fallback_error));
     }
-    let mut response_text = match response.take_response_text() {
+    let mut response_text = match response.take_response_text(key) {
         Ok(text) => text,
         Err(error)
             if provider != "anthropic"
                 && provider != "ollama"
+                && !used_responses_compatibility
                 && provider_sequence == 0
                 && error == "AI助手流式响应缺少文本内容" =>
         {
-            let mut recovery_body = request_body.clone();
-            if let Some(object) = recovery_body.as_object_mut() {
-                object.remove("response_format");
-                object.remove("temperature");
-                object.remove("stream_options");
-            }
-            let recovery_request = client
-                .post(endpoint.clone())
-                .header(ACCEPT, "application/json")
-                .header(CONTENT_TYPE, "application/json")
-                .header(AUTHORIZATION, format!("Bearer {key}"))
-                .json(&recovery_body);
+            let recovery_body = minimal_assistant_compatibility_body(&request_body);
             let mut recovery_response = send_and_read_cancellable_model_request(
-                recovery_request,
+                build_request(&recovery_body),
                 "AI助手空响应兼容重试",
                 request_id,
                 cancellation,
+                assistant_retry_policy,
                 app,
                 started,
                 Some("reply"),
@@ -4288,32 +4506,29 @@ async fn chat_with_assistant_inner(
                     key,
                 ));
             }
-            recovery_response.take_response_text()?
+            recovery_response.take_response_text(key)?
         }
-        Err(error) => return Err(error),
+        Err(error) => {
+            return Err(responses_compatibility_original_error
+                .map(|original| format!("{original}；非流式最小兼容重试失败：{error}"))
+                .unwrap_or(error));
+        }
     };
     let mut turn = match parse_assistant_turn(&response_text) {
         Ok(turn) => turn,
         Err(parse_error)
-            if provider != "anthropic" && provider != "ollama" && provider_sequence == 0 =>
+            if provider != "anthropic"
+                && provider != "ollama"
+                && !used_responses_compatibility
+                && provider_sequence == 0 =>
         {
-            let mut recovery_body = request_body.clone();
-            if let Some(object) = recovery_body.as_object_mut() {
-                object.remove("response_format");
-                object.remove("temperature");
-                object.remove("stream_options");
-            }
-            let recovery_request = client
-                .post(endpoint)
-                .header(ACCEPT, "application/json")
-                .header(CONTENT_TYPE, "application/json")
-                .header(AUTHORIZATION, format!("Bearer {key}"))
-                .json(&recovery_body);
+            let recovery_body = minimal_assistant_compatibility_body(&request_body);
             let mut recovery_response = send_and_read_cancellable_model_request(
-                recovery_request,
+                build_request(&recovery_body),
                 "AI助手意图格式兼容重试",
                 request_id,
                 cancellation,
+                assistant_retry_policy,
                 app,
                 started,
                 Some("reply"),
@@ -4329,10 +4544,14 @@ async fn chat_with_assistant_inner(
                     key,
                 ));
             }
-            response_text = recovery_response.take_response_text()?;
+            response_text = recovery_response.take_response_text(key)?;
             parse_assistant_turn(&response_text).map_err(|_| parse_error)?
         }
-        Err(error) => return Err(error),
+        Err(error) => {
+            return Err(responses_compatibility_original_error
+                .map(|original| format!("{original}；非流式最小兼容重试失败：{error}"))
+                .unwrap_or(error));
+        }
     };
     force_selected_skill_run(&mut turn, &selected_user_skills, &normalized_messages);
     if turn.action == "execute" {

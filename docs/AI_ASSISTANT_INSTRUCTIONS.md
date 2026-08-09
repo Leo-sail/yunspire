@@ -1,6 +1,6 @@
 # AI助手工作契约 / AI Assistant Operating Contract
 
-当前版本 / Current version: `0.4.0`
+当前版本 / Current version: `0.4.1`
 
 本文件记录我为云枢 AI助手定义的产品与工程契约。运行时仍以 `desktop-ui/app.js`、Rust 命令、Schema 和策略代码为事实来源。
 

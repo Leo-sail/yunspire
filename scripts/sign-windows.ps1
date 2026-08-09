@@ -25,7 +25,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # This historical filename remains the Windows release entry point. The current
-# v0.4.0 policy is intentionally unsigned, so this script verifies that state,
+# v0.4.1 policy is intentionally unsigned, so this script verifies that state,
 # the offline WebView2/current-user installer policy, and a real silent
 # install/start cycle. It never signs an executable.
 

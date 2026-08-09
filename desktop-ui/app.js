@@ -17940,7 +17940,7 @@ function creationDocumentV2For(title, canonicalMarkdown = '') {
       htmlValid: false,
       issues: [],
       validatedAt: now,
-      validatorVersion: '0.4.0',
+      validatorVersion: '0.4.1',
       contentHash: null,
     } : previous?.validationReceipt,
     readiness: changed ? null : previous?.readiness,
@@ -26130,7 +26130,7 @@ function handleSettingsClick(button) {
   }
   if (button.matches('[data-export-diagnostics]')) {
     const diagnostics = [
-      'Yunspire Desktop 0.4.0',
+      'Yunspire Desktop 0.4.1',
       `运行环境：${isTauriRuntime ? 'Tauri 桌面应用' : '浏览器降级模式'}`,
       `本地数据库：${databaseHealth?.integrity === 'ok' ? '完整性正常' : '未验证'}`,
       `SQLite schema：${databaseHealth?.schemaVersion ?? '未读取'}`,
