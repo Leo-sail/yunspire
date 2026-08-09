@@ -8,7 +8,7 @@ This file records material public-version changes only. It excludes local valida
 
 ### 0.4.1 - 2026-08-09
 
-- 修复部分 OpenAI 兼容网关在内部转发 Responses 流时返回 HTTP 500、导致 AI助手直接失败的问题：云枢会识别 `responses stream error` / `response.failed`，停止重复发送相同请求，并仅重试一次去除流式、结构化输出、采样和令牌限制参数的最小非流式请求；同时拒绝失败事件前的残缺输出，并在错误信息中脱敏 API 密钥。
+- 修复部分 OpenAI 兼容网关在内部转发 Responses 流时返回 HTTP 500、导致 AI助手直接失败的问题：云枢会识别 `responses stream error` / `response.failed`，不再重复已确认出现该错误的请求，并仅发送一次去除流式、结构化输出、采样和令牌限制参数的最小非流式兼容请求；普通瞬时服务端错误仍保留原有重试，模型响应受 2 MB 硬上限保护，同时拒绝失败事件前的残缺输出并脱敏错误中的 API 密钥。
 
 ### 0.4.0 - 2026-08-09
 
@@ -74,7 +74,7 @@ This file records material public-version changes only. It excludes local valida
 
 ### 0.4.1 - 2026-08-09
 
-- Fixed Assistant failures when some OpenAI-compatible gateways returned HTTP 500 while forwarding a Responses stream. Yunspire now recognizes `responses stream error` / `response.failed`, avoids repeating the same request, and performs one minimal non-streaming retry without streaming, structured-output, sampling, or token-limit parameters. It also rejects partial output preceding a failure event and redacts API keys from error details.
+- Fixed Assistant failures when some OpenAI-compatible gateways returned HTTP 500 while forwarding a Responses stream. Yunspire now recognizes `responses stream error` / `response.failed`, does not repeat a request once that failure is identified, and sends one minimal non-streaming compatibility request without streaming, structured-output, sampling, or token-limit parameters. Ordinary transient server errors retain their existing retries, model responses have a hard 2 MB limit, partial output before a failure is rejected, and API keys are redacted from error details.
 
 ### 0.4.0 - 2026-08-09
 

@@ -1626,11 +1626,8 @@ fn should_retry_without_stream_options(status: StatusCode, bytes: &[u8]) -> bool
         .any(|marker| message.contains(marker))
 }
 
-fn should_retry_after_responses_stream_failure(status: StatusCode, bytes: &[u8]) -> bool {
-    if !status.is_server_error() {
-        return false;
-    }
-    let message = String::from_utf8_lossy(bytes).to_lowercase();
+fn is_responses_stream_failure_message(message: &str) -> bool {
+    let message = message.to_lowercase();
     message.contains("responses stream error")
         || message.contains("response stream error")
         || message.contains("response.failed")
@@ -1639,7 +1636,14 @@ fn should_retry_after_responses_stream_failure(status: StatusCode, bytes: &[u8])
             && message.contains("failed"))
 }
 
-fn model_response_accept_header(request_body: &Value) -> &'static str {
+fn should_retry_after_responses_stream_failure(status: StatusCode, bytes: &[u8]) -> bool {
+    status.is_server_error() && is_responses_stream_failure_message(&String::from_utf8_lossy(bytes))
+}
+
+fn model_response_accept_header(provider: &str, request_body: &Value) -> &'static str {
+    if provider == "ollama" {
+        return "application/json";
+    }
     if request_body
         .get("stream")
         .and_then(Value::as_bool)
@@ -1726,16 +1730,29 @@ async fn wait_until_model_request_cancelled(cancellation: &AtomicBool) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CancellableModelRetryPolicy {
     Standard,
-    AvoidInternalServerError,
+    InspectServerErrors,
+    SingleAttempt,
+}
+
+fn cancellable_model_retry_attempts(policy: CancellableModelRetryPolicy) -> usize {
+    if policy == CancellableModelRetryPolicy::SingleAttempt {
+        1
+    } else {
+        3
+    }
 }
 
 fn should_retry_cancellable_model_status(
     status: StatusCode,
     policy: CancellableModelRetryPolicy,
 ) -> bool {
-    should_retry_model_status(status)
-        && (policy == CancellableModelRetryPolicy::Standard
-            || status != StatusCode::INTERNAL_SERVER_ERROR)
+    match policy {
+        CancellableModelRetryPolicy::Standard => should_retry_model_status(status),
+        CancellableModelRetryPolicy::InspectServerErrors => {
+            should_retry_model_status(status) && !status.is_server_error()
+        }
+        CancellableModelRetryPolicy::SingleAttempt => false,
+    }
 }
 
 async fn send_cancellable_model_request_with_retry(
@@ -1745,7 +1762,8 @@ async fn send_cancellable_model_request_with_retry(
     retry_policy: CancellableModelRetryPolicy,
 ) -> Result<reqwest::Response, String> {
     let mut last_error = None;
-    for attempt in 1..=3 {
+    let max_attempts = cancellable_model_retry_attempts(retry_policy);
+    for attempt in 1..=max_attempts {
         if cancellation.load(Ordering::Acquire) {
             return Err("AI助手模型请求已取消".to_string());
         }
@@ -1760,7 +1778,7 @@ async fn send_cancellable_model_request_with_retry(
         };
         match response {
             Ok(response)
-                if attempt < 3
+                if attempt < max_attempts
                     && should_retry_cancellable_model_status(response.status(), retry_policy) =>
             {
                 tokio::select! {
@@ -1771,7 +1789,11 @@ async fn send_cancellable_model_request_with_retry(
                 }
             }
             Ok(response) => return Ok(response),
-            Err(error) if attempt < 3 && (error.is_connect() || error.is_timeout()) => {
+            Err(error)
+                if attempt < max_attempts
+                    && retry_policy != CancellableModelRetryPolicy::SingleAttempt
+                    && (error.is_connect() || error.is_timeout()) =>
+            {
                 last_error = Some(error.to_string());
                 tokio::select! {
                     _ = wait_for_model_retry(attempt) => {},
@@ -1784,7 +1806,7 @@ async fn send_cancellable_model_request_with_retry(
         }
     }
     Err(format!(
-        "{label}连续 3 次网络重试失败：{}",
+        "{label}连续 {max_attempts} 次网络重试失败：{}",
         last_error.unwrap_or_else(|| "未知网络错误".to_string())
     ))
 }
@@ -2201,7 +2223,8 @@ fn model_stream_error(payload: &Value) -> Option<(String, bool)> {
             "模型流返回错误，但上游未返回具体原因".to_string()
         }
     });
-    Some((message, responses_failed))
+    let responses_stream_failed = responses_failed || is_responses_stream_failure_message(&message);
+    Some((message, responses_stream_failed))
 }
 
 fn emit_decoded_model_delta(
@@ -2385,12 +2408,15 @@ async fn read_cancellable_model_response(
     provider_sequence: &mut u64,
 ) -> Result<CancellableModelResponse, String> {
     let status = response.status();
-    if !status.is_success()
-        && response
-            .content_length()
-            .is_some_and(|length| length > MAX_MODEL_CONTROL_RESPONSE_BYTES)
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_MODEL_CONTROL_RESPONSE_BYTES)
     {
-        return Err("AI助手模型错误响应超过 2 MB 安全上限".to_string());
+        return Err(if status.is_success() {
+            "AI助手模型响应超过 2 MB 安全上限".to_string()
+        } else {
+            "AI助手模型错误响应超过 2 MB 安全上限".to_string()
+        });
     }
     let direct_json_response = status.is_success()
         && response
@@ -2428,6 +2454,13 @@ async fn read_cancellable_model_response(
         };
         let chunk = chunk.map_err(|error| format!("无法读取 AI助手模型流：{error}"))?;
         received_bytes = received_bytes.saturating_add(chunk.len());
+        if received_bytes > MAX_MODEL_CONTROL_RESPONSE_BYTES as usize {
+            return Err(if status.is_success() {
+                "AI助手模型响应超过 2 MB 安全上限".to_string()
+            } else {
+                "AI助手模型错误响应超过 2 MB 安全上限".to_string()
+            });
+        }
         if status.is_success() && direct_json_response {
             direct_json_bytes.extend_from_slice(&chunk);
         } else if status.is_success() {
@@ -2449,11 +2482,6 @@ async fn read_cancellable_model_response(
                 );
             }
         } else {
-            if diagnostic_bytes.len().saturating_add(chunk.len())
-                > MAX_MODEL_CONTROL_RESPONSE_BYTES as usize
-            {
-                return Err("AI助手模型错误响应超过 2 MB 安全上限".to_string());
-            }
             diagnostic_bytes.extend_from_slice(&chunk);
         }
         emit_assistant_model_event(
@@ -2547,6 +2575,53 @@ async fn send_and_read_cancellable_model_request(
         provider_sequence,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn retry_cancellable_assistant_server_errors<F>(
+    mut response: CancellableModelResponse,
+    build_request: &F,
+    request_body: &Value,
+    label: &str,
+    request_id: &str,
+    cancellation: &AtomicBool,
+    app: &AppHandle,
+    started: Instant,
+    stream_json_field: Option<&str>,
+    provider_sequence: &mut u64,
+    usage_attempts: &mut Vec<Value>,
+) -> Result<CancellableModelResponse, String>
+where
+    F: Fn(&Value) -> reqwest::RequestBuilder,
+{
+    let mut completed_attempts = 1usize;
+    while completed_attempts < 3
+        && response.status.is_server_error()
+        && should_retry_model_status(response.status)
+        && !response.should_retry_responses_compatibility()
+    {
+        tokio::select! {
+            _ = wait_for_model_retry(completed_attempts) => {},
+            _ = wait_until_model_request_cancelled(cancellation) => {
+                return Err("AI助手模型请求已取消".to_string());
+            }
+        }
+        response = send_and_read_cancellable_model_request(
+            build_request(request_body),
+            label,
+            request_id,
+            cancellation,
+            CancellableModelRetryPolicy::InspectServerErrors,
+            app,
+            started,
+            stream_json_field,
+            provider_sequence,
+        )
+        .await?;
+        record_assistant_usage_attempt(usage_attempts, &response);
+        completed_attempts += 1;
+    }
+    Ok(response)
 }
 
 fn parse_assistant_turn(text: &str) -> Result<AssistantTurn, String> {
@@ -4355,7 +4430,7 @@ async fn chat_with_assistant_inner(
     let build_request = |body: &Value| {
         let request = client
             .post(endpoint.clone())
-            .header(ACCEPT, model_response_accept_header(body))
+            .header(ACCEPT, model_response_accept_header(&provider, body))
             .header(CONTENT_TYPE, "application/json")
             .json(body);
         match provider.as_str() {
@@ -4368,10 +4443,11 @@ async fn chat_with_assistant_inner(
     };
     let mut provider_sequence = 0u64;
     let mut usage_attempts = Vec::new();
-    let assistant_retry_policy = if matches!(provider.as_str(), "anthropic" | "ollama") {
-        CancellableModelRetryPolicy::Standard
+    let inspect_server_errors = !matches!(provider.as_str(), "anthropic" | "ollama");
+    let assistant_retry_policy = if inspect_server_errors {
+        CancellableModelRetryPolicy::InspectServerErrors
     } else {
-        CancellableModelRetryPolicy::AvoidInternalServerError
+        CancellableModelRetryPolicy::Standard
     };
     let mut response = send_and_read_cancellable_model_request(
         build_request(&request_body),
@@ -4386,6 +4462,22 @@ async fn chat_with_assistant_inner(
     )
     .await?;
     record_assistant_usage_attempt(&mut usage_attempts, &response);
+    if inspect_server_errors {
+        response = retry_cancellable_assistant_server_errors(
+            response,
+            &build_request,
+            &request_body,
+            "AI助手模型请求",
+            request_id,
+            cancellation,
+            app,
+            started,
+            Some("reply"),
+            &mut provider_sequence,
+            &mut usage_attempts,
+        )
+        .await?;
+    }
     if provider != "anthropic"
         && request_body.get("stream_options").is_some()
         && should_retry_without_stream_options(response.status, response.diagnostic_bytes())
@@ -4407,6 +4499,22 @@ async fn chat_with_assistant_inner(
         )
         .await?;
         record_assistant_usage_attempt(&mut usage_attempts, &response);
+        if inspect_server_errors {
+            response = retry_cancellable_assistant_server_errors(
+                response,
+                &build_request,
+                &fallback_body,
+                "AI助手流式 usage 兼容重试",
+                request_id,
+                cancellation,
+                app,
+                started,
+                Some("reply"),
+                &mut provider_sequence,
+                &mut usage_attempts,
+            )
+            .await?;
+        }
     }
     if provider != "anthropic"
         && should_retry_without_json_constraint(response.status, response.diagnostic_bytes())
@@ -4431,6 +4539,22 @@ async fn chat_with_assistant_inner(
         )
         .await?;
         record_assistant_usage_attempt(&mut usage_attempts, &response);
+        if inspect_server_errors {
+            response = retry_cancellable_assistant_server_errors(
+                response,
+                &build_request,
+                &fallback_body,
+                "AI助手模型兼容重试",
+                request_id,
+                cancellation,
+                app,
+                started,
+                Some("reply"),
+                &mut provider_sequence,
+                &mut usage_attempts,
+            )
+            .await?;
+        }
     }
     let mut responses_compatibility_original_error = None;
     let mut used_responses_compatibility = false;
@@ -4445,7 +4569,7 @@ async fn chat_with_assistant_inner(
             "AI助手 Responses 非流式兼容重试",
             request_id,
             cancellation,
-            assistant_retry_policy,
+            CancellableModelRetryPolicy::SingleAttempt,
             app,
             started,
             Some("reply"),
@@ -4490,7 +4614,7 @@ async fn chat_with_assistant_inner(
                 "AI助手空响应兼容重试",
                 request_id,
                 cancellation,
-                assistant_retry_policy,
+                CancellableModelRetryPolicy::SingleAttempt,
                 app,
                 started,
                 Some("reply"),
@@ -4528,7 +4652,7 @@ async fn chat_with_assistant_inner(
                 "AI助手意图格式兼容重试",
                 request_id,
                 cancellation,
-                assistant_retry_policy,
+                CancellableModelRetryPolicy::SingleAttempt,
                 app,
                 started,
                 Some("reply"),
