@@ -1,6 +1,6 @@
 # 云枢数据契约 / Yunspire Data Contracts
 
-当前版本 / Current version: `0.4.1`
+当前版本 / Current version: `0.4.2`
 
 ## 中文
 

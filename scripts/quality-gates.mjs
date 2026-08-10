@@ -1016,9 +1016,6 @@ if (!captureStorageStemBlock.includes('return `${match[1].toLowerCase()}/${title
   failures.push('capture storage path must keep the complete hash in a directory so Obsidian Graph shows a readable note basename');
 }
 for (const openInObsidianPrimitive of [
-  "invokeNative('open_vault_note_in_obsidian'",
-  'openInObsidian.dataset.vaultId',
-  'openInObsidian.dataset.relativePath',
   'obsidian::open_vault_note_in_obsidian',
 ]) {
   if (!`${appSource}\n${nativeLibrary}`.includes(openInObsidianPrimitive)) failures.push(`native Obsidian note opening contract is missing: ${openInObsidianPrimitive}`);

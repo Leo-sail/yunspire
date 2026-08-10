@@ -22,7 +22,7 @@
 
 我设计云枢不是为了增加另一个封闭的聊天窗口，而是为了让模型在清晰的权限边界内完成真实工作：理解目标、选择能力、执行任务、验证结果，并把有价值的成果整理回用户自己的 Obsidian 知识库。
 
-当前版本为 `0.4.1`，面向 macOS 13+（Apple Silicon 与 Intel 通用安装包）和 Windows 10/11 x64。搜索始终保留 FTS 与可从 Vault 重建的本地特征向量，并用 RRF 融合词法与向量名次；用户还可以在模型设置中明确同意后启用外部神经 Embedding。该能力默认关闭，只发送搜索查询，以及笔记标题、相对路径、标签、Wiki Links 和最多 24,000 个规范化正文字符；未同意、未配置或供应商失败时自动回退到纯本地检索。知识库的“原生图谱”在云枢内读取本地 Markdown 与 Wiki Links 并渲染可交互节点关系，无需跳转到 Obsidian；实体知识图谱、实体消歧和多跳查询仍未开发。
+当前版本为 `0.4.2`，面向 macOS 13+（Apple Silicon 与 Intel 通用安装包）和 Windows 10/11 x64。搜索始终保留 FTS 与可从 Vault 重建的本地特征向量，并用 RRF 融合词法与向量名次；用户还可以在模型设置中明确同意后启用外部神经 Embedding。该能力默认关闭，只发送搜索查询，以及笔记标题、相对路径、标签、Wiki Links 和最多 24,000 个规范化正文字符；未同意、未配置或供应商失败时自动回退到纯本地检索。知识库的“原生图谱”在云枢内读取本地 Markdown 与 Wiki Links 并渲染可交互节点关系，无需跳转到 Obsidian；实体知识图谱、实体消歧和多跳查询仍未开发。
 
 ### 主要特点
 
@@ -44,7 +44,7 @@
 - **采集工作区承载计划任务**：全局采集动作打开采集工作区，定时采集与历史在此呈现，普通执行记录进入操作日志。
 - **可控文件操作**：写入前验证路径和范围，生成变更，建立检查点，并使用原子文件替换。
 - **本地优先**：Vault、任务、会话、计划、报告、Skill、索引和操作记录都保存在本机。
-- **固定版本安装包**：每个正式版本只绑定一个不可变 Git 标签和一个源码提交；发布前核对 macOS、Windows 双平台清单与 SHA-256，并明确记录签名状态。`0.4.1` 当前按无签名 DMG/NSIS 发布，因此操作系统仍可能显示 Gatekeeper 或 SmartScreen 安全提示。
+- **固定版本安装包**：每个正式版本只绑定一个不可变 Git 标签和一个源码提交；发布前核对 macOS、Windows 双平台清单与 SHA-256，并明确记录签名状态。`0.4.2` 当前按无签名 DMG/NSIS 发布，因此操作系统仍可能显示 Gatekeeper 或 SmartScreen 安全提示。
 - **不可信内容隔离**：网页、文档、图片、音视频转录和消息只能作为数据，不能成为系统指令或获得工具权限。
 - **四轨长期记忆**：Memory V2 分离用户经历、用户画像、Agent 案例和 Agent 技能，保存证据、置信度、版本和精确作用域；反思草稿经用户批准后才可召回。
 - **Skill 效果反馈闭环**：每次 Skill 运行冻结版本与输入身份，并追加开始/成功/失败/取消效果；反思冻结这些终态效果，批准建议追加 acceptance，拒绝或重做追加 correction，历史不会被覆盖。
@@ -201,7 +201,7 @@ API 密钥由本机设备密钥使用 AES-256-GCM 加密后保存在应用数据
 - 将系统设置保留给用户手动修改；在对话中让 AI助手执行知识、任务、采集、报告和 Skill 工作。
 - 采集结果不完整时先查看任务步骤和操作日志，不要仅以对话文字判断是否真正写入。
 - 定期备份 Obsidian Vault 和云枢 SQLite 数据库；派生索引可重建，但原始知识和运行记录需要备份。
-- 安装更新前先在“设置 → 关于”创建保护点。`0.4.1` 只从对应版本的正式 GitHub Release 获取安装包；当前 macOS DMG 与 Windows NSIS 安装程序均为无签名构建，系统安全提示无法由应用自身关闭。应用内自动静默下载仍不在本版本范围内。
+- 安装更新前先在“设置 → 关于”创建保护点。`0.4.2` 只从对应版本的正式 GitHub Release 获取安装包；当前 macOS DMG 与 Windows NSIS 安装程序均为无签名构建，系统安全提示无法由应用自身关闭。应用内自动静默下载仍不在本版本范围内。
 
 ### 项目结构
 
@@ -268,7 +268,7 @@ Yunspire is a local-first, self-growing knowledge hub for individuals on macOS a
 
 I built Yunspire to do more than add another closed chat window. My goal is to let configured models perform real work within deterministic boundaries: understand an objective, select a registered capability, execute a task, verify the outcome, and organize valuable results in the user's own Obsidian knowledge base.
 
-The current version is `0.4.1` for macOS 13+ (universal Apple Silicon and Intel installer) and Windows 10/11 x64. Search always retains FTS and rebuildable deterministic local feature vectors, fused through explainable reciprocal-rank fusion. Users may also explicitly opt in to an external neural-embedding index. It is off by default and sends only the search query plus note title, relative path, tags, Wiki Links, and at most 24,000 normalized body characters. Missing consent, configuration, or provider availability falls back to local-only retrieval. The Native Graph surface renders local Markdown and Wiki Link relationships interactively inside Yunspire without opening Obsidian. Entity graphs, entity disambiguation, and multi-hop queries remain deferred.
+The current version is `0.4.2` for macOS 13+ (universal Apple Silicon and Intel installer) and Windows 10/11 x64. Search always retains FTS and rebuildable deterministic local feature vectors, fused through explainable reciprocal-rank fusion. Users may also explicitly opt in to an external neural-embedding index. It is off by default and sends only the search query plus note title, relative path, tags, Wiki Links, and at most 24,000 normalized body characters. Missing consent, configuration, or provider availability falls back to local-only retrieval. The Native Graph surface renders local Markdown and Wiki Link relationships interactively inside Yunspire without opening Obsidian. Entity graphs, entity disambiguation, and multi-hop queries remain deferred.
 
 ### Highlights
 
@@ -290,7 +290,7 @@ The current version is `0.4.1` for macOS 13+ (universal Apple Silicon and Intel 
 - **Capture workspace owns schedules**: the global Capture action opens the Capture workspace, where scheduled captures and history remain visible while ordinary execution records live in the Operation Log.
 - **Controlled file changes**: every write validates its path and scope, creates a checkpoint, and commits atomically.
 - **Local-first storage**: Vaults, tasks, conversations, schedules, reports, Skills, indexes, and operation events stay on the local device.
-- **Version-bound installers**: every public version maps to one immutable Git tag and one source commit. macOS and Windows manifests, SHA-256 digests, and signing state are checked before publication. Version `0.4.1` is currently distributed as unsigned DMG/NSIS installers, so Gatekeeper or SmartScreen may still show operating-system security warnings.
+- **Version-bound installers**: every public version maps to one immutable Git tag and one source commit. macOS and Windows manifests, SHA-256 digests, and signing state are checked before publication. Version `0.4.2` is currently distributed as unsigned DMG/NSIS installers, so Gatekeeper or SmartScreen may still show operating-system security warnings.
 - **Untrusted-content isolation**: imported text and media remain data and cannot become system instructions or grant tool access.
 - **Four-track long-term memory**: Memory V2 separates user episodes, user profiles, Agent cases, and Agent skills with evidence, confidence, versions, and exact scope; reflection drafts become recallable only after user approval.
 - **Skill effect-feedback loop**: every Skill run freezes version and input identity, then appends started/succeeded/failed/cancelled effects. Reflection freezes terminal effects; approval appends acceptance, while rejection or revision appends correction without rewriting history.
@@ -439,7 +439,7 @@ API keys are encrypted with AES-256-GCM using a device-local key and stored in t
 - Keep Settings user-controlled; use the Assistant for knowledge, tasks, capture, reports, and Skill operations.
 - Inspect task steps and operation events when capture is incomplete instead of relying on chat text alone.
 - Back up both Obsidian Vaults and the Yunspire SQLite database. Derived indexes are rebuildable; source knowledge and runtime history are not.
-- Create a protection point under Settings → About before updating. Version `0.4.1` only uses installers from its matching public GitHub Release. Its macOS DMG and Windows NSIS setup are currently unsigned, and operating-system security warnings cannot be disabled by the application. Automatic silent in-app download remains out of scope for this version.
+- Create a protection point under Settings → About before updating. Version `0.4.2` only uses installers from its matching public GitHub Release. Its macOS DMG and Windows NSIS setup are currently unsigned, and operating-system security warnings cannot be disabled by the application. Automatic silent in-app download remains out of scope for this version.
 
 ### Repository layout
 

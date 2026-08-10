@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.0",
   "catalogVersion": "0.4.0",
-  "runtimeVersion": "0.4.1",
+  "runtimeVersion": "0.4.2",
   "themes": [
     {
       "schemaVersion": "1.0",
@@ -15638,7 +15638,7 @@
           "path": "wechat-tutorial/template.md",
           "kind": "markdown",
           "editable": true,
-          "contentHash": "sha256:776cd5d81cc531093a547e56f55f2f145fd9bb8756aac8baef0d4a1225a1195a"
+          "contentHash": "sha256:776cd5d81cc531093a547e56f55f2f145fd9bb8756aac8baef0.4.2225a1195a"
         }
       ],
       "editableSurfaces": [

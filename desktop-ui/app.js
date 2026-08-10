@@ -1460,20 +1460,9 @@ function updateVaultConnectionIndicators(vaultId = 'all') {
 }
 
 function updateKnowledgeNativeOpenAction() {
-  const button = document.querySelector('[data-open-active-obsidian]');
   const graphButton = document.querySelector('[data-open-active-obsidian-graph]');
   const vaultId = workspaceState.currentVaultId || 'all';
   const vault = discoveredVaults.find((item) => item.id === vaultId && item.connectionState === 'connected');
-  const available = isTauriRuntime && Boolean(vault);
-  const title = available
-    ? `在 Obsidian 中打开“${vault.name}”`
-    : vaultId === 'all'
-      ? '请选择一个具体知识库后打开 Obsidian'
-      : '当前知识库不可用';
-  if (button) {
-    button.disabled = !available;
-    button.title = title;
-  }
   if (graphButton) {
     // The graph is rendered inside Yunspire from the locally readable Vault
     // data. Keep the action reachable even before a Vault is selected so it
@@ -16151,23 +16140,6 @@ async function updateSearchResults() {
   document.querySelector('.results-pane').classList.toggle('empty-filter-state', visible === 0);
 }
 
-async function openActiveObsidianVault() {
-  if (!isTauriRuntime) {
-    showToast('浏览器预览不具备打开 Obsidian 的权限', 'error');
-    return;
-  }
-  const vaultId = workspaceState.currentVaultId || 'all';
-  if (vaultId === 'all') {
-    showToast('请先在顶部选择一个具体知识库，再打开 Obsidian', 'error');
-    return;
-  }
-  try {
-    await invokeNative('open_obsidian_vault', { vaultId });
-    showToast('已打开 Obsidian，可使用原生图谱、反向链接和全部操作');
-  } catch (error) {
-    showToast(`无法打开 Obsidian：${error}`, 'error');
-  }
-}
 
 function knowledgeGraphAlias(value) {
   return String(value || '')
@@ -16394,9 +16366,6 @@ document.querySelector('[data-knowledge-folder-breadcrumbs]')?.addEventListener(
   if (input) input.value = '';
   void loadKnowledgeBrowsePage({ reset: true, folder: button.dataset.knowledgeFolderBreadcrumb || '', showFolders: true });
 });
-document.querySelector('[data-open-active-obsidian]')?.addEventListener('click', () => {
-  void openActiveObsidianVault();
-});
 document.querySelector('[data-open-active-obsidian-graph]')?.addEventListener('click', () => {
   void openActiveObsidianGraph();
 });
@@ -16589,17 +16558,12 @@ async function openNoteDocument(title, path, vaultName, fallbackText = '', vault
   if (isTauriRuntime && vaultId) {
     try {
       const note = await invokeNative('read_vault_note', { vaultId, relativePath: path });
-      const obsidianFile = note.relativePath.replace(/\.md$/i, '');
-      const openInObsidian = noteViewerModal.querySelector('[data-open-in-obsidian]');
       noteViewerModal.querySelector('#note-viewer-title').textContent = note.content.match(/^#\s+(.+)$/m)?.[1] || title;
       noteViewerModal.querySelector('[data-note-viewer-path]').textContent = note.relativePath;
       noteViewerModal.querySelector('[data-note-viewer-vault]').textContent = note.vaultName;
       noteViewerModal.querySelector('[data-note-viewer-type]').textContent = '本地 Markdown';
       noteViewerModal.querySelector('[data-note-viewer-tags]').textContent = '读取自 Obsidian';
       noteViewerModal.querySelector('[data-note-viewer-content]').innerHTML = markdownToSafeHtml(note.content);
-      openInObsidian.dataset.obsidianUrl = `obsidian://open?vault=${encodeURIComponent(note.vaultName)}&file=${encodeURIComponent(obsidianFile)}`;
-      openInObsidian.dataset.vaultId = note.vaultId || vaultId;
-      openInObsidian.dataset.relativePath = note.relativePath;
       noteViewerModal.classList.add('open');
       rememberDashboardNoteOpen({ ...note, title: noteViewerModal.querySelector('#note-viewer-title').textContent || title });
       return;
@@ -16613,51 +16577,16 @@ async function openNoteDocument(title, path, vaultName, fallbackText = '', vault
     tags: '浏览器模式无本机权限',
     content: `<h1>${escapeHtml(title)}</h1><p>${escapeHtml(fallbackText || '请在 Yunspire 桌面应用中读取本机 Obsidian 笔记。')}</p>`,
   };
-  const obsidianFile = path.replace(/\.md$/i, '');
-  const obsidianUrl = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(obsidianFile)}`;
   noteViewerModal.querySelector('#note-viewer-title').textContent = title;
   noteViewerModal.querySelector('[data-note-viewer-path]').textContent = path;
   noteViewerModal.querySelector('[data-note-viewer-vault]').textContent = vaultName;
   noteViewerModal.querySelector('[data-note-viewer-type]').textContent = note.type;
   noteViewerModal.querySelector('[data-note-viewer-tags]').textContent = note.tags;
   noteViewerModal.querySelector('[data-note-viewer-content]').innerHTML = note.content;
-  const openInObsidian = noteViewerModal.querySelector('[data-open-in-obsidian]');
-  openInObsidian.dataset.obsidianUrl = obsidianUrl;
-  delete openInObsidian.dataset.vaultId;
-  delete openInObsidian.dataset.relativePath;
   noteViewerModal.classList.add('open');
 }
 
-async function openCurrentNoteInObsidian(button) {
-  if (!isTauriRuntime) return;
-  if (button.dataset.opening === 'true') return;
-  const vaultId = button.dataset.vaultId;
-  const relativePath = button.dataset.relativePath;
-  if (!vaultId || !relativePath) {
-    showToast('当前笔记缺少可用的 Obsidian 路径', 'error');
-    return;
-  }
-  button.dataset.opening = 'true';
-  button.disabled = true;
-  try {
-    try {
-      await invokeNative('open_obsidian_note', { vaultId, relativePath });
-    } catch {
-      await invokeNative('open_vault_note_in_obsidian', { vaultId, relativePath });
-    }
-    addAuditEntry('已在 Obsidian 中打开笔记', '已完成', 'neutral', { vaultId, relativePath });
-    showToast('已在 Obsidian 中打开笔记');
-  } catch (error) {
-    showToast(`无法在 Obsidian 中打开笔记：${error}`, 'error');
-  } finally {
-    delete button.dataset.opening;
-    button.disabled = false;
-  }
-}
 
-noteViewerModal.querySelector('[data-open-in-obsidian]').addEventListener('click', (event) => {
-  void openCurrentNoteInObsidian(event.currentTarget);
-});
 
 function openSearchNoteViewer() {
   const selected = document.querySelector('.results-pane .result-row.selected') || document.querySelector('.results-pane .result-row:not([hidden])');
@@ -18365,7 +18294,7 @@ function creationDocumentV2For(title, canonicalMarkdown = '') {
       htmlValid: false,
       issues: [],
       validatedAt: now,
-      validatorVersion: '0.4.1',
+      validatorVersion: '0.4.2',
       contentHash: null,
     } : previous?.validationReceipt,
     readiness: changed ? null : previous?.readiness,
@@ -26613,7 +26542,7 @@ function handleSettingsClick(button) {
   }
   if (button.matches('[data-export-diagnostics]')) {
     const diagnostics = [
-      'Yunspire Desktop 0.4.1',
+      'Yunspire Desktop 0.4.2',
       `运行环境：${isTauriRuntime ? 'Tauri 桌面应用' : '浏览器降级模式'}`,
       `本地数据库：${databaseHealth?.integrity === 'ok' ? '完整性正常' : '未验证'}`,
       `SQLite schema：${databaseHealth?.schemaVersion ?? '未读取'}`,

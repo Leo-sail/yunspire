@@ -1,6 +1,6 @@
 # Memory V2
 
-Current Yunspire version: `0.4.1`
+Current Yunspire version: `0.4.2`
 
 Yunspire keeps Obsidian Markdown as the canonical knowledge source. SQLite stores rebuildable indexes, durable jobs, delivery receipts, and derived memories; it does not replace the Vault.
 

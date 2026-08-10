@@ -36,7 +36,7 @@ MINIMUM_FREE_DISK_BYTES = 32 * 1024 * 1024
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/128.0.0.0 Safari/537.36 Yunspire/0.4.1"
+    "Chrome/128.0.0.0 Safari/537.36 Yunspire/0.4.2"
 )
 BROWSER_ACCEPT_LANGUAGE = "zh-CN,zh;q=0.9,en;q=0.8"
 
