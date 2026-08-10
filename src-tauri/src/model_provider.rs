@@ -218,6 +218,16 @@ impl ModelAnalysisState {
         self.issue_with_digest(workspace_scope, Some(capture_analysis_digest(analysis)))
     }
 
+    /// Issue a short-lived write receipt for user-authored content that does
+    /// not require model analysis. The receipt still flows through the same
+    /// native write validation and is consumed atomically on commit.
+    pub(crate) fn issue_direct_write_receipt(
+        &self,
+        workspace_scope: &str,
+    ) -> Result<String, String> {
+        self.issue_with_digest(workspace_scope, None)
+    }
+
     fn issue_with_digest(
         &self,
         workspace_scope: &str,
@@ -5433,6 +5443,13 @@ pub fn bind_capture_analysis_write_manifest(
         return Err("模型分析凭证不能为空".to_string());
     }
     analysis_state.bind_write_manifest(LOCAL_MODEL_SCOPE, receipt, &write_manifest_digest)
+}
+
+#[tauri::command]
+pub fn issue_direct_write_receipt(
+    analysis_state: State<'_, ModelAnalysisState>,
+) -> Result<String, String> {
+    analysis_state.issue_direct_write_receipt(LOCAL_MODEL_SCOPE)
 }
 
 #[tauri::command]

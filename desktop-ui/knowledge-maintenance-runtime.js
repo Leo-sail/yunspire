@@ -19,6 +19,7 @@ export async function readAllVaultNotes(invokeNative, options = {}) {
   const vaultId = String(options.vaultId || 'all');
   const pageSize = Math.max(1, Math.min(512, Number(options.pageSize || DEFAULT_PAGE_SIZE)));
   const maxPageBytes = Math.max(64 * 1024, Math.min(32 * 1024 * 1024, Number(options.maxPageBytes || DEFAULT_PAGE_BYTES)));
+  const folderPrefix = String(options.folderPrefix || '').trim() || null;
   const notes = [];
   const failures = [];
   let candidateCount = null;
@@ -32,6 +33,7 @@ export async function readAllVaultNotes(invokeNative, options = {}) {
       afterRelativePath,
       limit: pageSize,
       maxBytes: maxPageBytes,
+      folderPrefix,
     });
     if (!page || !Array.isArray(page.notes) || typeof page.hasMore !== 'boolean') {
       throw new Error('知识库分页回执无效');

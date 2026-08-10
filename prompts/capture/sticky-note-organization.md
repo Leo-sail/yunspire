@@ -2,6 +2,8 @@
 
 请把这些灵感按主题归并，提炼关键问题、可行动方向、可能关联的实体或现有知识主题；保留不确定性，不得虚构事实。
 
+请严格返回一个有效的 json object（JSON 对象），不要返回 Markdown 代码围栏或额外解释。对象必须包含 `analysis_markdown` 字符串，并可包含 `summary`、`themes`、`entities` 和 `next_steps` 字段；`analysis_markdown` 的内容仍须遵守下面的标题要求。
+
 analysis_markdown 必须以“## 整理摘要”“## 主题与关联”“## 待验证或下一步”三个二级标题组织，不得加入其他日期的便签，也不得省略任何来源条目。
 
 日期：{{DATE}}

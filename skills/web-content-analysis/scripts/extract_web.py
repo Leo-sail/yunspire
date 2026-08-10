@@ -29,6 +29,20 @@ IMAGE_RESPONSE_BYTES = 128 * 1024 * 1024
 ALL_IMAGE_RESPONSE_BYTES = 1024 * 1024 * 1024
 STREAM_CHUNK_BYTES = 256 * 1024
 MINIMUM_FREE_DISK_BYTES = 32 * 1024 * 1024
+# Several public publishers, including WeChat articles, serve a challenge page
+# to clearly automated user agents even when the article itself is public. A
+# browser-compatible identity keeps capture background-only while carrying no
+# cookies, authorization headers, or other user credentials.
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/128.0.0.0 Safari/537.36 Yunspire/0.4.1"
+)
+BROWSER_ACCEPT_LANGUAGE = "zh-CN,zh;q=0.9,en;q=0.8"
+
+WECHAT_CONTENT_IDS = ("js_content", "js_article", "page-content")
+WECHAT_CONTENT_CLASSES = {"rich_media_content"}
+WECHAT_CONTENT_ASSIGNMENTS = ("content", "msg_content", "article_content")
 
 SKIP_TAGS = {"script", "style", "noscript", "svg", "nav"}
 SEMANTIC_FLOW_TAGS = {"article", "main"}
@@ -867,6 +881,239 @@ class PageParser(HTMLParser):
         return value.strip()
 
 
+class _ContentFragmentParser(HTMLParser):
+    """Capture one article container without executing or evaluating page code."""
+
+    def __init__(self, target_ids=(), target_classes=()):
+        super().__init__(convert_charrefs=False)
+        self.target_ids = {str(value).lower() for value in target_ids}
+        self.target_classes = {str(value).lower() for value in target_classes}
+        self.depth = 0
+        self.found = False
+        self.complete = False
+        self.root_tag = None
+        self.open_tags = []
+        self.fragments = []
+        self.start_line = None
+        self.end_line = None
+        self.start_column = None
+        self.end_column = None
+
+    def _is_target(self, attrs):
+        values = {str(key).lower(): str(value or "") for key, value in attrs}
+        element_id = values.get("id", "").strip().lower()
+        classes = set(values.get("class", "").lower().split())
+        return element_id in self.target_ids or bool(classes & self.target_classes)
+
+    def _append_starttag(self):
+        raw = self.get_starttag_text()
+        if raw:
+            self.fragments.append(raw)
+
+    def handle_starttag(self, tag, attrs):
+        if self.complete:
+            return
+        lower = tag.lower()
+        if not self.depth:
+            if not self._is_target(attrs):
+                return
+            self.found = True
+            self.depth = 1
+            self.root_tag = lower
+            self.start_line, self.start_column = self.getpos()
+            return
+        self._append_starttag()
+        if lower not in VOID_TAGS:
+            self.open_tags.append(lower)
+            self.depth = len(self.open_tags) + 1
+
+    def handle_startendtag(self, tag, attrs):
+        if self.complete:
+            return
+        if not self.depth:
+            if not self._is_target(attrs):
+                return
+            self.found = True
+            self.complete = True
+            self.root_tag = tag.lower()
+            self.start_line, self.start_column = self.getpos()
+            self.end_line, self.end_column = self.start_line, self.start_column
+            return
+        self._append_starttag()
+
+    def handle_endtag(self, tag):
+        if not self.depth or self.complete:
+            return
+        lower = tag.lower()
+        if lower in VOID_TAGS:
+            return
+        if lower == self.root_tag and lower not in self.open_tags:
+            self.depth = 0
+            self.complete = True
+            self.end_line, self.end_column = self.getpos()
+            return
+        self.fragments.append(f"</{tag}>")
+        if lower in self.open_tags:
+            reverse_index = self.open_tags[::-1].index(lower)
+            del self.open_tags[len(self.open_tags) - reverse_index - 1:]
+        self.depth = len(self.open_tags) + 1
+
+    def handle_data(self, data):
+        if self.depth:
+            self.fragments.append(data)
+
+    def handle_entityref(self, name):
+        if self.depth:
+            self.fragments.append(f"&{name};")
+
+    def handle_charref(self, name):
+        if self.depth:
+            self.fragments.append(f"&#{name};")
+
+    def handle_comment(self, data):
+        if self.depth:
+            self.fragments.append(f"<!--{data}-->")
+
+    def handle_decl(self, decl):
+        if self.depth:
+            self.fragments.append(f"<!{decl}>")
+
+    def handle_pi(self, data):
+        if self.depth:
+            self.fragments.append(f"<?{data}>")
+
+    def result(self, raw_text):
+        if self.depth and self.end_line is None:
+            self.end_line = raw_text.count("\n") + 1
+            self.end_column = len(raw_text.rsplit("\n", 1)[-1])
+        if not self.found:
+            return None
+        line_offsets = [0]
+        for match in re.finditer(r"\n", raw_text):
+            line_offsets.append(match.end())
+
+        def absolute_offset(line, column):
+            if line is None:
+                return None
+            return line_offsets[min(max(line - 1, 0), len(line_offsets) - 1)] + max(column or 0, 0)
+
+        return {
+            "html": "".join(self.fragments),
+            "start_line": self.start_line,
+            "end_line": self.end_line or self.start_line,
+            "start_offset": absolute_offset(self.start_line, self.start_column),
+            "end_offset": absolute_offset(self.end_line, self.end_column),
+        }
+
+
+def _capture_content_fragment(raw_text, target_ids=(), target_classes=()):
+    parser = _ContentFragmentParser(target_ids, target_classes)
+    try:
+        parser.feed(raw_text)
+        parser.close()
+    except (AssertionError, ValueError):
+        return None
+    return parser.result(raw_text)
+
+
+def _decode_javascript_string(literal):
+    if len(literal) < 2 or literal[0] not in {"'", '\"'} or literal[-1] != literal[0]:
+        return ""
+    value = []
+    cursor = 1
+    end = len(literal) - 1
+    escapes = {
+        "0": "\0",
+        "b": "\b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "v": "\v",
+        "\\": "\\",
+        "'": "'",
+        '\"': '\"',
+    }
+    while cursor < end:
+        character = literal[cursor]
+        if character != "\\":
+            value.append(character)
+            cursor += 1
+            continue
+        cursor += 1
+        if cursor >= end:
+            return ""
+        escaped = literal[cursor]
+        if escaped in escapes:
+            value.append(escapes[escaped])
+            cursor += 1
+            continue
+        if escaped in {"x", "u"}:
+            width = 2 if escaped == "x" else 4
+            digits = literal[cursor + 1:cursor + 1 + width]
+            if len(digits) != width or not re.fullmatch(r"[0-9a-fA-F]+", digits):
+                return ""
+            value.append(chr(int(digits, 16)))
+            cursor += width + 1
+            continue
+        if escaped in {"\n", "\r"}:
+            cursor += 1
+            if escaped == "\r" and cursor < end and literal[cursor] == "\n":
+                cursor += 1
+            continue
+        value.append(escaped)
+        cursor += 1
+    return "".join(value)
+
+
+def _capture_wechat_script_content(raw_text):
+    assignment = re.compile(
+        rf"(?:var\s+|window\.)?(?:{'|'.join(re.escape(item) for item in WECHAT_CONTENT_ASSIGNMENTS)})\s*=\s*",
+        re.I,
+    )
+    for match in assignment.finditer(raw_text):
+        start = match.end()
+        if start >= len(raw_text) or raw_text[start] not in {"'", '\"'}:
+            continue
+        quote = raw_text[start]
+        cursor = start + 1
+        escaped = False
+        while cursor < len(raw_text):
+            character = raw_text[cursor]
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                literal = raw_text[start:cursor + 1]
+                value = html.unescape(_decode_javascript_string(literal)).strip()
+                if "<" in value and ">" in value:
+                    return {"html": value, "start_line": None, "end_line": None}
+                break
+            cursor += 1
+    return None
+
+
+def extract_wechat_content_fragment(raw_text):
+    """Locate public WeChat article HTML while keeping page shell out of gates."""
+
+    for target_id in WECHAT_CONTENT_IDS:
+        fragment = _capture_content_fragment(raw_text, target_ids={target_id})
+        if fragment and fragment.get("html", "").strip():
+            return fragment
+    fragment = _capture_content_fragment(
+        raw_text, target_classes=WECHAT_CONTENT_CLASSES
+    )
+    if fragment and fragment.get("html", "").strip():
+        return fragment
+    return _capture_wechat_script_content(raw_text)
+
+
+def is_wechat_host(host):
+    normalized = str(host or "").strip().rstrip(".").lower()
+    return normalized == "weixin.qq.com" or normalized.endswith(".weixin.qq.com")
+
+
 def blocked_page(title, body, host):
     combined = f"{title} {body[:5000]}".lower()
     signals = (
@@ -993,8 +1240,9 @@ def download_external_image(source_url, output_root, remaining_bytes):
         raise ImageLocalizationError("aggregate_byte_budget_exceeded", "网页图片累计响应超过 1 GB 安全边界")
     redirect_chain = []
     request = Request(source_url, headers={
-        "User-Agent": "Yunspire/0.4.1 local knowledge capture",
+        "User-Agent": BROWSER_USER_AGENT,
         "Accept": "image/avif,image/webp,image/png,image/jpeg,image/gif,image/*;q=0.8",
+        "Accept-Language": BROWSER_ACCEPT_LANGUAGE,
         "Accept-Encoding": "identity",
     })
     temporary_path = None
@@ -1360,8 +1608,9 @@ def main():
         load_request_authorization(args.request_headers_stdin)
         validated_url = validate_public_url(args.url)
         request = Request(validated_url, headers={
-            "User-Agent": "Yunspire/0.4.1 local knowledge capture",
+            "User-Agent": BROWSER_USER_AGENT,
             "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1",
+            "Accept-Language": BROWSER_ACCEPT_LANGUAGE,
             "Accept-Encoding": "identity",
         })
     except (TypeError, ValueError) as exc:
@@ -1409,10 +1658,54 @@ def main():
     page.feed(decoded)
     page.close()
     page.finalize_structure()
+    wechat_fragment = None
+    if is_wechat_host(urlparse(final_page_url).hostname):
+        wechat_fragment = extract_wechat_content_fragment(decoded)
     title = " ".join(page.title).strip() or page.meta.get("og:title") or parsed.netloc
     body = page.content_markdown()
     structured_body, structured_images, structured_metadata = structured_article(decoded)
     body_source = "html_content_flow"
+    if wechat_fragment and wechat_fragment.get("html", "").strip():
+        scoped_page = PageParser(final_page_url)
+        scoped_page.feed(wechat_fragment["html"])
+        scoped_page.close()
+        scoped_page.finalize_structure()
+        scoped_body = scoped_page.content_markdown()
+        if scoped_body.strip():
+            # Keep title/meta from the document shell, but use only the
+            # article container for正文, images, links, and fidelity gates.
+            cover_reference = next(
+                (
+                    item for item in page.image_references
+                    if item.get("alt_text") == "cover_image"
+                ),
+                None,
+            )
+            if cover_reference:
+                cover_reference = resolve_reference(
+                    dict(cover_reference), final_page_url
+                )
+                cover_alt = markdown_alt(
+                    cover_reference.get("alt_text") or "来源封面"
+                )
+                scoped_body = (
+                    f"![{cover_alt}](attachment://{cover_reference['reference_id']})"
+                    f"\n\n{scoped_body}"
+                )
+                scoped_page.image_references.insert(0, cover_reference)
+            author = page.meta.get("og:article:author") or page.meta.get("author")
+            if author:
+                scoped_body = f"作者：{re.sub(r'\s+', ' ', author).strip()}\n\n{scoped_body}"
+            for index, reference in enumerate(scoped_page.image_references, 1):
+                reference["occurrence_index"] = index
+                reference["flow_index"] = index
+                reference.setdefault("placement", {})["sequence"] = index
+            scoped_page.title = list(page.title)
+            scoped_page.meta = {**page.meta, **scoped_page.meta}
+            scoped_page.base_href = page.base_href
+            page = scoped_page
+            body = scoped_body
+            body_source = "wechat_content_container"
     if not body.strip() and structured_body.strip():
         body = structured_body.strip()
         body_source = "json_ld_article_body"

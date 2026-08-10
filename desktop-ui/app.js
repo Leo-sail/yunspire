@@ -475,7 +475,14 @@ function handleWorkbenchEntry(button) {
   if (button.dataset.workbenchFolder) {
     const input = document.querySelector('.search-hero input');
     if (input) input.value = '';
-    void loadKnowledgeBrowsePage({ reset: true, folder: button.dataset.workbenchFolder });
+    // Workbench projects are cross-Vault read views. Keep that scope local to
+    // Knowledge browsing so the user's active write Vault remains unchanged.
+    void loadKnowledgeBrowsePage({
+      reset: true,
+      folder: button.dataset.workbenchFolder,
+      showFolders: false,
+      vaultId: 'all',
+    });
   }
 }
 document.querySelector('[data-r11-dashboard-workbench]')?.addEventListener('click', (event) => {
@@ -1096,6 +1103,9 @@ async function initializeLocalWorkspace() {
     : migrateStartupPageSetting(workspaceState.settings);
   setRoute(startupTarget.route, false);
   if (startupTarget.tab && startupTarget.route === 'capture') activateTab('capture', startupTarget.tab, false);
+  if (startupTarget.route === 'search' && !document.querySelector('.search-hero input')?.value.trim()) {
+    void loadKnowledgeBrowsePage({ reset: true, folder: '', showFolders: true });
+  }
   if (startupTarget.route === 'settings') activateSetting(params.get('setting') || 'general', false);
   if (startupTarget.route !== 'agent' && startupTarget.route !== 'settings' && shouldOpenAssistantDockByDefault()) {
     setAssistantDockOpen(true, false, false);
@@ -1172,6 +1182,10 @@ document.querySelectorAll('[data-command-route]').forEach((button) => button.add
   if (button.dataset.commandAction === 'new-note' || button.dataset.commandRoute === 'create' && /新建笔记/u.test(textOf(button))) {
     document.querySelector('[data-new-creation-document]')?.click();
   }
+  if (button.dataset.commandAction === 'capture-new') {
+    activateTab('capture', 'new');
+    window.requestAnimationFrame(() => document.getElementById('source-url')?.focus());
+  }
 }));
 document.querySelectorAll('[data-command-assistant]').forEach((button) => button.addEventListener('click', () => {
   commandModal.classList.remove('open');
@@ -1225,7 +1239,9 @@ function performShortcutAction(action) {
     return true;
   }
   if (action === 'capture') {
-    handoffToAssistant(promptText('assistant.handoffs.capture-new'), '已打开AI助手采集请求');
+    setRoute('capture');
+    activateTab('capture', 'new');
+    window.requestAnimationFrame(() => document.getElementById('source-url')?.focus());
     return true;
   }
   if (action === 'scheduledCapture') {
@@ -1511,6 +1527,7 @@ function selectVault(vaultId, persist = true) {
   syncComposerVaultPicker(vaultId);
   updateSearchResults();
   void loadKnowledgeCalendarNotes();
+  void syncDashboardStickyEntriesFromVault();
   updateSearchPreview(document.querySelector('.results-pane .result-row:not([hidden])'));
   vaultPopover.classList.remove('open');
   vaultSwitcher?.setAttribute('aria-expanded', 'false');
@@ -1676,8 +1693,21 @@ function normalizeDashboardStickyEntries(entries) {
         status: entry.status === 'organized' ? 'organized' : 'pending',
         organizedAt: entry.organizedAt || null,
         organizedPath: entry.organizedPath || null,
+        persistedPath: String(entry.persistedPath || '').trim() || null,
+        vaultId: String(entry.vaultId || '').trim() || null,
+        vaultName: String(entry.vaultName || '').trim() || null,
       };
     });
+}
+
+function dashboardStickyEntryVaultId(entry, fallbackVaultId = '') {
+  return String(entry?.vaultId || fallbackVaultId || '').trim();
+}
+
+function dashboardStickyEntryKey(entry, fallbackVaultId = '') {
+  const vaultId = dashboardStickyEntryVaultId(entry, fallbackVaultId);
+  const entryId = String(entry?.id || '').trim();
+  return `${vaultId}\u0000${entryId}`;
 }
 
 workspaceState.dashboardStickyEntries = normalizeDashboardStickyEntries(workspaceState.dashboardStickyEntries);
@@ -2545,10 +2575,10 @@ function renderDashboardCalendar() {
 }
 
 function dashboardStickyTargetInfo() {
-  if (!isTauriRuntime) return { label: '浏览器预览 · 本机待整理队列', vault: null };
+  if (!isTauriRuntime) return { label: '桌面应用连接 Obsidian 后可保存', vault: null };
   try {
     const target = resolveAutomaticCaptureVault('personal');
-    return { label: `${target.vault.name} · 随想/每日整理`, vault: target.vault };
+    return { label: `${target.vault.name} · 随想/未整理便签`, vault: target.vault };
   } catch {
     return { label: '未连接可写知识库', vault: null };
   }
@@ -2579,6 +2609,165 @@ function dashboardStickyEntryTime(entry) {
   return Number.isNaN(date.getTime())
     ? '未记录时间'
     : new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(date);
+}
+
+function dashboardStickyRawRelativePath(entry) {
+  const date = String(entry?.localDate || isoLocalDate(new Date(entry?.createdAt || Date.now())))
+    .replace(/[^0-9-]/gu, '')
+    .slice(0, 10) || isoLocalDate();
+  const id = String(entry?.id || `sticky-${crypto.randomUUID()}`)
+    .replace(/[^a-z0-9._-]/giu, '-')
+    .slice(0, 120) || `sticky-${Date.now()}`;
+  return `随想/未整理便签/${date}-${id}.md`;
+}
+
+function dashboardStickyRawMarkdown(entry) {
+  const localDate = String(entry?.localDate || isoLocalDate(new Date(entry?.createdAt || Date.now())));
+  const createdAt = String(entry?.createdAt || new Date().toISOString());
+  const organized = entry?.status === 'organized';
+  return [
+    '---',
+    'type: yunspire-sticky-note',
+    `status: ${organized ? 'organized' : 'pending'}`,
+    `entry_id: ${JSON.stringify(String(entry.id || ''))}`,
+    `date: ${JSON.stringify(localDate)}`,
+    `created_at: ${JSON.stringify(createdAt)}`,
+    ...(organized && entry.organizedAt ? [`organized_at: ${JSON.stringify(String(entry.organizedAt))}`] : []),
+    ...(organized && entry.organizedPath ? [`organized_path: ${JSON.stringify(String(entry.organizedPath))}`] : []),
+    'source: yunspire-dashboard-sticky',
+    '---',
+    '',
+    '# 灵感便签',
+    '',
+    String(entry.content || '').trim(),
+    '',
+  ].join('\n');
+}
+
+function dashboardStickyFrontmatterField(content, key) {
+  const match = String(content || '').match(new RegExp(`^${key.replace(/[.*+?^${}()|[\[\]\\]/gu, '\\$&')}\\s*:\\s*(.+)$`, 'imu'));
+  return match?.[1]?.trim().replace(/^(?:"([\\s\\S]*)"|'([\\s\\S]*)')$/u, '$1$2') || '';
+}
+
+function dashboardStickyEntryFromVaultNote(note) {
+  const relativePath = String(note?.relativePath || '');
+  if (!relativePath.startsWith('随想/未整理便签/')) return null;
+  const content = String(note?.content || '');
+  if (dashboardStickyFrontmatterField(content, 'type') !== 'yunspire-sticky-note') return null;
+  const frontmatter = content.match(/^---\n[\s\S]*?\n---(?:\n|$)/u);
+  const body = (frontmatter ? content.slice(frontmatter[0].length) : content)
+    .replace(/^#\s+灵感便签\s*/u, '')
+    .trim();
+  const id = dashboardStickyFrontmatterField(content, 'entry_id') || relativePath.split('/').at(-1)?.replace(/\.md$/iu, '') || relativePath;
+  const createdAt = dashboardStickyFrontmatterField(content, 'created_at') || note?.modifiedAt || new Date().toISOString();
+  const localDate = dashboardStickyFrontmatterField(content, 'date') || isoLocalDate(new Date(createdAt));
+  return {
+    id,
+    content: body,
+    createdAt,
+    localDate,
+    status: dashboardStickyFrontmatterField(content, 'status') || 'pending',
+    organizedAt: dashboardStickyFrontmatterField(content, 'organized_at') || null,
+    organizedPath: dashboardStickyFrontmatterField(content, 'organized_path') || null,
+    persistedPath: relativePath,
+    vaultId: note?.vaultId || '',
+    vaultName: note?.vaultName || '',
+  };
+}
+
+async function persistDashboardStickyEntryToVault(entry, target, existingNotes = []) {
+  if (!target?.vault?.id) throw new Error('没有可写入的本地知识库');
+  const relativePath = entry.persistedPath || dashboardStickyRawRelativePath(entry);
+  const existing = existingNotes.find((note) => note.vaultId === target.vault.id && note.relativePath === relativePath);
+  if (existing) {
+    const existingEntry = dashboardStickyEntryFromVaultNote(existing);
+    if (existingEntry?.id !== entry.id || existingEntry.content !== entry.content) {
+      throw new Error(`便签目标文件已存在且内容不匹配：${relativePath}`);
+    }
+    return { relativePath, alreadyPresent: true };
+  }
+  const writeTask = await ensureNativeVaultWriteTask(null, {
+    title: `保存灵感便签：${entry.localDate}`,
+    vaultId: target.vault.id,
+    relativePaths: [relativePath],
+    operation: 'create',
+  });
+  const operationContext = nativeOperationContext(writeTask);
+  let analysisReceipt = '';
+  let preview = null;
+  try {
+    analysisReceipt = await invokeNative('issue_direct_write_receipt');
+    preview = await invokeNative('prepare_note_write', {
+      vaultId: target.vault.id,
+      relativePath,
+      content: dashboardStickyRawMarkdown(entry),
+      analysisReceipt,
+      expectedAbsent: true,
+      operationContext,
+    });
+    const committed = await invokeNative('commit_note_write', { approvalId: preview.approvalId });
+    await settleAutoManagedWriteTask({ writeTask }, 'succeeded', `灵感便签已写入 ${relativePath}`);
+    return { ...committed, relativePath, alreadyPresent: false };
+  } catch (error) {
+    if (preview?.approvalId) await invokeNative('discard_note_write', { approvalId: preview.approvalId }).catch(() => false);
+    if (analysisReceipt) await invokeNative('discard_capture_analysis_receipt', { analysisReceipt }).catch(() => false);
+    await settleAutoManagedWriteTask({ writeTask }, 'failed', `灵感便签写入失败：${error}`);
+    throw error;
+  }
+}
+
+let dashboardStickyVaultSyncPromise = null;
+
+async function syncDashboardStickyEntriesFromVault() {
+  if (!isTauriRuntime || !localWorkspaceReady || dashboardStickyVaultSyncPromise) return dashboardStickyVaultSyncPromise;
+  dashboardStickyVaultSyncPromise = (async () => {
+    const access = workspaceState.settings.vaultAccess || {};
+    const targets = discoveredVaults.filter((vault) => (
+      vault.connectionState === 'connected' && (access[vault.id] || 'readwrite') !== 'disabled'
+    ));
+    const notes = (await Promise.all(targets.map((vault) => listAllVaultNotes(vault.id, {
+      folderPrefix: '随想/未整理便签',
+    })))).flat();
+    const vaultEntries = notes
+      .map(dashboardStickyEntryFromVaultNote)
+      .filter(Boolean);
+    const defaultPersonalVault = targets.find((vault) => (
+      vault.name === '个人库' && (access[vault.id] || 'readwrite') === 'readwrite'
+    )) || targets.find((vault) => (access[vault.id] || 'readwrite') === 'readwrite') || null;
+    let changed = false;
+    const merged = new Map(normalizeDashboardStickyEntries(workspaceState.dashboardStickyEntries)
+      .map((entry) => {
+        if (entry.vaultId || !defaultPersonalVault) return [dashboardStickyEntryKey(entry), entry];
+        changed = true;
+        const assigned = { ...entry, vaultId: defaultPersonalVault.id, vaultName: defaultPersonalVault.name };
+        return [dashboardStickyEntryKey(assigned), assigned];
+      }));
+    vaultEntries.forEach((entry) => {
+      const current = merged.get(dashboardStickyEntryKey(entry));
+      // A local organized state is authoritative; otherwise the Vault copy
+      // restores the raw note after a restart or a stale local snapshot.
+      if (!current || current.status !== 'organized') {
+        const next = current?.status === 'organized'
+          ? { ...entry, ...current, vaultId: entry.vaultId, vaultName: entry.vaultName, persistedPath: entry.persistedPath }
+          : { ...(current || {}), ...entry };
+        if (!current || JSON.stringify(current) !== JSON.stringify(next)) changed = true;
+        merged.set(dashboardStickyEntryKey(entry), next);
+      }
+    });
+    if (changed) {
+      workspaceState.dashboardStickyEntries = normalizeDashboardStickyEntries([...merged.values()]);
+      const saved = await persistWorkspaceState();
+      if (!saved?.ok) throw new Error(saved?.error || '同步后的便签状态无法保存');
+      renderDashboardSticky();
+    }
+    return notes;
+  })().catch((error) => {
+    console.warn('同步 Vault 灵感便签失败', error);
+    return [];
+  }).finally(() => {
+    dashboardStickyVaultSyncPromise = null;
+  });
+  return dashboardStickyVaultSyncPromise;
 }
 
 function dashboardStickyOrganizationMaterial(date, entries) {
@@ -2665,20 +2854,20 @@ function renderDashboardSticky() {
     pendingCount.hidden = pendingEntries.length === 0;
   }
   status.textContent = dashboardStickySaveBusy
-    ? '正在保存到本机待整理队列…'
+    ? '正在直接写入 Obsidian…'
     : dashboardStickyOrganizeBusy
       ? '正在整理未处理灵感…'
-      : organizing?.previews?.length
-        ? `已生成 ${organizing.previews.length} 份每日整理，等待确认写入`
+      : organizing
+        ? '正在提交每日整理…'
         : pendingEntries.length
           ? isTauriRuntime && targetInfo.vault
-            ? `${pendingEntries.length} 条未整理灵感将写入 ${targetInfo.label}`
-            : `${pendingEntries.length} 条未整理灵感已保存在本机`
-          : '写下内容后，直接保存到本机待整理队列';
+            ? `${pendingEntries.length} 条未整理灵感已写入 ${targetInfo.label}`
+            : `${pendingEntries.length} 条未整理灵感已保存在当前会话`
+          : '写下内容后，直接保存到 Obsidian';
   save.disabled = dashboardStickySaveBusy || dashboardStickyOrganizeBusy;
   save.setAttribute('aria-busy', String(dashboardStickySaveBusy));
   if (organize) {
-    organize.disabled = dashboardStickyOrganizeBusy || Boolean(organizing) || !pendingEntries.length || !isTauriRuntime || !targetInfo.vault;
+    organize.disabled = dashboardStickyOrganizeBusy || Boolean(organizing) || !isTauriRuntime || !targetInfo.vault;
     organize.setAttribute('aria-busy', String(dashboardStickyOrganizeBusy));
   }
 }
@@ -2701,6 +2890,7 @@ async function saveDashboardStickyNote() {
   }
   if (dashboardStickySaveBusy || dashboardStickyOrganizeBusy) return;
   dashboardStickySaveBusy = true;
+  let committedEntry = null;
   renderDashboardSticky();
   try {
     const now = new Date();
@@ -2713,183 +2903,351 @@ async function saveDashboardStickyNote() {
       organizedAt: null,
       organizedPath: null,
     };
-    workspaceState.dashboardStickyEntries = [...workspaceState.dashboardStickyEntries, entry];
+    if (!isTauriRuntime || !localWorkspaceReady) throw new Error('便签需要在云枢桌面应用中直接写入 Obsidian');
+    const target = resolveAutomaticCaptureVault('personal');
+    // The UUID-based path is collision-resistant and the native expectedAbsent
+    // check is authoritative, so saving a note does not need to scan the whole
+    // Vault before creating its file.
+    const persisted = await persistDashboardStickyEntryToVault(entry, target);
+    committedEntry = {
+      ...entry,
+      persistedPath: persisted.relativePath,
+      vaultId: target.vault.id,
+      vaultName: target.vault.name,
+    };
+    workspaceState.dashboardStickyEntries = [...workspaceState.dashboardStickyEntries, committedEntry];
     workspaceState.dashboardStickyDraft = '';
     if (input) input.value = '';
     const saved = await persistWorkspaceState();
-    if (!saved?.ok) throw new Error(saved?.error || '本机待整理队列无法保存');
-    showToast('灵感已保存，等待按天整理');
+    if (!saved?.ok) throw new Error(saved?.error || '便签状态无法保存');
+    showToast(`灵感已直接写入 ${target.vault.name}，等待按天整理`);
   } catch (error) {
-    const entries = workspaceState.dashboardStickyEntries || [];
-    const failedEntry = entries.at(-1);
-    if (failedEntry?.content === raw && failedEntry.status === 'pending') workspaceState.dashboardStickyEntries = entries.slice(0, -1);
-    workspaceState.dashboardStickyDraft = raw;
-    if (input) input.value = raw;
-    showToast(`便签无法保存：${error}`, 'error');
+    if (!committedEntry) {
+      const entries = workspaceState.dashboardStickyEntries || [];
+      const failedEntry = entries.at(-1);
+      if (failedEntry?.content === raw && failedEntry.status === 'pending') workspaceState.dashboardStickyEntries = entries.slice(0, -1);
+      workspaceState.dashboardStickyDraft = raw;
+      if (input) input.value = raw;
+      showToast(`便签无法保存：${error}`, 'error');
+    } else {
+      // The Markdown file is already durable. Keep the local entry for later
+      // reconciliation instead of creating a duplicate on the next save.
+      showToast(`便签已写入 Obsidian，但状态同步失败：${error}`, 'error');
+    }
   } finally {
     dashboardStickySaveBusy = false;
     renderDashboardSticky();
   }
 }
 
-async function organizeDashboardStickyNotes() {
-  if (dashboardStickyOrganizeBusy || workspaceState.pendingStickyOrganizeWrite) return;
-  let pendingEntries = dashboardStickyPendingEntries();
-  if (!pendingEntries.length) {
-    showToast('没有需要整理的灵感', 'error');
-    return;
+async function organizeDashboardStickyNotes(options = {}) {
+  const internalRun = Boolean(options.internalRun);
+  const requestedVaultId = String(options.vaultId || '').trim();
+  const scopedEntryKeys = options.entryKeys instanceof Set
+    ? options.entryKeys
+    : options.entryIds instanceof Set
+      ? options.entryIds
+      : null;
+  if (dashboardStickyOrganizeBusy && !internalRun) return;
+  // Finish an interrupted pre-change approval state automatically so an old
+  // session cannot leave the one-click organizer blocked behind a modal.
+  if (workspaceState.pendingStickyOrganizeWrite) {
+    const approvalId = workspaceState.pendingStickyOrganizeWrite.previews?.[0]?.approvalId;
+    try {
+      if (approvalId) await resolveApproval('approve', approvalId);
+    } catch (error) {
+      showToast(`无法恢复上次灵感整理写入：${error}`, 'error');
+      return;
+    }
+    if (workspaceState.pendingStickyOrganizeWrite) return;
   }
   if (!isTauriRuntime || !localWorkspaceReady) {
     showToast('按日整理需要在云枢桌面应用中运行', 'error');
     return;
   }
+  await syncDashboardStickyEntriesFromVault();
 
-  dashboardStickyOrganizeBusy = true;
-  let analysisReceipt = null;
-  let writeTask = null;
-  const preparedWrites = [];
-  renderDashboardSticky();
+  const ownsBusyState = !dashboardStickyOrganizeBusy;
+  if (ownsBusyState) {
+    dashboardStickyOrganizeBusy = true;
+    renderDashboardSticky();
+  }
   try {
-    const target = resolveAutomaticCaptureVault('personal');
-    const existingNotes = await listAllVaultNotes(target.vault.id);
+    // A legacy local queue may contain notes created while different Vaults
+    // were active. Process each Vault independently so its raw notes and its
+    // daily file can never be copied into another Vault.
+    if (!internalRun && !requestedVaultId && !scopedEntryKeys) {
+      const pending = dashboardStickyPendingEntries();
+      const fallbackTarget = resolveAutomaticCaptureVault('personal');
+      const groups = new Map();
+      pending.forEach((entry) => {
+        const vaultId = dashboardStickyEntryVaultId(entry, fallbackTarget.vault.id);
+        if (!groups.has(vaultId)) groups.set(vaultId, []);
+        groups.get(vaultId).push(entry);
+      });
+      if (groups.size > 1) {
+        for (const [vaultId, entries] of groups) {
+          await organizeDashboardStickyNotes({
+            internalRun: true,
+            vaultId,
+            entryKeys: new Set(entries.map((entry) => dashboardStickyEntryKey(entry, vaultId))),
+          });
+        }
+        return;
+      }
+    }
+
+    const preferredVaultId = requestedVaultId || dashboardStickyPendingEntries().find((entry) => entry.vaultId)?.vaultId || '';
+    const target = resolveAutomaticCaptureVault('personal', preferredVaultId);
+    if (requestedVaultId && requestedVaultId !== target.vault.id) {
+      throw new Error(`便签所属知识库“${requestedVaultId}”当前不可写，已保留原始便签，请连接该知识库后重试`);
+    }
+    const legacyVaultId = resolveAutomaticCaptureVault('personal').vault.id;
+    const [rawNotes, dailyNotes] = await Promise.all([
+      listAllVaultNotes(target.vault.id, { folderPrefix: '随想/未整理便签' }),
+      listAllVaultNotes(target.vault.id, { folderPrefix: '随想/每日整理' }),
+    ]);
+    const existingNotes = [...rawNotes, ...dailyNotes];
     const existingByPath = new Map(existingNotes.map((note) => [note.relativePath, note]));
+
+    // Reconcile the persisted local queue with raw notes in Obsidian. This
+    // restores notes created on another run and migrates legacy local-only
+    // entries before any model call is made.
+    const merged = new Map(normalizeDashboardStickyEntries(workspaceState.dashboardStickyEntries)
+      .map((entry) => [dashboardStickyEntryKey(entry, legacyVaultId), entry]));
+    existingNotes
+      .map(dashboardStickyEntryFromVaultNote)
+      .filter(Boolean)
+      .forEach((entry) => {
+        const current = merged.get(dashboardStickyEntryKey(entry));
+        if (!current || current.status !== 'organized') {
+          merged.set(dashboardStickyEntryKey(entry), {
+            ...(current || {}),
+            ...entry,
+            status: current?.status === 'organized' ? 'organized' : entry.status,
+          });
+        }
+      });
+    let stateChanged = false;
+    for (const entry of [...merged.values()].filter((item) => (
+      item.status === 'pending'
+      && dashboardStickyEntryVaultId(item, legacyVaultId) === target.vault.id
+      && (!scopedEntryKeys || scopedEntryKeys.has(dashboardStickyEntryKey(item, legacyVaultId)))
+    ))) {
+      const relativePath = entry.persistedPath || dashboardStickyRawRelativePath(entry);
+      if (!existingByPath.has(relativePath)) {
+        const persisted = await persistDashboardStickyEntryToVault(entry, target, existingNotes);
+        entry.persistedPath = persisted.relativePath;
+        entry.vaultId = target.vault.id;
+        entry.vaultName = target.vault.name;
+        const rawContent = dashboardStickyRawMarkdown(entry);
+        const syntheticNote = {
+          vaultId: target.vault.id,
+          vaultName: target.vault.name,
+          relativePath: persisted.relativePath,
+          content: rawContent,
+          contentHash: await sha256Hex(new TextEncoder().encode(rawContent)),
+        };
+        existingNotes.push(syntheticNote);
+        existingByPath.set(persisted.relativePath, syntheticNote);
+        stateChanged = true;
+      } else if (!entry.persistedPath) {
+        entry.persistedPath = relativePath;
+        entry.vaultId = target.vault.id;
+        entry.vaultName = target.vault.name;
+        stateChanged = true;
+      }
+      merged.set(dashboardStickyEntryKey(entry, legacyVaultId), entry);
+    }
+    if (stateChanged) {
+      workspaceState.dashboardStickyEntries = normalizeDashboardStickyEntries([...merged.values()]);
+      const saved = await persistWorkspaceState();
+      if (!saved?.ok) throw new Error(saved?.error || '迁移后的便签状态无法保存');
+    }
+
+    let pendingEntries = [...merged.values()]
+      .map((entry) => normalizeDashboardStickyEntries([entry])[0])
+      .filter((entry) => entry?.status === 'pending'
+        && dashboardStickyEntryVaultId(entry, legacyVaultId) === target.vault.id
+        && (!scopedEntryKeys || scopedEntryKeys.has(dashboardStickyEntryKey(entry, legacyVaultId))));
     const recoveredEntries = new Map();
     pendingEntries.forEach((entry) => {
       const relativePath = `随想/每日整理/${entry.localDate}.md`;
       const existing = existingByPath.get(relativePath);
       if (existing && String(existing.content || '').includes(dashboardStickyEntryMarker(entry.id))) {
-        recoveredEntries.set(entry.id, relativePath);
+        recoveredEntries.set(dashboardStickyEntryKey(entry, legacyVaultId), relativePath);
       }
     });
     if (recoveredEntries.size) {
       const recoveredAt = new Date().toISOString();
-      workspaceState.dashboardStickyEntries = workspaceState.dashboardStickyEntries.map((entry) => recoveredEntries.has(entry.id)
-        ? { ...entry, status: 'organized', organizedAt: recoveredAt, organizedPath: recoveredEntries.get(entry.id) }
-        : entry);
-      await persistWorkspaceState();
-      pendingEntries = pendingEntries.filter((entry) => !recoveredEntries.has(entry.id));
+      workspaceState.dashboardStickyEntries = workspaceState.dashboardStickyEntries.map((entry) => {
+        const key = dashboardStickyEntryKey(entry, legacyVaultId);
+        return recoveredEntries.has(key)
+          ? { ...entry, status: 'organized', organizedAt: recoveredAt, organizedPath: recoveredEntries.get(key) }
+          : entry;
+      });
+      const saved = await persistWorkspaceState();
+      if (!saved?.ok) throw new Error(saved?.error || '恢复后的便签状态无法保存');
+      pendingEntries = pendingEntries.filter((entry) => !recoveredEntries.has(dashboardStickyEntryKey(entry, legacyVaultId)));
     }
     if (!pendingEntries.length) {
-      showToast(`已从每日文件恢复 ${recoveredEntries.size} 条灵感的整理状态，没有需要重复处理的内容`);
+      showToast(recoveredEntries.size
+        ? `已从每日文件恢复 ${recoveredEntries.size} 条灵感的整理状态，没有需要重复处理的内容`
+        : '没有需要整理的灵感');
       return;
     }
-    const dayGroups = dashboardStickyEntriesByDate(pendingEntries);
-    const analyzedGroups = [];
-    for (const group of dayGroups) {
-      const analysis = await analyzeContentWithModel(
-        dashboardStickyOrganizationMaterial(group.date, group.entries),
-        [],
-        `灵感按日整理 ${group.date}`,
-        [],
-        false,
-      );
-      analyzedGroups.push({ ...group, analysis });
-    }
 
-    const paths = analyzedGroups.map((group) => `随想/每日整理/${group.date}.md`);
-    const writeSpecs = [];
-    for (const group of analyzedGroups) {
+    const dayGroups = dashboardStickyEntriesByDate(pendingEntries);
+    const failures = [];
+    let completedFiles = 0;
+    for (const group of dayGroups) {
+      let analysisReceipt = null;
+      let writeTask = null;
+      const previews = [];
+      let committed = null;
+      let completionCounted = false;
       const relativePath = `随想/每日整理/${group.date}.md`;
       const existing = existingByPath.get(relativePath);
-      if (existing && !existing.contentHash) throw new Error(`无法取得“${relativePath}”的原始文件哈希，请刷新知识库后重试`);
-      const section = dashboardStickyDailySection(group.entries, group.analysis);
-      const content = dashboardStickyDailyMarkdown({
-        date: group.date,
-        entries: group.entries,
-        section,
-        existingContent: existing?.content || '',
-      });
-      writeSpecs.push({
-        relativePath,
-        existing,
-        content,
-        section,
-        nextHash: await sha256Hex(new TextEncoder().encode(content)),
-        date: group.date,
-        entryIds: group.entries.map((entry) => entry.id),
-      });
+      try {
+        if (existing && !existing.contentHash) throw new Error(`无法取得“${relativePath}”的原始文件哈希，请刷新知识库后重试`);
+        // One logical model analysis is made for each date. The returned
+        // receipt is bound directly to that date file plus its raw-note
+        // updates in one atomic manifest;
+        // there is deliberately no second model request for authorization.
+        const analysis = await analyzeContentWithModel(
+          dashboardStickyOrganizationMaterial(group.date, group.entries),
+          [],
+          `灵感按日整理 ${group.date}`,
+          [],
+          true,
+        );
+        analysisReceipt = analysis.analysisReceipt || analysis.analysis_receipt || null;
+        if (!analysisReceipt) throw new Error(`灵感整理 ${group.date} 没有返回写入凭证`);
+        const section = dashboardStickyDailySection(group.entries, analysis);
+        const content = dashboardStickyDailyMarkdown({
+          date: group.date,
+          entries: group.entries,
+          section,
+          existingContent: existing?.content || '',
+        });
+        const nextHash = await sha256Hex(new TextEncoder().encode(content));
+        const committedAt = new Date().toISOString();
+        const rawWrites = [];
+        for (const entry of group.entries) {
+          const rawRelativePath = entry.persistedPath || dashboardStickyRawRelativePath(entry);
+          const rawExisting = existingByPath.get(rawRelativePath);
+          if (!rawExisting?.contentHash) throw new Error(`无法取得“${rawRelativePath}”的原始文件哈希，请刷新知识库后重试`);
+          const rawContent = dashboardStickyRawMarkdown({
+            ...entry,
+            status: 'organized',
+            organizedAt: committedAt,
+            organizedPath: relativePath,
+          });
+          rawWrites.push({
+            entry,
+            existing: rawExisting,
+            relativePath: rawRelativePath,
+            content: rawContent,
+            nextHash: await sha256Hex(new TextEncoder().encode(rawContent)),
+          });
+        }
+        const manifestEntries = [{
+          vaultId: target.vault.id,
+          relativePath,
+          expectedHash: existing?.contentHash || null,
+          expectedAbsent: !existing,
+          nextContentHash: nextHash,
+        }, ...rawWrites.map((rawWrite) => ({
+          vaultId: target.vault.id,
+          relativePath: rawWrite.relativePath,
+          expectedHash: rawWrite.existing.contentHash,
+          expectedAbsent: false,
+          nextContentHash: rawWrite.nextHash,
+        }))];
+        const writeManifestDigest = await noteWriteManifestDigest(manifestEntries);
+        await invokeNative('bind_capture_analysis_write_manifest', {
+          analysisReceipt,
+          writeManifestDigest,
+        });
+        writeTask = await ensureNativeVaultWriteTask(null, {
+          title: `按日整理灵感：${group.date}`,
+          vaultId: target.vault.id,
+          vaultIds: [target.vault.id],
+          relativePaths: manifestEntries.map((entry) => entry.relativePath),
+          operation: existing || rawWrites.length ? 'update' : 'create',
+        });
+        const operationContext = nativeOperationContext(writeTask);
+        for (const write of [{
+          relativePath,
+          content,
+          expectedHash: existing?.contentHash || undefined,
+          expectedAbsent: !existing,
+        }, ...rawWrites.map((rawWrite) => ({
+          relativePath: rawWrite.relativePath,
+          content: rawWrite.content,
+          expectedHash: rawWrite.existing.contentHash,
+          expectedAbsent: false,
+        }))]) {
+          previews.push(await invokeNative('prepare_note_write', {
+            vaultId: target.vault.id,
+            ...write,
+            analysisReceipt,
+            writeManifestDigest,
+            operationContext,
+          }));
+        }
+        committed = await invokeNative('commit_capture_batch', {
+          noteApprovalIds: previews.map((preview) => preview.approvalId),
+          assetApprovalIds: [],
+          batchKind: 'maintenance',
+        });
+        await settleAutoManagedWriteTask({ writeTask }, 'succeeded', `灵感已整理到 ${relativePath}`);
+        const committedKeys = new Set(group.entries.map((entry) => dashboardStickyEntryKey(entry, legacyVaultId)));
+        workspaceState.dashboardStickyEntries = workspaceState.dashboardStickyEntries.map((entry) => committedKeys.has(dashboardStickyEntryKey(entry, legacyVaultId))
+          ? { ...entry, status: 'organized', organizedAt: committedAt, organizedPath: relativePath }
+          : entry);
+        const saved = await persistWorkspaceState();
+        if (!saved?.ok) throw new Error(saved?.error || '整理状态无法保存');
+        existingByPath.set(relativePath, {
+          ...(existing || {}),
+          vaultId: target.vault.id,
+          vaultName: target.vault.name,
+          relativePath,
+          content,
+          contentHash: nextHash,
+        });
+        rawWrites.forEach((rawWrite) => {
+          existingByPath.set(rawWrite.relativePath, {
+            ...rawWrite.existing,
+            content: rawWrite.content,
+            contentHash: rawWrite.nextHash,
+          });
+        });
+        completedFiles += 1;
+        completionCounted = true;
+      } catch (error) {
+        if (committed) {
+          if (!completionCounted) completedFiles += 1;
+          await settleAutoManagedWriteTask({ writeTask }, 'succeeded', `灵感已写入 ${relativePath}，但界面状态同步失败：${error}`);
+          failures.push(`${group.date}：文件已写入，但状态同步失败：${error}`);
+          continue;
+        }
+        await Promise.allSettled(previews.map((preview) => invokeNative('discard_note_write', { approvalId: preview.approvalId })));
+        if (analysisReceipt) await discardUnusedCaptureAnalysisReceipt({ analysisReceipt });
+        await settleAutoManagedWriteTask({ writeTask }, 'failed', `灵感 ${group.date} 整理失败：${error}`);
+        failures.push(`${group.date}：${error}`);
+      }
     }
-    const writeAuthorization = await requireModelAnalysisForWrite(renderPrompt('capture.sticky-note-write-manifest', {
-      ENTRY_COUNT: pendingEntries.length,
-      FILE_COUNT: writeSpecs.length,
-      FILES: writeSpecs.map((spec, index) => renderPrompt('capture.sticky-note-write-file', {
-        FILE_NUMBER: index + 1,
-        FILE_COUNT: writeSpecs.length,
-        RELATIVE_PATH: spec.relativePath,
-        PREVIOUS_HASH: spec.existing?.contentHash || 'ABSENT',
-        NEXT_HASH: spec.nextHash,
-        NEW_SECTION: spec.section,
-      })).join('\n\n'),
-    }), [], '灵感按日整理完整写入清单');
-    analysisReceipt = writeAuthorization.analysisReceipt || writeAuthorization.analysis_receipt || null;
-    if (!analysisReceipt) throw new Error('灵感整理没有返回整批写入凭据');
-    const writeManifestDigest = await noteWriteManifestDigest(writeSpecs.map((spec) => ({
-      vaultId: target.vault.id,
-      relativePath: spec.relativePath,
-      expectedHash: spec.existing?.contentHash || null,
-      expectedAbsent: !spec.existing,
-      nextContentHash: spec.nextHash,
-    })));
-    await invokeNative('bind_capture_analysis_write_manifest', {
-      analysisReceipt,
-      writeManifestDigest,
-    });
-    writeTask = await ensureNativeVaultWriteTask(null, {
-      title: `按日整理 ${pendingEntries.length} 条灵感`,
-      vaultId: target.vault.id,
-      vaultIds: [target.vault.id],
-      relativePaths: paths,
-      operation: 'update',
-    });
-
-    for (const spec of writeSpecs) {
-      const preview = await invokeNative('prepare_note_write', {
-        vaultId: target.vault.id,
-        relativePath: spec.relativePath,
-        content: spec.content,
-        analysisReceipt,
-        expectedHash: spec.existing?.contentHash || undefined,
-        expectedAbsent: !spec.existing,
-        writeManifestDigest,
-        operationContext: nativeOperationContext(writeTask),
-      });
-      preparedWrites.push({
-        ...preview,
-        date: spec.date,
-        entryIds: spec.entryIds,
-      });
+    await refreshVaultsAfterMutation();
+    if (failures.length) {
+      showToast(`已完成 ${completedFiles} 个每日文件；${failures.join('；')}`, 'error');
+    } else {
+      showToast(`已按天整理 ${completedFiles} 个每日灵感文件，已处理内容不会再次送入模型`);
     }
-
-    workspaceState.pendingStickyOrganizeWrite = {
-      vaultId: target.vault.id,
-      vaultName: target.vault.name,
-      analysisReceipt,
-      writeManifestDigest,
-      previews: preparedWrites,
-      writeTask: writeTask.autoManagedWrite ? writeTask : null,
-    };
-    const firstPath = preparedWrites[0]?.relativePath || paths[0];
-    approvalModal.querySelector('.modal-header strong').textContent = '确认按日整理灵感';
-    approvalModal.querySelector('.modal-header small').textContent = `${target.vault.name} · ${preparedWrites.length} 份每日整理`;
-    approvalModal.querySelector('.modal-intro').textContent = `AI 仅分析了本次 ${pendingEntries.length} 条未整理灵感。确认后会写入 ${preparedWrites.length} 个按日归档文件；已整理灵感不会再次送入模型。`;
-    const impacts = approvalModal.querySelectorAll('.change-impact > div span');
-    impacts[0].textContent = `更新 ${preparedWrites.length} 个每日灵感 Markdown 文件`;
-    impacts[1].textContent = `${target.vault.name} · ${firstPath}`;
-    impacts[2].textContent = preparedWrites.length > 1 ? '整批原子提交并创建写入前检查点' : '原子提交并创建写入前检查点';
-    setApprovalDiffPreview({
-      relativePath: `${preparedWrites.length} 个每日整理文件`,
-      diffMode: preparedWrites.every((preview) => preview.diffMode === 'full') ? 'full' : 'summary',
-      diff: preparedWrites.map((preview) => `--- ${preview.relativePath} ---\n${preview.diff || '没有返回差异正文'}`).join('\n\n'),
-    });
-    approvalModal.classList.add('open');
-    showToast('按日整理已准备，请确认写入');
   } catch (error) {
-    await Promise.allSettled(preparedWrites.map((preview) => invokeNative('discard_note_write', { approvalId: preview.approvalId })));
-    if (analysisReceipt) await discardUnusedCaptureAnalysisReceipt({ analysisReceipt });
-    await settleAutoManagedWriteTask({ writeTask }, 'failed', `灵感按日整理准备失败：${error}`);
     showToast(`灵感无法整理：${error}`, 'error');
   } finally {
-    dashboardStickyOrganizeBusy = false;
+    if (ownsBusyState) dashboardStickyOrganizeBusy = false;
     renderDashboardSticky();
   }
 }
@@ -3801,9 +4159,11 @@ async function persistPendingCaptureState(entry, state, failureReason = '') {
   entry.contentRecord = { ...record, state: receipt.state || state };
 }
 
-async function resolveApproval(decision) {
+async function resolveApproval(decision, requestedApprovalId = '') {
   const pendingCaptureWrites = workspaceState.pendingCaptureWrites;
-  if (pendingCaptureWrites) {
+  const matchesPending = (pending, ids = []) => !requestedApprovalId
+    || ids.includes(requestedApprovalId);
+  if (pendingCaptureWrites && matchesPending(pendingCaptureWrites, (pendingCaptureWrites.previews || []).map((preview) => preview.approvalId))) {
     const captureEntries = pendingCaptureEntries(pendingCaptureWrites);
     const captureWriteContents = pendingCaptureWrites.rawNoteIncluded
       ? '忠实原文、原始附件和 Agent 分析稿'
@@ -3944,7 +4304,7 @@ async function resolveApproval(decision) {
     return;
   }
   const pendingStickyOrganizeWrite = workspaceState.pendingStickyOrganizeWrite;
-  if (pendingStickyOrganizeWrite) {
+  if (pendingStickyOrganizeWrite && matchesPending(pendingStickyOrganizeWrite, (pendingStickyOrganizeWrite.previews || []).map((preview) => preview.approvalId))) {
     approvalModal.classList.remove('open');
     let committedStickyResults = null;
     try {
@@ -4001,7 +4361,7 @@ async function resolveApproval(decision) {
     return;
   }
   const pendingReportWrite = workspaceState.pendingReportWrite;
-  if (pendingReportWrite) {
+  if (pendingReportWrite && matchesPending(pendingReportWrite, [pendingReportWrite.approvalId])) {
     approvalModal.classList.remove('open');
     let committedReportResult = null;
     const reportTask = (workspaceState.tasks || []).find((task) => task.id === pendingReportWrite.taskId);
@@ -4074,7 +4434,7 @@ async function resolveApproval(decision) {
     return;
   }
   const pendingCreationWrite = workspaceState.pendingCreationWrite;
-  if (pendingCreationWrite) {
+  if (pendingCreationWrite && matchesPending(pendingCreationWrite, [pendingCreationWrite.approvalId])) {
     approvalModal.classList.remove('open');
     let writeCommitted = false;
     try {
@@ -4083,6 +4443,7 @@ async function resolveApproval(decision) {
           invokeNative('discard_note_write', { approvalId: pendingCreationWrite.approvalId }),
           ...(pendingCreationWrite.assetPreviews || []).map((preview) => invokeNative('discard_asset_write', { approvalId: preview.approvalId })),
         ]);
+        await discardUnusedCaptureAnalysisReceipt(pendingCreationWrite);
         await settleAutoManagedWriteTask(pendingCreationWrite, 'cancelled', '用户拒绝创作写入');
         document.querySelector('.editor-toolbar span').textContent = '写入已拒绝 · 本地草稿仍保留';
         await finalizeSecretaryWriteTask(pendingCreationWrite.taskId, 'cancelled', '已拒绝创作入库，本地草稿仍保留，Obsidian 未发生变更。');
@@ -4143,6 +4504,7 @@ async function resolveApproval(decision) {
           invokeNative('discard_note_write', { approvalId: pendingCreationWrite.approvalId }),
           ...(pendingCreationWrite.assetPreviews || []).map((preview) => invokeNative('discard_asset_write', { approvalId: preview.approvalId })),
         ]);
+        await discardUnusedCaptureAnalysisReceipt(pendingCreationWrite);
         await settleAutoManagedWriteTask(pendingCreationWrite, 'failed', `创作写入失败：${error}`);
         await finalizeSecretaryWriteTask(pendingCreationWrite.taskId, 'failed', `写入操作失败：${error}`);
         showToast(`写入操作失败：${error}`, 'error');
@@ -4159,7 +4521,7 @@ async function resolveApproval(decision) {
     return;
   }
   const pendingMaintenanceWrite = workspaceState.pendingMaintenanceWrite;
-  if (pendingMaintenanceWrite) {
+  if (pendingMaintenanceWrite && matchesPending(pendingMaintenanceWrite, [pendingMaintenanceWrite.approvalId])) {
     approvalModal.classList.remove('open');
     let committedMaintenanceResult = null;
     try {
@@ -4197,7 +4559,7 @@ async function resolveApproval(decision) {
     return;
   }
   const pendingInboxWrite = workspaceState.pendingInboxWrite;
-  if (pendingInboxWrite) {
+  if (pendingInboxWrite && matchesPending(pendingInboxWrite, [pendingInboxWrite.approvalId, ...(pendingInboxWrite.previews || []).map((preview) => preview.approvalId)])) {
     approvalModal.classList.remove('open');
     let committedInboxResults = null;
     try {
@@ -4321,6 +4683,7 @@ async function resolveApproval(decision) {
     }
     return;
   }
+  if (requestedApprovalId) return;
   approvalModal.classList.remove('open');
   const pending = workspaceState.pendingSecretaryApproval;
   const conversation = pending ? workspaceState.conversations.find((item) => item.id === pending.conversationId) : undefined;
@@ -5803,6 +6166,10 @@ function resolveCaptureSpeechLocale(taskContext = null) {
 }
 
 async function startCaptureRun(button, authorizationId = '', taskContext = null) {
+  if (activeCaptureTaskId) {
+    showToast('当前已有采集任务正在运行，请等待完成或先取消', 'error');
+    return;
+  }
   const input = document.getElementById('source-url');
   const inputValue = input.value.trim();
   if (!inputValue && pendingCaptureFiles.length === 0) {
@@ -5883,25 +6250,43 @@ async function startCaptureRun(button, authorizationId = '', taskContext = null)
     const embeddedLinks = normalizedCapturedEmbeddedLinks(result);
     const authRequired = Boolean(result.authRequired ?? result.auth_required);
     if (authRequired) {
-      setCaptureStage(1, 'active', '平台要求用户完成官方登录或人工验证');
-      setCaptureStage(2, 'pending', '等待一次性合规授权');
-      badge.textContent = '等待授权';
-      badge.className = 'badge warning';
-      label.textContent = '来源需要合规授权后继续';
-      percent.textContent = '20%';
-      setProgressScale(meter, 20);
-      preview.querySelector('.badge').textContent = '需要授权';
-      preview.querySelector('.badge').className = 'badge warning';
-      workspaceState.lastCaptureRequest = { id: taskContext?.id || taskId, source: inputValue, sourceType, requestedAt: new Date().toISOString(), state: 'waiting_authorization' };
+      // A capture-page run is a background operation. Never turn a blocked
+      // public fetch into an authorization/browser handoff: the source may
+      // contain private credentials and the capture page must remain in place.
+      const reason = [...(Array.isArray(result.errors) ? result.errors : []), ...(Array.isArray(result.warnings) ? result.warnings : [])]
+        .map(String)
+        .find(Boolean)
+        || '公开来源需要登录或平台验证';
+      const failureReason = `${reason}；云枢未打开授权页面，也未写入任何知识库文件`;
+      setCaptureStage(1, 'failed', failureReason);
+      setCaptureStage(2, 'pending', '未进入模型分析');
+      setCaptureStage(3, 'pending');
+      setCaptureStage(4, 'pending');
+      badge.textContent = '读取失败';
+      badge.className = 'badge danger';
+      label.textContent = '公开来源无法后台读取';
+      percent.textContent = '0%';
+      setProgressScale(meter, 0);
+      preview.querySelector('.badge').textContent = '无法读取';
+      preview.querySelector('.badge').className = 'badge danger';
+      preview.querySelector('.preview-meta').innerHTML = '<span>未读取正文</span><span>未进行模型分析</span><span>未写入 Obsidian</span>';
+      workspaceState.lastCaptureRequest = {
+        id: taskContext?.id || taskId,
+        source: inputValue,
+        sourceType,
+        requestedAt: new Date().toISOString(),
+        state: 'failed',
+        error: failureReason,
+      };
       if (taskContext?.id) {
-        recordTaskCheckpoint(taskContext, 'capture-authorization', 'pending', '等待用户完成平台官方登录或人工验证', { sourceType });
+        recordTaskCheckpoint(taskContext, 'capture-fetch-failed', 'failed', failureReason, { sourceType });
+        updateTaskExecution(taskContext, 'failed', failureReason, 0);
         syncSecretaryTask(taskContext);
       }
       syncLastCaptureHistory(taskContext?.id || taskId);
-      persistWorkspaceState();
-      addAuditEntry(`来源 ${sourceName} 要求官方登录或人工验证`, '等待授权', 'warning');
-      showToast('请完成平台官方登录和验证，再创建一次性授权', 'error');
-      openCaptureAuthorizationDialog(true, taskContext);
+      await persistWorkspaceState();
+      addAuditEntry(`来源 ${sourceName} 无法后台读取`, '未写入', 'danger');
+      showToast(failureReason, 'error');
       return;
     }
     const folderRoot = sourceType === 'folder'
@@ -6293,7 +6678,7 @@ function renderCaptureHistory() {
     row.dataset.historyId = entry.id;
     row.dataset.historyDate = isoLocalDate(date);
     row.dataset.historyStatus = status;
-    row.innerHTML = `<div class="timeline-marker ${status}"><i data-lucide="${status === 'success' ? 'check' : status === 'failed' ? 'x' : status === 'running' ? 'loader-circle' : 'triangle-alert'}"></i></div><div class="timeline-content"><div class="timeline-head"><div><span class="eyebrow">${escapeHtml(entry.sourceType || '来源')}</span><h3>${escapeHtml(entry.title)}</h3></div><time datetime="${escapeHtml(entry.updatedAt || entry.requestedAt)}">${escapeHtml(date.toLocaleString('zh-CN'))}</time></div><p>${escapeHtml(entry.error || (entry.paths.length ? `已处理 ${entry.paths.length} 个本地文件` : '尚未生成文件结果'))}</p><div class="timeline-meta"><span>${escapeHtml(entry.source || '本地来源')}</span><b class="badge ${status === 'success' ? 'success' : status === 'failed' ? 'danger' : status === 'running' ? 'info' : 'warning'}">${label}</b></div><div class="row-actions"><button class="button secondary small" data-capture-history-retry="${escapeHtml(entry.id)}" ${entry.sourceType === 'file' || entry.sourceType === 'folder' || !entry.source ? 'disabled' : ''}><i data-lucide="message-square"></i>让AI助手重试</button><button class="text-button" data-capture-history-open="${escapeHtml(entry.id)}">查看结果</button></div></div>`;
+    row.innerHTML = `<div class="timeline-marker ${status}"><i data-lucide="${status === 'success' ? 'check' : status === 'failed' ? 'x' : status === 'running' ? 'loader-circle' : 'triangle-alert'}"></i></div><div class="timeline-content"><div class="timeline-head"><div><span class="eyebrow">${escapeHtml(entry.sourceType || '来源')}</span><h3>${escapeHtml(entry.title)}</h3></div><time datetime="${escapeHtml(entry.updatedAt || entry.requestedAt)}">${escapeHtml(date.toLocaleString('zh-CN'))}</time></div><p>${escapeHtml(entry.error || (entry.paths.length ? `已处理 ${entry.paths.length} 个本地文件` : '尚未生成文件结果'))}</p><div class="timeline-meta"><span>${escapeHtml(entry.source || '本地来源')}</span><b class="badge ${status === 'success' ? 'success' : status === 'failed' ? 'danger' : status === 'running' ? 'info' : 'warning'}">${label}</b></div><div class="row-actions"><button class="button secondary small" data-capture-history-retry="${escapeHtml(entry.id)}" ${entry.sourceType === 'file' || entry.sourceType === 'folder' || !entry.source ? 'disabled' : ''}><i data-lucide="rotate-cw"></i>直接重试</button><button class="text-button" data-capture-history-open="${escapeHtml(entry.id)}">查看结果</button></div></div>`;
     list.append(row);
   });
   applyHistoryFilters();
@@ -6327,7 +6712,30 @@ async function retryCaptureHistory(id) {
     showToast('该记录没有可重试的来源', 'error');
     return;
   }
-  handoffToAssistant(renderPrompt('assistant.handoffs.capture-retry', { SOURCE: entry.source }), '已将重试请求交给AI助手');
+  if (!isTauriRuntime || !localWorkspaceReady) {
+    showToast('采集重试需要在云枢桌面应用中执行', 'error');
+    return;
+  }
+  const input = document.getElementById('source-url');
+  const button = document.querySelector('[data-start-capture]');
+  if (!input || !button) {
+    showToast('采集页面尚未完成初始化，请稍后重试', 'error');
+    return;
+  }
+  // History keeps only durable URL sources. Restore the source in the capture
+  // surface and invoke the same background pipeline as a fresh run; no
+  // assistant handoff or second user message is needed.
+  setRoute('capture');
+  activateTab('capture', 'new');
+  input.value = entry.source;
+  pendingCaptureFiles = [];
+  activeCaptureSourceType = captureSourceKind(entry.source);
+  window.requestAnimationFrame(() => {
+    void startCaptureRun(button).catch((error) => {
+      console.error('采集历史重试失败', error);
+      showToast(`采集重试失败：${error}`, 'error');
+    });
+  });
 }
 
 function resolveAutomaticCaptureVault(purpose = 'agent', preferredVaultId = '') {
@@ -6353,10 +6761,14 @@ function resolveAutomaticCaptureVault(purpose = 'agent', preferredVaultId = '') 
   }
 
   const defaultName = purpose === 'personal' ? '个人库' : 'Agent 库';
-  const vault = preferredWritableVault
-    || activeWritableVault
-    || writableVaults.find((item) => item.name === defaultName)
-    || writableVaults[0];
+  const vault = purpose === 'personal'
+    ? preferredWritableVault
+      || writableVaults.find((item) => item.name === defaultName)
+      || writableVaults[0]
+    : preferredWritableVault
+      || activeWritableVault
+      || writableVaults.find((item) => item.name === defaultName)
+      || writableVaults[0];
   if (!vault) throw new Error('没有已连接且设为可读写的 Obsidian 知识库');
   return { vault, inboxOnly: false };
 }
@@ -8151,16 +8563,19 @@ function handleCaptureClick(button, event) {
     return true;
   }
   if (button.matches('[data-start-capture]')) {
-    handoffToAssistant(promptText('assistant.handoffs.capture-new'), '采集任务只能通过AI助手创建');
+    // The capture surface owns this workflow. Keep the user on the page and
+    // run extraction, model analysis, and the atomic Obsidian commit inline.
+    void startCaptureRun(button).catch((error) => {
+      console.error('采集页后台处理失败', error);
+      showToast(`采集处理失败：${error}`, 'error');
+    });
     return true;
   }
   if (button.matches('[data-cancel-capture]')) {
-    const source = workspaceState.lastCaptureRequest?.source || '当前正在运行的采集任务';
-    handoffToAssistant(renderPrompt('assistant.handoffs.capture-cancel', {
-      SOURCE_LABEL: source === '当前正在运行的采集任务'
-        ? source
-        : renderPrompt('assistant.handoffs.capture-source', { SOURCE: source }),
-    }), '已将取消请求交给AI助手');
+    void cancelActiveCapture().catch((error) => {
+      console.error('取消采集失败', error);
+      showToast(`取消采集失败：${error}`, 'error');
+    });
     return true;
   }
   if (button.matches('[data-capture-assistant]')) {
@@ -15156,6 +15571,7 @@ let knowledgeBrowseRequestSequence = 0;
 let knowledgeBrowseCursor = { vaultId: null, relativePath: null };
 let knowledgeBrowseFolder = '';
 let knowledgeBrowseShowFolders = true;
+let knowledgeBrowseVaultId = 'all';
 let knowledgeBrowseLoading = false;
 let knowledgeNotes = [];
 let knowledgeCalendarRequestSequence = 0;
@@ -15376,12 +15792,13 @@ function compactKnowledgeNote(note) {
   };
 }
 
-async function listAllVaultNotes(vaultId = 'all') {
+async function listAllVaultNotes(vaultId = 'all', options = {}) {
   if (!isTauriRuntime || !localWorkspaceReady) return [];
   return readAllVaultNotes(invokeNative, {
     vaultId: vaultId && vaultId !== 'all' ? vaultId : 'all',
     pageSize: 256,
     maxPageBytes: 16 * 1024 * 1024,
+    folderPrefix: options.folderPrefix || null,
   });
 }
 
@@ -15474,7 +15891,7 @@ function renderKnowledgeFolderPanel(records = knowledgeFolderRecords, folder = k
   createIcons({ icons: iconSet, attrs: { 'stroke-width': 1.75 } });
 }
 
-async function loadKnowledgeFolderTree() {
+async function loadKnowledgeFolderTree(vaultId = knowledgeBrowseVaultId) {
   if (!isTauriRuntime || !localWorkspaceReady) {
     setKnowledgeFolderPanelVisible(true);
     const status = document.querySelector('[data-knowledge-folder-status]');
@@ -15486,7 +15903,7 @@ async function loadKnowledgeFolderTree() {
   setKnowledgeFolderPanelVisible(true);
   const status = document.querySelector('[data-knowledge-folder-status]');
   if (status) status.textContent = '正在读取已连接知识库的文件夹…';
-  const activeVaultId = workspaceState.currentVaultId || 'all';
+  const activeVaultId = String(vaultId || 'all');
   const vaults = discoveredVaults
     .filter((vault) => vault.connectionState === 'connected')
     .filter((vault) => activeVaultId === 'all' || vault.id === activeVaultId);
@@ -15563,7 +15980,12 @@ async function loadKnowledgeCalendarNotes() {
   }
 }
 
-async function loadKnowledgeBrowsePage({ reset = false, folder = knowledgeBrowseFolder, showFolders = knowledgeBrowseShowFolders } = {}) {
+async function loadKnowledgeBrowsePage({
+  reset = false,
+  folder = knowledgeBrowseFolder,
+  showFolders = knowledgeBrowseShowFolders,
+  vaultId = reset ? (workspaceState.currentVaultId || 'all') : knowledgeBrowseVaultId,
+} = {}) {
   if (!isTauriRuntime || !localWorkspaceReady) {
     setKnowledgeResultsCopy('输入关键词搜索本机 Obsidian', '桌面应用初始化后可浏览全部文件');
     setKnowledgeFolderPanelVisible(Boolean(showFolders));
@@ -15574,27 +15996,23 @@ async function loadKnowledgeBrowsePage({ reset = false, folder = knowledgeBrowse
     knowledgeBrowseCursor = { vaultId: null, relativePath: null };
     knowledgeBrowseFolder = String(folder || '').replace(/^\/+|\/+$/gu, '');
     knowledgeBrowseShowFolders = Boolean(showFolders);
+    knowledgeBrowseVaultId = String(vaultId || 'all');
     knowledgeNotes = [];
     renderKnowledgeResultRows([], { replace: true });
     setKnowledgeFolderPanelVisible(knowledgeBrowseShowFolders);
     if (knowledgeBrowseShowFolders) {
+      await loadKnowledgeFolderTree(knowledgeBrowseVaultId);
+      if (requestSequence !== knowledgeBrowseRequestSequence) return;
       if (!knowledgeBrowseFolder) {
-        await loadKnowledgeFolderTree();
-        if (!knowledgeBrowseFolder) {
-          updateKnowledgeBrowseFooter({ visible: 0, hasMore: false, loading: false });
-          setKnowledgeResultsCopy('知识库文件夹', '按本机 Obsidian 文件夹浏览');
-          return;
-        }
-      } else if (!knowledgeFolderRecords.length) {
-        await loadKnowledgeFolderTree();
-      } else {
-        renderKnowledgeFolderPanel(knowledgeFolderRecords, knowledgeBrowseFolder);
+        updateKnowledgeBrowseFooter({ visible: 0, hasMore: false, loading: false });
+        setKnowledgeResultsCopy('知识库文件夹', '按本机 Obsidian 文件夹浏览');
+        return;
       }
     }
   }
   knowledgeBrowseLoading = true;
   const currentFolder = knowledgeBrowseFolder;
-  const currentVaultId = workspaceState.currentVaultId === 'all' ? null : workspaceState.currentVaultId;
+  const currentVaultId = knowledgeBrowseVaultId === 'all' ? null : knowledgeBrowseVaultId;
   setKnowledgeResultsCopy(currentFolder ? `${currentFolder} · 本地文件` : '本地全部知识文件', '来自已连接的 Obsidian Vault');
   updateKnowledgeBrowseFooter({ visible: document.querySelectorAll('.results-pane .result-row').length, hasMore: true, loading: true, folder: currentFolder });
   try {
@@ -15604,6 +16022,7 @@ async function loadKnowledgeBrowsePage({ reset = false, folder = knowledgeBrowse
       afterRelativePath: knowledgeBrowseCursor.relativePath,
       limit: 128,
       maxBytes: 8 * 1024 * 1024,
+      folderPrefix: currentFolder || null,
     });
     if (requestSequence !== knowledgeBrowseRequestSequence) return;
     const notes = Array.isArray(page?.notes) ? page.notes : [];
@@ -15684,7 +16103,7 @@ async function updateSearchResults() {
       void loadKnowledgeBrowsePage({ reset: true, folder: '', showFolders: true });
       return;
     }
-    knowledgeBrowseRequestSequence += 1;
+    const requestSequence = ++knowledgeBrowseRequestSequence;
     knowledgeBrowseCursor = { vaultId: null, relativePath: null };
     knowledgeBrowseFolder = '';
     knowledgeBrowseShowFolders = false;
@@ -15698,6 +16117,7 @@ async function updateSearchResults() {
         invokeNative('indexed_search', { query, vaultId: activeVaultId, limit: 100, allowNeuralEmbedding: neuralEmbeddingConsentEnabled() }),
         invokeNative('search_vault_notes', { query, vaultId: activeVaultId, limit: 100 }),
       ]);
+      if (requestSequence !== knowledgeBrowseRequestSequence) return;
       if (indexedOutcome.status === 'rejected' && liveOutcome.status === 'rejected') {
         throw new Error(`本地索引与 Vault 实时搜索均失败：${indexedOutcome.reason}；${liveOutcome.reason}`);
       }
@@ -15709,6 +16129,7 @@ async function updateSearchResults() {
       pane.classList.toggle('empty-filter-state', results.length === 0);
       setSearchSort(activeSearchSort);
     } catch (error) {
+      if (requestSequence !== knowledgeBrowseRequestSequence) return;
       console.error('搜索本机 Obsidian 失败', error);
       pane.querySelector('.results-meta strong').textContent = '搜索失败，请检查本地索引';
       pane.classList.add('empty-filter-state');
@@ -16281,10 +16702,14 @@ function handleSearchClick(button) {
   const folder = button.closest('[data-knowledge-folder]');
   if (folder) {
     const vaultId = knowledgeFolderVaultIdForPath(folder.dataset.knowledgeFolder, folder.dataset.knowledgeFolderVaultId);
-    if (vaultId && vaultId !== 'all' && workspaceState.currentVaultId !== vaultId) selectVault(vaultId);
     const input = document.querySelector('.search-hero input');
     if (input) input.value = '';
-    void loadKnowledgeBrowsePage({ reset: true, folder: folder.dataset.knowledgeFolder || '', showFolders: true });
+    void loadKnowledgeBrowsePage({
+      reset: true,
+      folder: folder.dataset.knowledgeFolder || '',
+      showFolders: true,
+      vaultId,
+    });
     return true;
   }
   const row = button.closest('.result-row');
@@ -21853,13 +22278,55 @@ function editorHtmlToMarkdown(editor, attachmentPaths = new Map()) {
   return editorElementToMarkdown(editor, { attachmentPaths });
 }
 
+function stripLegacyCreationAnalysis(markdown, { legacyAnalysis = false } = {}) {
+  const source = String(markdown || '').replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+  if (!legacyAnalysis) return source;
+  const frontmatter = source.match(/^---\n([\s\S]*?)\n---\s*/u);
+  const hasLegacyMarker = Boolean(frontmatter && /^yunspire_analysis_model\s*:\s*true\s*$/imu.test(frontmatter[1]));
+  // A metadata marker can survive normalization even when the editor export
+  // no longer contains the original YAML frontmatter. In that case the body
+  // is still eligible for legacy section removal.
+  const cleanedFrontmatter = hasLegacyMarker
+    ? frontmatter[1]
+      .split('\n')
+      .filter((line) => !/^yunspire_analysis_model\s*:\s*true\s*$/iu.test(line.trim()))
+      .join('\n')
+      .trim()
+    : '';
+  const bodyLines = (hasLegacyMarker ? source.slice(frontmatter[0].length) : source).split('\n');
+  const analysisStart = bodyLines.findIndex((line) => /^##\s*AI\s*分析\s*$/u.test(line.trim()));
+  if (analysisStart >= 0) {
+    const nextSectionOffset = bodyLines
+      .slice(analysisStart + 1)
+      .findIndex((line) => /^#{1,2}\s+\S/u.test(line.trim()));
+    const analysisEnd = nextSectionOffset < 0
+      ? bodyLines.length
+      : analysisStart + 1 + nextSectionOffset;
+    bodyLines.splice(analysisStart, analysisEnd - analysisStart);
+  }
+  const body = bodyLines.join('\n').trim();
+  const cleaned = [
+    cleanedFrontmatter ? `---\n${cleanedFrontmatter}\n---` : '',
+    body,
+  ].filter(Boolean).join('\n\n');
+  return cleaned ? `${cleaned}\n` : '';
+}
+
+let creationVaultSaveBusy = false;
+
 async function saveCreationToVault(taskContext = null) {
+  if (creationVaultSaveBusy) {
+    showToast('作品正在写入 Obsidian，请勿重复保存');
+    return null;
+  }
+  creationVaultSaveBusy = true;
+  try {
   const title = syncCreationTitleFromEditor();
   const path = currentCreationPath();
   let preparedWrite = null;
   let preparedAssetPreviews = [];
   let stagedNoteAsset = null;
-  let handedOffForApproval = false;
+  let analysisReceipt = null;
   await saveEditorContent();
   if (!isTauriRuntime) {
     showToast('浏览器模式只保存本地草稿，不会写入 Obsidian', 'error');
@@ -21892,12 +22359,35 @@ async function saveCreationToVault(taskContext = null) {
       attachmentPaths.set(attachment.id, relativePath);
       assets.push({ ...attachment, asset: descriptor, durableAsset: descriptor, durableAssetId: descriptor.assetId, relativePath });
     }
-    const content = editorHtmlToMarkdown(document.querySelector('.editor-page'), attachmentPaths);
+    const editor = document.querySelector('.editor-page');
+    const rawContent = editorHtmlToMarkdown(editor, attachmentPaths);
+    const currentCreationDocument = workspaceState.creationDocuments?.[title];
+    const properties = currentCreationDocument?.metadata?.properties || {};
+    const rawFrontmatter = rawContent.match(/^---\n([\s\S]*?)\n---\s*/u);
+    const legacyAnalysis = String(properties.yunspire_analysis_model).toLowerCase() === 'true'
+      || Boolean(rawFrontmatter && /^yunspire_analysis_model\s*:\s*true\s*$/imu.test(rawFrontmatter[1]));
+    const content = stripLegacyCreationAnalysis(rawContent, { legacyAnalysis });
+    if (legacyAnalysis && content !== rawContent) {
+      const analysisHeading = [...editor.querySelectorAll('h2, h3')]
+        .find((heading) => heading.textContent.trim() === 'AI 分析');
+      if (analysisHeading) {
+        const analysisLevel = Number(analysisHeading.tagName.slice(1)) || 2;
+        let current = analysisHeading;
+        while (current) {
+          if (current !== analysisHeading
+            && /^H[1-6]$/u.test(current.tagName || '')
+            && Number(current.tagName.slice(1)) <= analysisLevel) break;
+          const next = current.nextSibling;
+          current.remove();
+          current = next;
+        }
+        editor.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    }
+    if (legacyAnalysis && currentCreationDocument?.metadata?.properties) {
+      delete currentCreationDocument.metadata.properties.yunspire_analysis_model;
+    }
     if (!content.trim()) throw new Error('创作内容为空，无法保存');
-    const analysis = await analyzeCaptureContentWithModel(content, assets, '创作内容与图片');
-    const analysisMarkdown = analysis.analysis_markdown || analysis.analysisMarkdown || analysis.summary;
-    const tags = Array.isArray(analysis.tags) ? analysis.tags.map((tag) => String(tag).trim()).filter(Boolean) : [];
-    const analyzedContent = `---\nyunspire_analysis_model: true\ntags:\n${tags.map((tag) => `  - ${tag.replace(/\n/g, ' ')}`).join('\n') || '  - 创作'}\n---\n\n${content}\n\n## AI 分析\n\n${analysisMarkdown}`;
     const writeTask = await ensureNativeVaultWriteTask(taskContext, {
       title: `创作写入：${title}`,
       vaultId,
@@ -21905,7 +22395,8 @@ async function saveCreationToVault(taskContext = null) {
       operation: 'create',
     });
     const operationContext = nativeOperationContext(writeTask);
-    const preparedNote = await prepareDurableTextNoteWrite(invokeNative, analyzedContent, {
+    analysisReceipt = await invokeNative('issue_direct_write_receipt');
+    const preparedNote = await prepareDurableTextNoteWrite(invokeNative, content, {
       ownerType: 'creation_vault_write',
       ownerId: metadata.documentId,
       role: 'markdown_staging',
@@ -21921,7 +22412,7 @@ async function saveCreationToVault(taskContext = null) {
     }, {
       vaultId,
       relativePath: path,
-      analysisReceipt: analysis.analysisReceipt,
+      analysisReceipt,
       operationContext,
     }, {
       onProgress: ({ percent }) => {
@@ -21942,7 +22433,7 @@ async function saveCreationToVault(taskContext = null) {
           stagedAttachmentId: null,
           durableAssetId: attachment.durableAssetId,
           expectedSha256: attachment.asset.sha256 || null,
-          analysisReceipt: analysis.analysisReceipt,
+          analysisReceipt,
           taskId: operationContext.taskId,
           traceId: operationContext.traceId,
           executionTicket: operationContext.executionTicket,
@@ -21965,37 +22456,29 @@ async function saveCreationToVault(taskContext = null) {
       title,
       vaultId,
       vaultName: vault.name,
-      taskId: taskContext?.id || null,
-      traceId: taskContext?.traceId || null,
+      taskId: taskContext?.id || writeTask.id || null,
+      traceId: taskContext?.traceId || writeTask.traceId || null,
       writeTask: writeTask.autoManagedWrite ? writeTask : null,
       noteDurableAssetId: stagedNoteAsset.assetId,
+      analysisReceipt,
     };
     persistWorkspaceState();
-    approvalModal.querySelector('.modal-header strong').textContent = `确认${write.isNewFile ? '创建' : '更新'}笔记`;
-    approvalModal.querySelector('.modal-header small').textContent = `${vault.name} · ${write.relativePath}`;
-    approvalModal.querySelector('.modal-intro').textContent = `已生成文件级差异。确认后将原子写入笔记${assetPreviews.length ? `和 ${assetPreviews.length} 个图片附件` : ''}，任一失败都会整体回滚。`;
-    approvalModal.querySelectorAll('.merge-review').forEach((item) => { item.hidden = true; });
-    const impacts = approvalModal.querySelectorAll('.change-impact > div span');
-    impacts[0].textContent = `${write.isNewFile ? '新增' : '更新'} 1 篇 Markdown 笔记${assetPreviews.length ? `及 ${assetPreviews.length} 个图片附件` : ''}`;
-    impacts[1].textContent = `${vault.name} · ${write.relativePath}`;
-    impacts[2].textContent = '原子提交并创建检查点';
-    if (!taskContext?.autoExecute) approvalModal.classList.add('open');
-    document.querySelector('.editor-toolbar span').textContent = `等待确认 · ${path}`;
-    showToast('文件级差异已生成，尚未写入 Obsidian');
-    handedOffForApproval = true;
+    await resolveApproval('approve', write.approvalId);
     return write;
   } catch (error) {
-    if (!handedOffForApproval) {
-      await Promise.allSettled([
-        preparedWrite?.approvalId ? invokeNative('discard_note_write', { approvalId: preparedWrite.approvalId }) : Promise.resolve(false),
-        ...preparedAssetPreviews.map((preview) => invokeNative('discard_asset_write', { approvalId: preview.approvalId })),
-      ]);
-      await cleanupCreationNoteStagingAsset({ noteDurableAssetId: stagedNoteAsset?.assetId });
-      if (workspaceState.pendingCreationWrite?.approvalId === preparedWrite?.approvalId) delete workspaceState.pendingCreationWrite;
-    }
+    await Promise.allSettled([
+      preparedWrite?.approvalId ? invokeNative('discard_note_write', { approvalId: preparedWrite.approvalId }) : Promise.resolve(false),
+      ...preparedAssetPreviews.map((preview) => invokeNative('discard_asset_write', { approvalId: preview.approvalId })),
+      analysisReceipt ? invokeNative('discard_capture_analysis_receipt', { analysisReceipt }) : Promise.resolve(false),
+    ]);
+    await cleanupCreationNoteStagingAsset({ noteDurableAssetId: stagedNoteAsset?.assetId });
+    if (workspaceState.pendingCreationWrite?.approvalId === preparedWrite?.approvalId) delete workspaceState.pendingCreationWrite;
     showToast(`无法准备写入：${error}`, 'error');
     if (taskContext) throw error;
     return null;
+  }
+  } finally {
+    creationVaultSaveBusy = false;
   }
 }
 

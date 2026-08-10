@@ -2324,6 +2324,7 @@ pub fn list_vault_notes_page(
     after_relative_path: Option<String>,
     limit: Option<usize>,
     max_bytes: Option<u64>,
+    folder_prefix: Option<String>,
 ) -> Result<VaultNotePage, String> {
     list_vault_notes_page_inner(
         &database,
@@ -2332,6 +2333,7 @@ pub fn list_vault_notes_page(
         after_relative_path,
         limit,
         max_bytes,
+        folder_prefix,
     )
 }
 
@@ -2342,6 +2344,7 @@ fn list_vault_notes_page_inner(
     after_relative_path: Option<String>,
     limit: Option<usize>,
     max_bytes: Option<u64>,
+    folder_prefix: Option<String>,
 ) -> Result<VaultNotePage, String> {
     if after_vault_id.is_some() != after_relative_path.is_some() {
         return Err("分页游标必须同时包含 Vault ID 和相对路径".to_string());
@@ -2351,8 +2354,36 @@ fn list_vault_notes_page_inner(
         .unwrap_or(8 * 1024 * 1024)
         .clamp(64 * 1024, 32 * 1024 * 1024);
     let workspace_scope = database.local_workspace_scope()?;
-    let candidates =
+    let normalized_folder = folder_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            let normalized = value
+                .replace('\\', "/")
+                .trim_matches('/')
+                .nfc()
+                .collect::<String>();
+            let path = Path::new(&normalized);
+            if normalized.is_empty()
+                || path.is_absolute()
+                || path
+                    .components()
+                    .any(|component| !matches!(component, Component::Normal(_)))
+            {
+                return Err("知识库文件夹必须是 Vault 内的安全相对路径".to_string());
+            }
+            Ok(normalized)
+        })
+        .transpose()?;
+    let mut candidates =
         collect_vault_note_candidates(database, &workspace_scope, vault_id.as_deref())?;
+    if let Some(folder) = normalized_folder.as_deref() {
+        let prefix = format!("{folder}/");
+        candidates.retain(|candidate| {
+            candidate.relative_path == folder || candidate.relative_path.starts_with(&prefix)
+        });
+    }
     let cursor = after_vault_id
         .as_deref()
         .zip(after_relative_path.as_deref());
@@ -5018,22 +5049,39 @@ fn commit_capture_batch_inner(
             log::warn!("批次 {batch_id} 已提交，但执行票据终态写入失败：{error}");
         }
     }
-    let mut notes = state
-        .pending_writes
-        .lock()
-        .map_err(|_| "写入审批状态不可用".to_string())?;
-    for approval_id in &note_approval_ids {
-        notes.remove(approval_id);
+    match state.pending_writes.lock() {
+        Ok(mut notes) => {
+            for approval_id in &note_approval_ids {
+                notes.remove(approval_id);
+            }
+        }
+        Err(poisoned) => {
+            log::warn!("批次 {batch_id} 已提交，但写入审批状态锁已中毒；继续清理缓存");
+            let mut notes = poisoned.into_inner();
+            for approval_id in &note_approval_ids {
+                notes.remove(approval_id);
+            }
+        }
     }
-    drop(notes);
-    let mut assets = state
-        .pending_assets
-        .lock()
-        .map_err(|_| "附件审批状态不可用".to_string())?;
-    for approval_id in &asset_approval_ids {
-        if let Some(pending) = assets.remove(approval_id) {
-            if let PendingAssetSource::Staged(path) = pending.source {
-                remove_claimed_capture_attachment(&path);
+    match state.pending_assets.lock() {
+        Ok(mut assets) => {
+            for approval_id in &asset_approval_ids {
+                if let Some(pending) = assets.remove(approval_id) {
+                    if let PendingAssetSource::Staged(path) = pending.source {
+                        remove_claimed_capture_attachment(&path);
+                    }
+                }
+            }
+        }
+        Err(poisoned) => {
+            log::warn!("批次 {batch_id} 已提交，但附件审批状态锁已中毒；继续清理缓存");
+            let mut assets = poisoned.into_inner();
+            for approval_id in &asset_approval_ids {
+                if let Some(pending) = assets.remove(approval_id) {
+                    if let PendingAssetSource::Staged(path) = pending.source {
+                        remove_claimed_capture_attachment(&path);
+                    }
+                }
             }
         }
     }
