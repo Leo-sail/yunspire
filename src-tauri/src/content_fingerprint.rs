@@ -35,12 +35,12 @@ pub enum DuplicateLevel {
 pub struct DuplicateDetectionResult {
     /// 重复级别
     pub level: DuplicateLevel,
-    /// 原笔记路径
-    pub original_note: String,
+    /// 已存在的内容 ID
+    pub existing_content_id: String,
+    /// 已存在内容的标题
+    pub existing_title: String,
     /// 相似度分数 (0.0-1.0)
-    pub similarity: f64,
-    /// 建议操作
-    pub recommendation: String,
+    pub similarity_score: f64,
 }
 
 impl ContentFingerprint {

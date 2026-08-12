@@ -270,6 +270,37 @@ fn capture_content_hash(result: &Value) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
+/// 计算采集内容指纹
+fn compute_capture_fingerprint(
+    extraction: &CaptureExtraction,
+) -> Option<crate::content_fingerprint::ContentFingerprint> {
+    use crate::content_fingerprint::ContentFingerprint;
+
+    let result = extraction.result.as_object()?;
+
+    // 提取标题和内容
+    let title = result
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Untitled")
+        .to_string();
+
+    let content = result.get("markdown").and_then(|v| v.as_str())?;
+
+    // 提取来源信息
+    let url = result
+        .get("source_url")
+        .or_else(|| result.get("url"))
+        .and_then(|v| v.as_str());
+
+    let published_at = result
+        .get("published_at")
+        .or_else(|| result.get("publishedAt"))
+        .and_then(|v| v.as_str());
+
+    Some(ContentFingerprint::new(&title, content, url, published_at))
+}
+
 fn capture_extraction(source_type: String, result: Value) -> CaptureExtraction {
     let content_hash = capture_content_hash(&result);
     CaptureExtraction {
@@ -3028,7 +3059,85 @@ fn extract_capture_source_blocking(job: CaptureExtractionJob) -> Result<CaptureE
 }
 
 /// 解析 CaptureExtraction 为 CaptureResult（包含优雅降级信息）
+#[allow(dead_code)]
 fn parse_capture_extraction(extraction: CaptureExtraction) -> crate::capture_result::CaptureResult {
+    parse_capture_extraction_impl(extraction, None)
+}
+
+/// 带重复检测的采集结果解析
+fn parse_capture_extraction_with_dedup(
+    extraction: CaptureExtraction,
+    database: &RuntimeDatabase,
+    workspace_scope: &str,
+    capture_id: &str,
+) -> crate::capture_result::CaptureResult {
+    // 提取标题（在 extraction 被移动前）
+    let title = extraction
+        .result
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Untitled")
+        .to_string();
+
+    // 计算指纹
+    let fingerprint_opt = compute_capture_fingerprint(&extraction);
+
+    let duplicate_opt = if let Some(ref fingerprint) = fingerprint_opt {
+        if let Ok(connection) = database.connection.lock() {
+            // 检测重复
+            match crate::runtime_db::detect_content_duplicate(
+                &connection,
+                workspace_scope,
+                fingerprint,
+            ) {
+                Ok(duplicate) => duplicate,
+                Err(e) => {
+                    log::warn!("重复检测失败: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // 解析基础结果（移动 extraction）
+    let result = parse_capture_extraction_impl(extraction, duplicate_opt.as_ref());
+
+    // 存储指纹
+    if let Some(fingerprint) = fingerprint_opt {
+        if let Ok(connection) = database.connection.lock() {
+            // 如果不是完全相同的重复，存储新指纹
+            let should_store = duplicate_opt
+                .as_ref()
+                .map(|d| d.level != crate::content_fingerprint::DuplicateLevel::Exact)
+                .unwrap_or(true);
+
+            if should_store {
+                if let Err(e) = crate::runtime_db::store_content_fingerprint(
+                    &connection,
+                    workspace_scope,
+                    capture_id,
+                    "capture",
+                    &fingerprint,
+                    &title,
+                ) {
+                    log::warn!("存储指纹失败: {}", e);
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// 内部实现：解析采集结果（可选重复检测）
+fn parse_capture_extraction_impl(
+    extraction: CaptureExtraction,
+    duplicate: Option<&crate::content_fingerprint::DuplicateDetectionResult>,
+) -> crate::capture_result::CaptureResult {
     use crate::capture_result::*;
 
     let result_obj = extraction.result.as_object();
@@ -3040,7 +3149,7 @@ fn parse_capture_extraction(extraction: CaptureExtraction) -> crate::capture_res
         .map(|arr| !arr.is_empty())
         .unwrap_or(false);
 
-    let warnings: Vec<CaptureWarning> = result_obj
+    let mut warnings: Vec<CaptureWarning> = result_obj
         .and_then(|obj| obj.get("warnings"))
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -3054,6 +3163,27 @@ fn parse_capture_extraction(extraction: CaptureExtraction) -> crate::capture_res
                 .collect()
         })
         .unwrap_or_default();
+
+    // 添加重复检测警告
+    if let Some(dup) = duplicate {
+        let level_text = match dup.level {
+            crate::content_fingerprint::DuplicateLevel::Exact => "完全相同",
+            crate::content_fingerprint::DuplicateLevel::StructuralSimilar => "结构相似",
+            crate::content_fingerprint::DuplicateLevel::SemanticSimilar => "语义相似",
+            crate::content_fingerprint::DuplicateLevel::UpdatedVersion => "更新版本",
+        };
+
+        warnings.push(CaptureWarning {
+            warning_type: "duplicate_content".to_string(),
+            message: format!(
+                "检测到{}的内容：{} (相似度 {:.0}%)",
+                level_text,
+                dup.existing_title,
+                dup.similarity_score * 100.0
+            ),
+            affected_resource: Some(dup.existing_content_id.clone()),
+        });
+    }
 
     // 检查图片相关字段
     let linked_images_total = result_obj
@@ -3209,19 +3339,28 @@ pub async fn extract_capture_source_v2(
     // 调用现有的 v1 函数
     let extraction = extract_capture_source(
         app,
-        database,
+        database.clone(),
         source_type,
         source,
         files,
         authorization_id,
         authorization_state,
-        task_id,
+        task_id.clone(),
         speech_locale,
         task_state,
         upload_state,
     )
     .await?;
 
-    // 解析为 CaptureResult
-    Ok(parse_capture_extraction(extraction))
+    // 生成采集 ID
+    let capture_id = task_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let workspace_scope = database.local_workspace_scope()?;
+
+    // 带重复检测的解析
+    Ok(parse_capture_extraction_with_dedup(
+        extraction,
+        &database,
+        &workspace_scope,
+        &capture_id,
+    ))
 }

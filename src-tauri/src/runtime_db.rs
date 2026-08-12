@@ -12979,6 +12979,34 @@ fn run_migrations(connection: &Connection) -> Result<(), String> {
             )
             .map_err(|error| format!("SQLite migration 42 无法收紧自动对话记忆状态：{error}"))?;
     }
+    if version < 43 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS content_fingerprints (
+                   workspace_scope TEXT NOT NULL,
+                   content_id TEXT NOT NULL,
+                   content_type TEXT NOT NULL,
+                   exact_hash TEXT NOT NULL,
+                   structure_hash TEXT NOT NULL,
+                   simhash INTEGER NOT NULL,
+                   source_fingerprint TEXT,
+                   title TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   PRIMARY KEY (workspace_scope, content_id),
+                   FOREIGN KEY(workspace_scope) REFERENCES local_workspace_scopes(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_fingerprints_exact
+                   ON content_fingerprints(workspace_scope, exact_hash);
+                 CREATE INDEX IF NOT EXISTS idx_fingerprints_structure
+                   ON content_fingerprints(workspace_scope, structure_hash);
+                 CREATE INDEX IF NOT EXISTS idx_fingerprints_simhash
+                   ON content_fingerprints(workspace_scope, simhash);
+                 PRAGMA user_version=43;
+                 COMMIT;",
+            )
+            .map_err(|error| format!("SQLite migration 43 失败：{error}"))?;
+    }
     Ok(())
 }
 
@@ -18592,4 +18620,151 @@ pub async fn indexed_search(
     });
     results.truncate(max_results);
     Ok(results)
+}
+
+/// 检测内容重复
+pub fn detect_content_duplicate(
+    connection: &Connection,
+    workspace_scope: &str,
+    fingerprint: &crate::content_fingerprint::ContentFingerprint,
+) -> Result<Option<crate::content_fingerprint::DuplicateDetectionResult>, String> {
+    use crate::content_fingerprint::{ContentFingerprint, DuplicateDetectionResult, DuplicateLevel};
+
+    // L1: 精确匹配
+    if let Some((existing_id, existing_title)) = connection
+        .query_row(
+            "SELECT content_id, title FROM content_fingerprints
+             WHERE workspace_scope=?1 AND exact_hash=?2
+             LIMIT 1",
+            params![workspace_scope, &fingerprint.exact_hash],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("查询精确匹配失败：{e}"))?
+    {
+        return Ok(Some(DuplicateDetectionResult {
+            level: DuplicateLevel::Exact,
+            existing_content_id: existing_id,
+            existing_title,
+            similarity_score: 1.0,
+        }));
+    }
+
+    // L2: 结构匹配
+    if let Some((existing_id, existing_title)) = connection
+        .query_row(
+            "SELECT content_id, title FROM content_fingerprints
+             WHERE workspace_scope=?1 AND structure_hash=?2
+             LIMIT 1",
+            params![workspace_scope, &fingerprint.structure_hash],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("查询结构匹配失败：{e}"))?
+    {
+        return Ok(Some(DuplicateDetectionResult {
+            level: DuplicateLevel::StructuralSimilar,
+            existing_content_id: existing_id,
+            existing_title,
+            similarity_score: 0.9,
+        }));
+    }
+
+    // L3: SimHash 相似匹配（汉明距离 < 3）
+    let mut stmt = connection
+        .prepare(
+            "SELECT content_id, title, simhash FROM content_fingerprints
+             WHERE workspace_scope=?1
+             LIMIT 1000",
+        )
+        .map_err(|e| format!("准备 SimHash 查询失败：{e}"))?;
+
+    let candidates: Vec<(String, String, u64)> = stmt
+        .query_map(params![workspace_scope], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? as u64,
+            ))
+        })
+        .map_err(|e| format!("查询 SimHash 失败：{e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    for (content_id, title, existing_simhash) in candidates {
+        let distance = ContentFingerprint::hamming_distance(fingerprint.simhash, existing_simhash);
+        if distance < 3 {
+            return Ok(Some(DuplicateDetectionResult {
+                level: DuplicateLevel::SemanticSimilar,
+                existing_content_id: content_id,
+                existing_title: title,
+                similarity_score: 1.0 - (distance as f64 / 64.0),
+            }));
+        }
+    }
+
+    // L4: 来源指纹匹配
+    if let Some(ref source_fp) = fingerprint.source_fingerprint {
+        if let Some((existing_id, existing_title)) = connection
+            .query_row(
+                "SELECT content_id, title FROM content_fingerprints
+                 WHERE workspace_scope=?1 AND source_fingerprint=?2
+                 LIMIT 1",
+                params![workspace_scope, source_fp],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|e| format!("查询来源指纹失败：{e}"))?
+        {
+            return Ok(Some(DuplicateDetectionResult {
+                level: DuplicateLevel::UpdatedVersion,
+                existing_content_id: existing_id,
+                existing_title,
+                similarity_score: 0.8,
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
+/// 存储内容指纹
+pub fn store_content_fingerprint(
+    connection: &Connection,
+    workspace_scope: &str,
+    content_id: &str,
+    content_type: &str,
+    fingerprint: &crate::content_fingerprint::ContentFingerprint,
+    title: &str,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().to_rfc3339();
+
+    connection
+        .execute(
+            "INSERT INTO content_fingerprints
+             (workspace_scope, content_id, content_type, exact_hash, structure_hash,
+              simhash, source_fingerprint, title, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(workspace_scope, content_id) DO UPDATE SET
+               exact_hash=excluded.exact_hash,
+               structure_hash=excluded.structure_hash,
+               simhash=excluded.simhash,
+               source_fingerprint=excluded.source_fingerprint,
+               title=excluded.title,
+               created_at=excluded.created_at",
+            params![
+                workspace_scope,
+                content_id,
+                content_type,
+                &fingerprint.exact_hash,
+                &fingerprint.structure_hash,
+                fingerprint.simhash as i64,
+                &fingerprint.source_fingerprint,
+                title,
+                now,
+            ],
+        )
+        .map_err(|e| format!("存储指纹失败：{e}"))?;
+
+    Ok(())
 }
