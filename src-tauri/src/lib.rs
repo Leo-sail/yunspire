@@ -1,5 +1,6 @@
 mod assistant_runtime;
 mod capture_pipeline;
+mod capture_result;
 mod command_bus;
 mod connectors;
 mod creation;
