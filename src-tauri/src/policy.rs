@@ -252,8 +252,8 @@ fn valid_network_target(value: &str) -> bool {
 
     // 只允许 https 或本地开发 http (严格限制)
     let is_https = value.starts_with("https://");
-    let is_local_http = value.starts_with("http://127.0.0.1:")
-        || value.starts_with("http://localhost:");
+    let is_local_http =
+        value.starts_with("http://127.0.0.1:") || value.starts_with("http://localhost:");
 
     if !is_https && !is_local_http {
         return false;
@@ -268,10 +268,18 @@ fn valid_network_target(value: &str) -> bool {
             // 处理 IPv6 地址（带方括号）的端口号
             let host = if host_and_port.starts_with('[') {
                 // IPv6: [addr]:port 或 [addr]
-                host_and_port.split(']').next().map(|h| format!("{}]", h)).unwrap_or_default()
+                host_and_port
+                    .split(']')
+                    .next()
+                    .map(|h| format!("{}]", h))
+                    .unwrap_or_default()
             } else {
                 // IPv4/域名: host:port 或 host
-                host_and_port.split(':').next().unwrap_or(host_and_port).to_string()
+                host_and_port
+                    .split(':')
+                    .next()
+                    .unwrap_or(host_and_port)
+                    .to_string()
             };
 
             if is_private_or_local_address(&host) {
@@ -281,60 +289,6 @@ fn valid_network_target(value: &str) -> bool {
     }
 
     true
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_private_ipv4_detection() {
-        assert!(is_private_or_local_address("127.0.0.1"));
-        assert!(is_private_or_local_address("127.0.0.2"));
-        assert!(is_private_or_local_address("localhost"));
-        assert!(is_private_or_local_address("10.0.0.1"));
-        assert!(is_private_or_local_address("192.168.1.1"));
-        assert!(is_private_or_local_address("172.16.0.1"));
-
-        assert!(!is_private_or_local_address("8.8.8.8"));
-        assert!(!is_private_or_local_address("1.1.1.1"));
-    }
-
-    #[test]
-    fn test_private_ipv6_detection() {
-        assert!(is_private_or_local_address("::1"));
-        assert!(is_private_or_local_address("[::1]"));
-        assert!(is_private_or_local_address("[fc00::1]"));
-        assert!(is_private_or_local_address("[fd00::1]"));
-        assert!(is_private_or_local_address("[fe80::1]"));
-
-        assert!(!is_private_or_local_address("[2001:4860:4860::8888]"));
-    }
-
-    #[test]
-    fn test_valid_network_target() {
-        // 允许的公网 HTTPS
-        assert!(valid_network_target("https://example.com"));
-        assert!(valid_network_target("https://api.example.com/path"));
-
-        // 允许的本地 HTTP
-        assert!(valid_network_target("http://127.0.0.1:8080"));
-        assert!(valid_network_target("http://localhost:3000"));
-
-        // 拒绝私网 HTTPS
-        assert!(!valid_network_target("https://192.168.1.1"));
-        assert!(!valid_network_target("https://10.0.0.1"));
-        assert!(!valid_network_target("https://[fc00::1]"));
-        assert!(!valid_network_target("https://[fe80::1]"));
-
-        // 拒绝非本地 HTTP
-        assert!(!valid_network_target("http://example.com"));
-
-        // 拒绝其他协议
-        let file_proto = "file";
-        assert!(!valid_network_target(&format!("{}:///etc/passwd", file_proto)));
-        assert!(!valid_network_target("ftp://example.com"));
-    }
 }
 
 fn operation_category(command: &ApplicationCommand) -> &'static str {
@@ -537,5 +491,62 @@ pub fn evaluate(command: &ApplicationCommand) -> PolicyDecision {
         normalized_scope,
         requires_checkpoint: matches!(category, "write" | "destructive" | "managed_change"),
         approval_type,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_private_ipv4_detection() {
+        assert!(is_private_or_local_address("127.0.0.1"));
+        assert!(is_private_or_local_address("127.0.0.2"));
+        assert!(is_private_or_local_address("localhost"));
+        assert!(is_private_or_local_address("10.0.0.1"));
+        assert!(is_private_or_local_address("192.168.1.1"));
+        assert!(is_private_or_local_address("172.16.0.1"));
+
+        assert!(!is_private_or_local_address("8.8.8.8"));
+        assert!(!is_private_or_local_address("1.1.1.1"));
+    }
+
+    #[test]
+    fn test_private_ipv6_detection() {
+        assert!(is_private_or_local_address("::1"));
+        assert!(is_private_or_local_address("[::1]"));
+        assert!(is_private_or_local_address("[fc00::1]"));
+        assert!(is_private_or_local_address("[fd00::1]"));
+        assert!(is_private_or_local_address("[fe80::1]"));
+
+        assert!(!is_private_or_local_address("[2001:4860:4860::8888]"));
+    }
+
+    #[test]
+    fn test_valid_network_target() {
+        // 允许的公网 HTTPS
+        assert!(valid_network_target("https://example.com"));
+        assert!(valid_network_target("https://api.example.com/path"));
+
+        // 允许的本地 HTTP
+        assert!(valid_network_target("http://127.0.0.1:8080"));
+        assert!(valid_network_target("http://localhost:3000"));
+
+        // 拒绝私网 HTTPS
+        assert!(!valid_network_target("https://192.168.1.1"));
+        assert!(!valid_network_target("https://10.0.0.1"));
+        assert!(!valid_network_target("https://[fc00::1]"));
+        assert!(!valid_network_target("https://[fe80::1]"));
+
+        // 拒绝非本地 HTTP
+        assert!(!valid_network_target("http://example.com"));
+
+        // 拒绝其他协议
+        let file_proto = "file";
+        assert!(!valid_network_target(&format!(
+            "{}:///etc/passwd",
+            file_proto
+        )));
+        assert!(!valid_network_target("ftp://example.com"));
     }
 }

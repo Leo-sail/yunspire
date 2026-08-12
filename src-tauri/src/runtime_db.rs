@@ -4774,6 +4774,7 @@ impl RuntimeDatabase {
     }
 
     /// 获取指定 worker 的所有活动 step claims
+    #[allow(dead_code)]
     pub(crate) fn get_active_step_claims(
         &self,
         workspace_scope: &str,
@@ -4799,8 +4800,8 @@ impl RuntimeDatabase {
         let claims = statement
             .query_map(params![workspace_scope, worker_id], |row| {
                 let depends_on_json: String = row.get(6)?;
-                let depends_on: Vec<String> = serde_json::from_str(&depends_on_json)
-                    .unwrap_or_default();
+                let depends_on: Vec<String> =
+                    serde_json::from_str(&depends_on_json).unwrap_or_default();
                 let parameters_json: String = row.get(7)?;
                 let parameters: serde_json::Value = serde_json::from_str(&parameters_json)
                     .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
@@ -4810,13 +4811,17 @@ impl RuntimeDatabase {
                     runtime_task_id: row.get(1)?,
                     plan_revision: row.get::<_, i64>(2)? as u64,
                     step_id: row.get(3)?,
-                    step_kind: crate::task_runtime::RuntimeTaskStepKind::parse(&row.get::<_, String>(4)?)
-                        .unwrap_or(crate::task_runtime::RuntimeTaskStepKind::Capability),
+                    step_kind: crate::task_runtime::RuntimeTaskStepKind::parse(
+                        &row.get::<_, String>(4)?,
+                    )
+                    .unwrap_or(crate::task_runtime::RuntimeTaskStepKind::Capability),
                     title: row.get(5)?,
                     depends_on,
                     parameters,
-                    effect_class: crate::task_runtime::RuntimeTaskStepEffectClass::parse(&row.get::<_, String>(8)?)
-                        .unwrap_or(crate::task_runtime::RuntimeTaskStepEffectClass::Effectful),
+                    effect_class: crate::task_runtime::RuntimeTaskStepEffectClass::parse(
+                        &row.get::<_, String>(8)?,
+                    )
+                    .unwrap_or(crate::task_runtime::RuntimeTaskStepEffectClass::Effectful),
                     attempt: row.get::<_, i64>(9)? as u64,
                     lease_owner: row.get(10)?,
                     lease_expires_at: row.get(11)?,

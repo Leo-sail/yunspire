@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// 采集状态
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureStatus {
@@ -14,6 +15,7 @@ pub enum CaptureStatus {
 }
 
 /// 采集结果（包含部分成功信息）
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureResult {
@@ -32,6 +34,7 @@ pub struct CaptureResult {
 }
 
 /// 增强功能结果
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnhancementResults {
@@ -44,6 +47,7 @@ pub struct EnhancementResults {
 }
 
 /// 图片增强结果
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageEnhancementResult {
@@ -58,10 +62,12 @@ pub struct ImageEnhancementResult {
 }
 
 impl ImageEnhancementResult {
+    #[allow(dead_code)]
     pub fn all_succeeded(&self) -> bool {
         self.failed.is_empty()
     }
 
+    #[allow(dead_code)]
     pub fn new_empty() -> Self {
         Self {
             total: 0,
@@ -99,6 +105,7 @@ pub struct ModelEnhancementResult {
 }
 
 impl ModelEnhancementResult {
+    #[allow(dead_code)]
     pub fn success(data: Value) -> Self {
         Self {
             succeeded: true,
@@ -107,6 +114,7 @@ impl ModelEnhancementResult {
         }
     }
 
+    #[allow(dead_code)]
     pub fn failure(error: String) -> Self {
         Self {
             succeeded: false,
@@ -128,6 +136,7 @@ pub struct AgentVaultResult {
 }
 
 impl AgentVaultResult {
+    #[allow(dead_code)]
     pub fn success() -> Self {
         Self {
             succeeded: true,
@@ -135,6 +144,7 @@ impl AgentVaultResult {
         }
     }
 
+    #[allow(dead_code)]
     pub fn failure(error: String) -> Self {
         Self {
             succeeded: false,
@@ -157,6 +167,7 @@ pub struct CaptureWarning {
 }
 
 impl CaptureWarning {
+    #[allow(dead_code)]
     pub fn new(warning_type: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             warning_type: warning_type.into(),
@@ -165,6 +176,7 @@ impl CaptureWarning {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_resource(
         warning_type: impl Into<String>,
         message: impl Into<String>,
@@ -179,6 +191,7 @@ impl CaptureWarning {
 }
 
 /// 采集策略配置
+#[allow(dead_code)]
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CapturePolicy {
@@ -199,10 +212,12 @@ pub struct CapturePolicy {
     pub max_retry_attempts: u32,
 }
 
+#[allow(dead_code)]
 fn default_true() -> bool {
     true
 }
 
+#[allow(dead_code)]
 fn default_retry_attempts() -> u32 {
     2
 }
@@ -219,6 +234,7 @@ impl Default for CapturePolicy {
 }
 
 /// 重试选项
+#[allow(dead_code)]
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetryOptions {

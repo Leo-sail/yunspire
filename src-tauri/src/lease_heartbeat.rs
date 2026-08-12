@@ -8,10 +8,7 @@ use std::{
 };
 use tauri::{AppHandle, Manager, State};
 
-use crate::{
-    runtime_db::RuntimeDatabase,
-    task_runtime::RuntimeTaskStepLeaseRenewalInput,
-};
+use crate::{runtime_db::RuntimeDatabase, task_runtime::RuntimeTaskStepLeaseRenewalInput};
 
 /// Lease 续期配置
 const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
@@ -19,6 +16,7 @@ const DEFAULT_LEASE_EXTENSION_SECS: u64 = 300;
 const MIN_REMAINING_LEASE_SECS: u64 = 60;
 
 /// Lease 心跳管理器
+#[allow(dead_code)]
 pub struct LeaseHeartbeatManager {
     running: Arc<AtomicBool>,
     worker_id: String,
@@ -75,6 +73,7 @@ impl LeaseHeartbeatManager {
     }
 
     /// 停止心跳守护线程
+    #[allow(dead_code)]
     pub fn stop(&self) {
         self.running.store(false, Ordering::Release);
     }
@@ -92,6 +91,7 @@ impl Drop for LeaseHeartbeatManager {
 }
 
 /// 续期即将过期的 leases
+#[allow(dead_code)]
 fn renew_expiring_leases(
     app: &AppHandle,
     worker_id: &str,
@@ -111,9 +111,7 @@ fn renew_expiring_leases(
     for lease in active_leases {
         // 检查是否需要续期
         let expires_at = parse_rfc3339_timestamp(&lease.lease_expires_at)?;
-        let remaining = expires_at
-            .duration_since(now)
-            .unwrap_or(Duration::ZERO);
+        let remaining = expires_at.duration_since(now).unwrap_or(Duration::ZERO);
 
         if remaining < min_remaining {
             // 需要续期
@@ -150,6 +148,7 @@ fn renew_expiring_leases(
 }
 
 /// 解析 RFC3339 时间戳
+#[allow(dead_code)]
 fn parse_rfc3339_timestamp(s: &str) -> Result<SystemTime, String> {
     use chrono::{DateTime, Utc};
 
@@ -166,6 +165,7 @@ fn parse_rfc3339_timestamp(s: &str) -> Result<SystemTime, String> {
 }
 
 /// Lease 心跳状态（全局单例）
+#[allow(dead_code)]
 #[derive(Default)]
 pub struct LeaseHeartbeatState {
     manager: std::sync::Mutex<Option<LeaseHeartbeatManager>>,
@@ -174,7 +174,9 @@ pub struct LeaseHeartbeatState {
 impl LeaseHeartbeatState {
     /// 初始化并启动心跳
     pub fn initialize(&self, app: AppHandle, worker_id: String) -> Result<(), String> {
-        let mut manager_lock = self.manager.lock()
+        let mut manager_lock = self
+            .manager
+            .lock()
             .map_err(|_| "无法获取心跳管理器锁".to_string())?;
 
         if manager_lock.is_some() {
@@ -191,6 +193,7 @@ impl LeaseHeartbeatState {
     }
 
     /// 停止心跳
+    #[allow(dead_code)]
     pub fn shutdown(&self) {
         if let Ok(mut manager_lock) = self.manager.lock() {
             if let Some(manager) = manager_lock.take() {
@@ -211,6 +214,7 @@ impl LeaseHeartbeatState {
 }
 
 /// Tauri 命令：获取心跳状态
+#[allow(dead_code)]
 #[tauri::command]
 pub fn get_lease_heartbeat_status(
     state: State<'_, LeaseHeartbeatState>,
@@ -224,6 +228,7 @@ pub fn get_lease_heartbeat_status(
 }
 
 /// 启动 lease 心跳（在应用初始化时调用）
+#[allow(dead_code)]
 pub(crate) fn start_lease_heartbeat_if_needed(
     app: &AppHandle,
     worker_id: String,

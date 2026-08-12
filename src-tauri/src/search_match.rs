@@ -1,6 +1,7 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// 搜索结果（包含匹配原因）
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResult {
@@ -13,6 +14,7 @@ pub struct SearchResult {
 }
 
 /// 笔记元数据（简化版，实际应从 obsidian.rs 导入）
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteMetadata {
@@ -23,6 +25,7 @@ pub struct NoteMetadata {
 }
 
 /// 匹配原因
+#[allow(dead_code)]
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MatchReasons {
@@ -52,6 +55,7 @@ pub struct MatchReasons {
 }
 
 /// 标题匹配信息
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TitleMatchInfo {
@@ -64,6 +68,7 @@ pub struct TitleMatchInfo {
 }
 
 /// 内容匹配信息
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContentMatchInfo {
@@ -76,6 +81,7 @@ pub struct ContentMatchInfo {
 }
 
 /// 标签匹配信息
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TagMatchInfo {
@@ -86,6 +92,7 @@ pub struct TagMatchInfo {
 }
 
 /// Wiki Links 匹配信息
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WikiLinkMatchInfo {
@@ -98,6 +105,7 @@ pub struct WikiLinkMatchInfo {
 }
 
 /// 语义匹配信息
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SemanticMatchInfo {
@@ -108,10 +116,12 @@ pub struct SemanticMatchInfo {
 }
 
 /// 搜索匹配分析器
+#[allow(dead_code)]
 pub struct MatchReasonAnalyzer;
 
 impl MatchReasonAnalyzer {
     /// 分析标题匹配
+    #[allow(dead_code)]
     pub fn analyze_title_match(title: &str, query: &str) -> Option<TitleMatchInfo> {
         let title_lower = title.to_lowercase();
         let query_lower = query.to_lowercase();
@@ -131,6 +141,7 @@ impl MatchReasonAnalyzer {
     }
 
     /// 分析内容匹配
+    #[allow(dead_code)]
     pub fn analyze_content_match(
         content: &str,
         query: &str,
@@ -164,6 +175,7 @@ impl MatchReasonAnalyzer {
     }
 
     /// 分析标签匹配
+    #[allow(dead_code)]
     pub fn analyze_tag_match(tags: &[String], query: &str) -> Option<TagMatchInfo> {
         let query_lower = query.to_lowercase();
         let matched_tags: Vec<String> = tags
@@ -183,6 +195,7 @@ impl MatchReasonAnalyzer {
     }
 
     /// 高亮文本中的匹配词
+    #[allow(dead_code)]
     fn highlight_text(text: &str, query: &str) -> String {
         let text_lower = text.to_lowercase();
         let query_lower = query.to_lowercase();
@@ -203,6 +216,7 @@ impl MatchReasonAnalyzer {
     }
 
     /// 提取内容片段（带上下文）
+    #[allow(dead_code)]
     fn extract_snippet(
         content: &str,
         match_pos: usize,
@@ -270,6 +284,7 @@ impl MatchReasonAnalyzer {
     }
 
     /// 计算时间衰减权重
+    #[allow(dead_code)]
     pub fn calculate_recency_boost(days_since_modified: f64) -> f64 {
         // 最近 7 天内的笔记获得正向加权
         if days_since_modified <= 7.0 {
