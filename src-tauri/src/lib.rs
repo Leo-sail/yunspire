@@ -24,6 +24,7 @@ mod model_config;
 mod model_provider;
 mod obsidian;
 mod obsidian_management;
+mod performance_monitor;
 mod policy;
 mod prompt;
 mod runtime_db;
@@ -559,6 +560,9 @@ pub fn run() {
                 content_intelligence::extract_keywords,
                 content_intelligence::identify_note_topic,
                 content_intelligence::recommend_similar_content,
+                performance_monitor::get_performance_report,
+                performance_monitor::clear_performance_metrics,
+                performance_monitor::get_memory_stats,
                 model_provider::analyze_capture_content,
                 model_provider::bind_capture_analysis_write_manifest,
                 model_provider::issue_direct_write_receipt,
