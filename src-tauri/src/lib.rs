@@ -5,8 +5,10 @@ mod command_bus;
 mod connectors;
 mod content_fingerprint;
 mod content_value;
+mod content_value_ux;
 mod creation;
 mod durable_asset;
+mod enhanced_ux;
 mod error;
 mod execution_plan;
 mod execution_plan_extractor;
@@ -533,6 +535,9 @@ pub fn run() {
                 content_value::calculate_note_value,
                 content_value::get_value_ranked_notes,
                 content_value::get_value_report,
+                content_value_ux::calculate_notes_value_batch,
+                content_value_ux::get_actionable_suggestions,
+                enhanced_ux::get_comprehensive_insights,
                 model_provider::analyze_capture_content,
                 model_provider::bind_capture_analysis_write_manifest,
                 model_provider::issue_direct_write_receipt,
