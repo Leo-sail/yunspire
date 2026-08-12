@@ -4,6 +4,7 @@ mod capture_result;
 mod command_bus;
 mod connectors;
 mod content_fingerprint;
+mod content_value;
 mod creation;
 mod durable_asset;
 mod error;
@@ -529,6 +530,9 @@ pub fn run() {
                 knowledge_health::get_knowledge_health_dashboard,
                 metrics::get_metrics_report,
                 metrics::record_note_view,
+                content_value::calculate_note_value,
+                content_value::get_value_ranked_notes,
+                content_value::get_value_report,
                 model_provider::analyze_capture_content,
                 model_provider::bind_capture_analysis_write_manifest,
                 model_provider::issue_direct_write_receipt,
