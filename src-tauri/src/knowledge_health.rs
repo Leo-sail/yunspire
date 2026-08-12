@@ -1,4 +1,8 @@
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use tauri::State;
+
+use crate::runtime_db::RuntimeDatabase;
 
 /// 知识库健康度统计
 #[derive(Clone, Debug, Serialize)]
@@ -58,6 +62,10 @@ pub enum IssueSeverity {
 pub struct HealthSuggestion {
     /// 建议操作
     pub action: SuggestionAction,
+    /// 建议标题
+    pub title: String,
+    /// 建议描述
+    pub description: String,
     /// 预期影响
     pub impact: String,
     /// 工作量
@@ -118,28 +126,169 @@ impl KnowledgeHealthDashboard {
     }
 }
 
+/// 查询知识库统计数据
+fn query_health_stats(
+    connection: &Connection,
+    vault_id: &str,
+) -> Result<KnowledgeHealthStats, String> {
+    let stats = connection
+        .query_row(
+            "SELECT
+               COUNT(*) as total_notes,
+               SUM(CASE WHEN wiki_links_json = '[]' THEN 1 ELSE 0 END) as orphan_notes,
+               SUM(CASE WHEN byte_length < 50 THEN 1 ELSE 0 END) as stub_notes,
+               SUM(CASE WHEN tags_json != '[]' OR wiki_links_json != '[]' THEN 1 ELSE 0 END) as rich_notes,
+               SUM(CASE WHEN tags_json != '[]' THEN 1 ELSE 0 END) as tagged_notes,
+               SUM(CASE WHEN wiki_links_json != '[]' THEN 1 ELSE 0 END) as linked_notes
+             FROM note_index
+             WHERE vault_id = ?",
+            params![vault_id],
+            |row| {
+                Ok(KnowledgeHealthStats {
+                    total_notes: row.get::<_, i64>(0).unwrap_or(0).max(0) as usize,
+                    orphan_notes: row.get::<_, i64>(1).unwrap_or(0).max(0) as usize,
+                    stub_notes: row.get::<_, i64>(2).unwrap_or(0).max(0) as usize,
+                    rich_notes: row.get::<_, i64>(3).unwrap_or(0).max(0) as usize,
+                    tagged_notes: row.get::<_, i64>(4).unwrap_or(0).max(0) as usize,
+                    linked_notes: row.get::<_, i64>(5).unwrap_or(0).max(0) as usize,
+                })
+            },
+        )
+        .map_err(|error| format!("查询知识库统计失败：{error}"))?;
+
+    Ok(stats)
+}
+
+/// 检测知识库问题
+fn detect_issues(stats: &KnowledgeHealthStats) -> Vec<KnowledgeIssue> {
+    let mut issues = Vec::new();
+
+    if stats.total_notes == 0 {
+        return issues;
+    }
+
+    let total = stats.total_notes as f64;
+
+    // 孤立笔记过多
+    let orphan_ratio = stats.orphan_notes as f64 / total;
+    if orphan_ratio > 0.3 {
+        issues.push(KnowledgeIssue {
+            issue_type: IssueType::Orphan,
+            severity: IssueSeverity::High,
+            affected_notes: vec![],
+            auto_fix_available: false,
+            description: format!(
+                "{:.1}% 的笔记是孤立笔记（没有任何双链）",
+                orphan_ratio * 100.0
+            ),
+        });
+    }
+
+    // 短笔记过多
+    let stub_ratio = stats.stub_notes as f64 / total;
+    if stub_ratio > 0.2 {
+        issues.push(KnowledgeIssue {
+            issue_type: IssueType::ShortContent,
+            severity: IssueSeverity::Medium,
+            affected_notes: vec![],
+            auto_fix_available: false,
+            description: format!(
+                "{:.1}% 的笔记是短笔记（字数 < 50）",
+                stub_ratio * 100.0
+            ),
+        });
+    }
+
+    // 缺少标签结构（使用 Outdated 类型表示需要更新标签）
+    let tagged_ratio = stats.tagged_notes as f64 / total;
+    if tagged_ratio < 0.1 {
+        issues.push(KnowledgeIssue {
+            issue_type: IssueType::Outdated,
+            severity: IssueSeverity::Low,
+            affected_notes: vec![],
+            auto_fix_available: false,
+            description: format!(
+                "只有 {:.1}% 的笔记有标签，缺少分类结构",
+                tagged_ratio * 100.0
+            ),
+        });
+    }
+
+    issues
+}
+
+/// 生成改进建议
+fn generate_suggestions(stats: &KnowledgeHealthStats) -> Vec<HealthSuggestion> {
+    let mut suggestions = Vec::new();
+
+    // 建议添加链接
+    if stats.orphan_notes > 10 {
+        suggestions.push(HealthSuggestion {
+            action: SuggestionAction::AddLinks,
+            title: "为孤立笔记添加双链".to_string(),
+            description: "通过添加 [[WikiLink]] 连接相关笔记，建立知识网络".to_string(),
+            impact: format!("可连接 {} 个孤立笔记，提升知识关联性", stats.orphan_notes),
+            effort: EffortLevel::Medium,
+            affected_count: stats.orphan_notes,
+        });
+    }
+
+    // 建议添加标签
+    if stats.total_notes > 0 && stats.tagged_notes < stats.total_notes * 20 / 100 {
+        let untagged = stats.total_notes - stats.tagged_notes;
+        suggestions.push(HealthSuggestion {
+            action: SuggestionAction::EnrichTags,
+            title: "为笔记添加标签".to_string(),
+            description: "使用 #标签 对笔记进行分类，便于主题检索".to_string(),
+            impact: format!("可为 {} 个笔记添加分类标签", untagged),
+            effort: EffortLevel::Low,
+            affected_count: untagged,
+        });
+    }
+
+    // 建议扩充内容
+    if stats.stub_notes > 20 {
+        suggestions.push(HealthSuggestion {
+            action: SuggestionAction::ExpandContent,
+            title: "扩充短笔记内容".to_string(),
+            description: "为过短的笔记添加更多细节、示例和参考资料".to_string(),
+            impact: format!("可改进 {} 个短笔记，增强知识完整性", stats.stub_notes),
+            effort: EffortLevel::High,
+            affected_count: stats.stub_notes,
+        });
+    }
+
+    suggestions
+}
+
 /// 获取知识库健康度仪表盘
 #[tauri::command]
 pub async fn get_knowledge_health_dashboard(
-    _vault_id: String,
+    vault_id: String,
+    database: State<'_, RuntimeDatabase>,
 ) -> Result<KnowledgeHealthDashboard, String> {
-    // TODO: 从数据库查询统计数据
-    let stats = KnowledgeHealthStats {
-        total_notes: 0,
-        orphan_notes: 0,
-        stub_notes: 0,
-        rich_notes: 0,
-        tagged_notes: 0,
-        linked_notes: 0,
-    };
+    let connection = database
+        .connection
+        .lock()
+        .map_err(|_| "SQLite 连接锁不可用".to_string())?;
 
+    // 查询统计数据
+    let stats = query_health_stats(&connection, &vault_id)?;
+
+    // 计算健康度评分
     let health_score = KnowledgeHealthDashboard::calculate_score(&stats);
+
+    // 检测问题
+    let issues = detect_issues(&stats);
+
+    // 生成改进建议
+    let suggestions = generate_suggestions(&stats);
 
     Ok(KnowledgeHealthDashboard {
         stats,
         health_score,
-        issues: vec![],
-        suggestions: vec![],
+        issues,
+        suggestions,
     })
 }
 
