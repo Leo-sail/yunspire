@@ -135,17 +135,108 @@ fn valid_identifier(value: &str, max: usize) -> bool {
 }
 
 fn normalize_relative_path(value: &str) -> Option<String> {
-    let normalized = value.trim().replace('\\', "/");
-    if normalized.is_empty()
-        || normalized.starts_with('/')
-        || normalized.contains('\0')
-        || normalized
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
+    let trimmed = value.trim();
+
+    // 基础检查
+    if trimmed.is_empty() || trimmed.len() > 32_767 {
+        return None;
+    }
+
+    // 检查非法控制字符
+    if trimmed.chars().any(|c| c.is_control()) {
+        return None;
+    }
+
+    // 统一路径分隔符
+    let normalized = trimmed.replace('\\', "/");
+
+    // 拒绝绝对路径
+    if normalized.starts_with('/')
+        || normalized.starts_with("//")
+        || (normalized.len() >= 2 && normalized.as_bytes()[1] == b':')
     {
         return None;
     }
+
+    // Windows 保留设备名
+    const RESERVED_NAMES: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+
+    // 分段检查
+    let segments: Vec<&str> = normalized.split('/').collect();
+    if segments.len() > 100 {
+        return None;
+    }
+
+    for segment in &segments {
+        // 空段、目录遍历检查
+        if segment.is_empty() || *segment == "." || *segment == ".." {
+            return None;
+        }
+
+        // Windows 保留名称检查
+        let segment_upper = segment.to_uppercase();
+        let segment_base = segment_upper.split('.').next().unwrap_or("");
+        if RESERVED_NAMES.contains(&segment_base) {
+            return None;
+        }
+
+        // Windows 非法字符检查
+        #[cfg(target_os = "windows")]
+        {
+            const INVALID_CHARS: &[char] = &['<', '>', ':', '"', '|', '?', '*'];
+            if segment.chars().any(|c| INVALID_CHARS.contains(&c)) {
+                return None;
+            }
+        }
+    }
+
     Some(normalized)
+}
+
+fn is_private_or_local_address(host: &str) -> bool {
+    // 检查本地回环
+    if host == "localhost" || host.starts_with("127.") || host == "::1" || host == "[::1]" {
+        return true;
+    }
+
+    // 检查 IPv4 私网地址
+    if let Ok(addr) = host.parse::<std::net::Ipv4Addr>() {
+        return addr.is_private() || addr.is_loopback() || addr.is_link_local();
+    }
+
+    // 检查 IPv6 私网地址
+    if let Some(ipv6_host) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        if let Ok(addr) = ipv6_host.parse::<std::net::Ipv6Addr>() {
+            // ::1 (loopback)
+            if addr.is_loopback() {
+                return true;
+            }
+            // fc00::/7 (Unique Local Address)
+            if (addr.segments()[0] & 0xfe00) == 0xfc00 {
+                return true;
+            }
+            // fe80::/10 (Link-Local)
+            if (addr.segments()[0] & 0xffc0) == 0xfe80 {
+                return true;
+            }
+        }
+    } else if let Ok(addr) = host.parse::<std::net::Ipv6Addr>() {
+        // 没有方括号的 IPv6
+        if addr.is_loopback() {
+            return true;
+        }
+        if (addr.segments()[0] & 0xfe00) == 0xfc00 {
+            return true;
+        }
+        if (addr.segments()[0] & 0xffc0) == 0xfe80 {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn valid_network_target(value: &str) -> bool {
@@ -158,9 +249,91 @@ fn valid_network_target(value: &str) -> bool {
     {
         return false;
     }
-    value.starts_with("https://")
-        || value.starts_with("http://127.0.0.1:")
-        || value.starts_with("http://localhost:")
+
+    // 只允许 https 或本地开发 http (严格限制)
+    let is_https = value.starts_with("https://");
+    let is_local_http = value.starts_with("http://127.0.0.1:")
+        || value.starts_with("http://localhost:");
+
+    if !is_https && !is_local_http {
+        return false;
+    }
+
+    // 对于 https，额外检查是否为私网地址
+    if is_https {
+        if let Some(url) = value.strip_prefix("https://") {
+            // 提取 host 部分（去除路径和查询参数）
+            let host_and_port = url.split('/').next().unwrap_or(url);
+
+            // 处理 IPv6 地址（带方括号）的端口号
+            let host = if host_and_port.starts_with('[') {
+                // IPv6: [addr]:port 或 [addr]
+                host_and_port.split(']').next().map(|h| format!("{}]", h)).unwrap_or_default()
+            } else {
+                // IPv4/域名: host:port 或 host
+                host_and_port.split(':').next().unwrap_or(host_and_port).to_string()
+            };
+
+            if is_private_or_local_address(&host) {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_private_ipv4_detection() {
+        assert!(is_private_or_local_address("127.0.0.1"));
+        assert!(is_private_or_local_address("127.0.0.2"));
+        assert!(is_private_or_local_address("localhost"));
+        assert!(is_private_or_local_address("10.0.0.1"));
+        assert!(is_private_or_local_address("192.168.1.1"));
+        assert!(is_private_or_local_address("172.16.0.1"));
+
+        assert!(!is_private_or_local_address("8.8.8.8"));
+        assert!(!is_private_or_local_address("1.1.1.1"));
+    }
+
+    #[test]
+    fn test_private_ipv6_detection() {
+        assert!(is_private_or_local_address("::1"));
+        assert!(is_private_or_local_address("[::1]"));
+        assert!(is_private_or_local_address("[fc00::1]"));
+        assert!(is_private_or_local_address("[fd00::1]"));
+        assert!(is_private_or_local_address("[fe80::1]"));
+
+        assert!(!is_private_or_local_address("[2001:4860:4860::8888]"));
+    }
+
+    #[test]
+    fn test_valid_network_target() {
+        // 允许的公网 HTTPS
+        assert!(valid_network_target("https://example.com"));
+        assert!(valid_network_target("https://api.example.com/path"));
+
+        // 允许的本地 HTTP
+        assert!(valid_network_target("http://127.0.0.1:8080"));
+        assert!(valid_network_target("http://localhost:3000"));
+
+        // 拒绝私网 HTTPS
+        assert!(!valid_network_target("https://192.168.1.1"));
+        assert!(!valid_network_target("https://10.0.0.1"));
+        assert!(!valid_network_target("https://[fc00::1]"));
+        assert!(!valid_network_target("https://[fe80::1]"));
+
+        // 拒绝非本地 HTTP
+        assert!(!valid_network_target("http://example.com"));
+
+        // 拒绝其他协议
+        assert!(!valid_network_target("file:///etc/passwd"));
+        assert!(!valid_network_target("ftp://example.com"));
+    }
 }
 
 fn operation_category(command: &ApplicationCommand) -> &'static str {
