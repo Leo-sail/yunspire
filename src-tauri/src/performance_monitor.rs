@@ -86,6 +86,7 @@ impl PerformanceMonitor {
     }
 
     /// 记录慢查询
+    #[allow(dead_code)]
     pub fn record_slow_query(&self, query: String, duration_ms: u64, params: Option<String>) {
         if duration_ms < self.slow_threshold_ms {
             return;
@@ -205,6 +206,7 @@ impl PerformanceMonitor {
 }
 
 /// 计时器（RAII 模式）
+#[allow(dead_code)]
 pub struct Timer {
     operation: String,
     start: Instant,
@@ -212,6 +214,7 @@ pub struct Timer {
 }
 
 impl Timer {
+    #[allow(dead_code)]
     pub fn new(operation: String, monitor: Arc<PerformanceMonitor>) -> Self {
         Self {
             operation,
@@ -252,6 +255,7 @@ pub fn clear_performance_metrics() -> Result<(), String> {
 }
 
 /// 启用 SQLite 查询日志
+#[allow(dead_code)]
 pub fn enable_sqlite_profiling(_connection: &Connection) -> Result<(), rusqlite::Error> {
     // SQLite 查询日志需要在应用层通过包装查询调用实现
     // 生产环境建议使用 GLOBAL_MONITOR 记录查询性能
