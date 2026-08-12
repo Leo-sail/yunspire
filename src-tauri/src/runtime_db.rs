@@ -13039,6 +13039,33 @@ fn run_migrations(connection: &Connection) -> Result<(), String> {
             )
             .map_err(|error| format!("SQLite migration 45 失败：{error}"))?;
     }
+
+    // Migration 46: 间隔重复（Spaced Repetition）
+    if version < 46 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS spaced_repetition_records (
+                   workspace_scope TEXT NOT NULL,
+                   vault_id TEXT NOT NULL,
+                   note_path TEXT NOT NULL,
+                   review_count INTEGER NOT NULL DEFAULT 0,
+                   last_reviewed_at TEXT NOT NULL,
+                   next_review_at TEXT NOT NULL,
+                   interval_days INTEGER NOT NULL,
+                   memory_strength REAL NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   PRIMARY KEY (workspace_scope, vault_id, note_path),
+                   FOREIGN KEY(workspace_scope) REFERENCES local_workspace_scopes(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_spaced_repetition_next_review
+                   ON spaced_repetition_records(workspace_scope, vault_id, next_review_at);
+                 PRAGMA user_version=46;
+                 COMMIT;",
+            )
+            .map_err(|error| format!("SQLite migration 46 失败：{error}"))?;
+    }
+
     Ok(())
 }
 

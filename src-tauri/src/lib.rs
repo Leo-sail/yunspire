@@ -28,6 +28,7 @@ mod runtime_db;
 mod scheduler;
 mod search_match;
 mod skill_lifecycle;
+mod spaced_repetition;
 mod task_runtime;
 mod trace;
 mod updater;
@@ -543,6 +544,9 @@ pub fn run() {
                 knowledge_graph::get_hub_nodes,
                 knowledge_graph::get_isolated_nodes,
                 knowledge_graph::find_related_notes,
+                spaced_repetition::record_note_review,
+                spaced_repetition::get_due_for_review,
+                spaced_repetition::get_review_plan_summary,
                 model_provider::analyze_capture_content,
                 model_provider::bind_capture_analysis_write_manifest,
                 model_provider::issue_direct_write_receipt,
