@@ -31,6 +31,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use tauri::{path::BaseDirectory, AppHandle, Manager, State};
+use uuid::Uuid;
 
 struct BackgroundVaultIndexTask {
     cancellation: Arc<AtomicBool>,
@@ -248,6 +249,12 @@ fn activate_local_runtime(
     scheduler::start_scheduler(app);
     vault_watcher::start_vault_index_worker(app);
     start_background_vault_indexing(app, vaults, generation);
+
+    // 启动 Lease 心跳守护线程
+    let worker_id = format!("worker-{}", Uuid::new_v4());
+    if let Err(error) = lease_heartbeat::start_lease_heartbeat_if_needed(app, worker_id) {
+        log::warn!("无法启动 Lease 心跳守护线程：{}", error);
+    }
 }
 
 fn initialize_local_runtime_once(
@@ -429,6 +436,7 @@ pub fn run() {
         .manage(durable_asset::DurableAssetState::default())
         .manage(vault_watcher::VaultWatcherState::default())
         .manage(scheduler::SchedulerState::default())
+        .manage(lease_heartbeat::LeaseHeartbeatState::default())
         .manage(LocalRuntimeInitializationState::default())
         .invoke_handler({
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
@@ -631,6 +639,7 @@ pub fn run() {
                 task_runtime::complete_runtime_task_plan_step,
                 task_runtime::fail_runtime_task_plan_step,
                 task_runtime::transition_runtime_task,
+                lease_heartbeat::get_lease_heartbeat_status,
                 vault_watcher::refresh_vault_access_policy,
                 updater::check_for_updates,
                 updater::prepare_update_installation,
