@@ -3,12 +3,16 @@ mod capture_pipeline;
 mod capture_result;
 mod command_bus;
 mod connectors;
+mod content_fingerprint;
 mod creation;
 mod durable_asset;
 mod error;
+mod execution_plan;
 mod execution_ticket;
+mod knowledge_health;
 mod lease_heartbeat;
 mod memory;
+mod metrics;
 mod model_config;
 mod model_provider;
 mod obsidian;
@@ -513,6 +517,14 @@ pub fn run() {
                 capture_pipeline::discard_capture_attachments,
                 capture_pipeline::extract_capture_source,
                 capture_pipeline::extract_capture_source_v2,
+                creation::mode::get_creation_mode,
+                creation::mode::set_creation_mode,
+                content_fingerprint::detect_content_duplicate,
+                execution_plan::generate_execution_plan,
+                execution_plan::submit_execution_decision,
+                execution_plan::get_execution_logs,
+                knowledge_health::get_knowledge_health_dashboard,
+                metrics::get_metrics_report,
                 model_provider::analyze_capture_content,
                 model_provider::bind_capture_analysis_write_manifest,
                 model_provider::issue_direct_write_receipt,

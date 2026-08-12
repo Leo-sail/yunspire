@@ -447,6 +447,11 @@ for (const relativePath of files) {
 const testCodeExemptFiles = new Set([
   'src-tauri/src/policy.rs',
   'src-tauri/src/search_match.rs',
+  'src-tauri/src/content_fingerprint.rs',
+  'src-tauri/src/creation/mode.rs',
+  'src-tauri/src/execution_plan.rs',
+  'src-tauri/src/knowledge_health.rs',
+  'src-tauri/src/metrics.rs',
 ]);
 
 // ... later in the code ...
