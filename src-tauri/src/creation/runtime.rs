@@ -62,6 +62,7 @@ pub(crate) fn migrate(connection: &Connection) -> Result<(), String> {
                candidate_document_json TEXT,
                stream_id TEXT NOT NULL,
                operation_id TEXT NOT NULL,
+               creation_mode TEXT NOT NULL DEFAULT 'quick' CHECK(creation_mode IN ('quick', 'professional')),
                last_sequence INTEGER NOT NULL DEFAULT -1 CHECK(last_sequence >= -1),
                version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
                created_at TEXT NOT NULL,
@@ -302,6 +303,8 @@ pub struct BeginCreationRunInput {
     stream_id: Option<String>,
     #[serde(default)]
     operation_id: Option<String>,
+    #[serde(default)]
+    creation_mode: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -368,6 +371,7 @@ pub struct CreationRunRecord {
     capability: String,
     stream_id: String,
     operation_id: String,
+    creation_mode: String,
     last_sequence: i64,
     version: u64,
     /// A compact document manifest. Canonical Markdown and derived blocks are
@@ -839,7 +843,7 @@ fn load_run_from_connection(
 ) -> Result<CreationRunRecord, String> {
     let stored = connection
         .query_row(
-            "SELECT capability, stream_id, operation_id, last_sequence, version,
+            "SELECT capability, stream_id, operation_id, creation_mode, last_sequence, version,
                     run_json, base_document_json, candidate_document_json,
                     created_at, updated_at, completed_at
              FROM creation_writing_runs WHERE workspace_scope=?1 AND id=?2",
@@ -849,27 +853,28 @@ fn load_run_from_connection(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(3)?,
                     row.get::<_, i64>(4)?,
-                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(5)?,
                     row.get::<_, String>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                     row.get::<_, String>(9)?,
-                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, Option<String>>(11)?,
                 ))
             },
         )
         .optional()
         .map_err(|error| format!("无法读取 WritingRun：{error}"))?
         .ok_or_else(|| "未找到 WritingRun".to_string())?;
-    let writing_run = serde_json::from_str(&stored.5)
+    let writing_run = serde_json::from_str(&stored.6)
         .map_err(|error| format!("WritingRun 数据已损坏：{error}"))?;
-    let base_document: Value = serde_json::from_str(&stored.6)
+    let base_document: Value = serde_json::from_str(&stored.7)
         .map_err(|error| format!("WritingRun 基础文稿已损坏：{error}"))?;
     let base_document = compact_document_value(&base_document)?;
     let candidate_document = stored
-        .7
+        .8
         .map(|text| {
             let value: Value = serde_json::from_str(&text)
                 .map_err(|error| format!("WritingRun 候选文稿已损坏：{error}"))?;
@@ -881,16 +886,17 @@ fn load_run_from_connection(
         capability: stored.0,
         stream_id: stored.1,
         operation_id: stored.2,
-        last_sequence: stored.3,
-        version: stored.4.max(1) as u64,
+        creation_mode: stored.3,
+        last_sequence: stored.4,
+        version: stored.5.max(1) as u64,
         base_document,
         candidate_document,
         latest_checkpoint: latest_checkpoint(connection, workspace_scope, run_id)?,
         events: Vec::new(),
         usage: usage_summary(connection, workspace_scope, run_id)?,
-        created_at: stored.8,
-        updated_at: stored.9,
-        completed_at: stored.10,
+        created_at: stored.9,
+        updated_at: stored.10,
+        completed_at: stored.11,
     })
 }
 
@@ -977,6 +983,16 @@ pub fn begin_creation_run(
         "WritingRun 基础文稿 manifest",
     )?;
     let document_revision = sqlite_integer(input.document.revision, "WritingRun documentRevision")?;
+    let creation_mode = input
+        .creation_mode
+        .as_deref()
+        .unwrap_or("quick")
+        .trim();
+    if !matches!(creation_mode, "quick" | "professional") {
+        return Err(format!(
+            "无效的创作模式：{creation_mode}，必须是 'quick' 或 'professional'"
+        ));
+    }
     let now = Utc::now().to_rfc3339();
     let mut connection = database
         .connection
@@ -1008,10 +1024,10 @@ pub fn begin_creation_run(
             "INSERT INTO creation_writing_runs
              (workspace_scope, id, document_id, document_revision, capability, state,
               input_hash, output_hash, run_json, base_document_json,
-              candidate_document_json, stream_id, operation_id, last_sequence,
-              version, created_at, updated_at, completed_at)
+              candidate_document_json, stream_id, operation_id, creation_mode,
+              last_sequence, version, created_at, updated_at, completed_at)
              VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, NULL, ?7, ?8, NULL,
-                     ?9, ?10, -1, 1, ?11, ?11, NULL)",
+                     ?9, ?10, ?11, -1, 1, ?12, ?12, NULL)",
             params![
                 workspace_scope,
                 run_id,
@@ -1023,6 +1039,7 @@ pub fn begin_creation_run(
                 base_document_json,
                 stream_id,
                 operation_id,
+                creation_mode,
                 now,
             ],
         )
@@ -1214,10 +1231,22 @@ fn validate_stream_event(
     Ok((event_id.to_string(), event_type.to_string()))
 }
 
-fn update_run_state_for_event(run: &mut Value, event_type: &str, timestamp: &str) -> String {
+fn update_run_state_for_event(
+    run: &mut Value,
+    event_type: &str,
+    timestamp: &str,
+    creation_mode: &str,
+) -> String {
     let next_state = match event_type {
         "streamStarted" => "running".to_string(),
-        "streamCompleted" => "awaitingReview".to_string(),
+        "streamCompleted" => {
+            // 快速模式：直接完成，跳过审核
+            if creation_mode == "quick" {
+                "succeeded".to_string()
+            } else {
+                "awaitingReview".to_string()
+            }
+        }
         "streamFailed" => "failed".to_string(),
         "streamCancelled" => "cancelled".to_string(),
         _ => match run.get("state").and_then(Value::as_str) {
@@ -1226,7 +1255,7 @@ fn update_run_state_for_event(run: &mut Value, event_type: &str, timestamp: &str
         },
     };
     set_value_string(run, "state", Some(&next_state));
-    if matches!(next_state.as_str(), "failed" | "cancelled") {
+    if matches!(next_state.as_str(), "failed" | "cancelled" | "succeeded") {
         set_value_string(run, "completedAt", Some(timestamp));
     }
     next_state
@@ -1249,7 +1278,7 @@ pub fn append_creation_stream_event(
         .map_err(|error| format!("无法开始 Creation Agent Stream 事务：{error}"))?;
     let stored = transaction
         .query_row(
-            "SELECT capability, state, stream_id, operation_id, last_sequence, run_json
+            "SELECT capability, state, stream_id, operation_id, last_sequence, run_json, creation_mode
              FROM creation_writing_runs WHERE workspace_scope=?1 AND id=?2",
             params![workspace_scope, run_id],
             |row| {
@@ -1260,6 +1289,7 @@ pub fn append_creation_stream_event(
                     row.get::<_, String>(3)?,
                     row.get::<_, i64>(4)?,
                     row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
                 ))
             },
         )
@@ -1306,9 +1336,11 @@ pub fn append_creation_stream_event(
         .map_err(|error| format!("无法保存 Creation Agent Stream 事件：{error}"))?;
     let mut run: Value = serde_json::from_str(&stored.5)
         .map_err(|error| format!("WritingRun 数据已损坏：{error}"))?;
-    let next_state = update_run_state_for_event(&mut run, &event_type, timestamp);
+    let creation_mode = &stored.6;
+    let next_state = update_run_state_for_event(&mut run, &event_type, timestamp, creation_mode);
     let run_json = json_text(&run, "WritingRun")?;
-    let completed_at = matches!(next_state.as_str(), "failed" | "cancelled").then_some(timestamp);
+    let completed_at = matches!(next_state.as_str(), "failed" | "cancelled" | "succeeded")
+        .then_some(timestamp);
     transaction
         .execute(
             "UPDATE creation_writing_runs
@@ -1352,7 +1384,7 @@ pub fn checkpoint_creation_run(
         .map_err(|error| format!("无法开始 Creation checkpoint 事务：{error}"))?;
     let stored = transaction
         .query_row(
-            "SELECT document_id, document_revision, input_hash, state, last_sequence
+            "SELECT document_id, document_revision, input_hash, state, last_sequence, creation_mode
              FROM creation_writing_runs WHERE workspace_scope=?1 AND id=?2",
             params![workspace_scope, run_id],
             |row| {
@@ -1362,12 +1394,16 @@ pub fn checkpoint_creation_run(
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
                 ))
             },
         )
         .optional()
         .map_err(|error| format!("无法读取待 checkpoint WritingRun：{error}"))?
         .ok_or_else(|| "未找到 WritingRun".to_string())?;
+
+    let creation_mode = &stored.5;
+
     if !ACTIVE_RUN_STATES.contains(&stored.3.as_str()) {
         return Err("终态 WritingRun 不能新增 checkpoint".to_string());
     }
@@ -1388,9 +1424,20 @@ pub fn checkpoint_creation_run(
         .candidate_document
         .map(|document| normalize_document(document).map(|result| result.document))
         .transpose()?;
-    if let Some(document) = &candidate {
-        ensure_no_embedded_binary(&document.canonical_markdown)?;
+
+    // 快速模式：跳过候选审核逻辑
+    if creation_mode == "quick" {
+        if candidate.is_some() {
+            log::debug!("快速模式：忽略候选文稿，不进行审核");
+        }
+        // 快速模式下不处理 candidate_document
+    } else {
+        // 专业模式：保持原有的候选审核逻辑
+        if let Some(document) = &candidate {
+            ensure_no_embedded_binary(&document.canonical_markdown)?;
+        }
     }
+
     let checkpoint_id = input
         .checkpoint
         .get("checkpointId")
@@ -1439,10 +1486,16 @@ pub fn checkpoint_creation_run(
             json_text(writing_run, "checkpoint WritingRun")
         })
         .transpose()?;
-    let candidate_document_json = candidate
-        .as_ref()
-        .map(|document| json_text(&compact_document_manifest(document), "候选文稿 manifest"))
-        .transpose()?;
+    let candidate_document_json = if creation_mode == "quick" {
+        // 快速模式：不存储候选文稿
+        None
+    } else {
+        // 专业模式：存储候选文稿
+        candidate
+            .as_ref()
+            .map(|document| json_text(&compact_document_manifest(document), "候选文稿 manifest"))
+            .transpose()?
+    };
     let now = Utc::now().to_rfc3339();
     transaction
         .execute(
