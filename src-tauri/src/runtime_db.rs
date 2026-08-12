@@ -18651,6 +18651,10 @@ pub async fn indexed_search(
             .then_with(|| left.relative_path.cmp(&right.relative_path))
     });
     results.truncate(max_results);
+
+    // 记录搜索事件
+    let _ = crate::metrics::record_activity_event(database.inner(), "search", None, None, None);
+
     Ok(results)
 }
 

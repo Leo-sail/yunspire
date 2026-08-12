@@ -2030,6 +2030,16 @@ pub fn read_vault_note(
     let bytes = read_file_limited(&target)?;
     let content =
         String::from_utf8(bytes.clone()).map_err(|_| "笔记不是有效 UTF-8 Markdown".to_string())?;
+
+    // 记录笔记查看事件
+    let _ = crate::metrics::record_activity_event(
+        database.inner(),
+        "note_view",
+        Some(&vault_id),
+        Some(&normalized_relative),
+        None,
+    );
+
     Ok(VaultNote {
         vault_id,
         vault_name,

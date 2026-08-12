@@ -2039,6 +2039,16 @@ pub fn accept_creation_candidate(
     transaction
         .commit()
         .map_err(|error| format!("无法提交候选接受事务：{error}"))?;
+
+    // 记录创作完成事件
+    let _ = crate::metrics::record_activity_event(
+        database.inner(),
+        "creation",
+        None,
+        None,
+        Some(&run_id),
+    );
+
     let run = load_run_mutation_receipt_from_connection(&connection, &workspace_scope, &run_id)?;
     Ok(CreationCandidateReviewReceipt { run, grounding })
 }

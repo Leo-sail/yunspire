@@ -3356,6 +3356,15 @@ pub async fn extract_capture_source_v2(
     let capture_id = task_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let workspace_scope = database.local_workspace_scope()?;
 
+    // 记录采集事件
+    let _ = crate::metrics::record_activity_event(
+        database.inner(),
+        "capture",
+        None,
+        None,
+        Some(&capture_id),
+    );
+
     // 带重复检测的解析
     Ok(parse_capture_extraction_with_dedup(
         extraction,
