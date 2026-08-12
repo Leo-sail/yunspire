@@ -1,4 +1,5 @@
 mod api_response;
+mod api_service;
 mod assistant_runtime;
 mod capture_pipeline;
 mod capture_result;
@@ -11,6 +12,7 @@ mod content_value_ux;
 mod creation;
 mod db_instrumentation;
 mod db_pool;
+mod db_wrapper;
 mod durable_asset;
 mod enhanced_ux;
 mod error;
