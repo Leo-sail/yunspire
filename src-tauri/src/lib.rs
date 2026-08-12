@@ -528,6 +528,7 @@ pub fn run() {
                 execution_plan::get_execution_logs,
                 knowledge_health::get_knowledge_health_dashboard,
                 metrics::get_metrics_report,
+                metrics::record_note_view,
                 model_provider::analyze_capture_content,
                 model_provider::bind_capture_analysis_write_manifest,
                 model_provider::issue_direct_write_receipt,

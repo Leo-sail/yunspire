@@ -53,7 +53,7 @@ const MAX_INBOUND_RECORD_BYTES: usize = 512 * 1024;
 const MAX_RUNTIME_PLAN_BYTES: usize = 256 * 1024;
 const MAX_RUNTIME_EVIDENCE_BYTES: usize = 256 * 1024;
 const DEFAULT_LOCAL_WORKSPACE_SCOPE: &str = "local";
-const CURRENT_SCHEMA_VERSION: i64 = 44;
+const CURRENT_SCHEMA_VERSION: i64 = 45;
 const APPLICATION_AUTHORIZATION_VERSION: i64 = 1;
 const VAULT_INDEX_DEBOUNCE_MS: i64 = 300;
 const VAULT_INDEX_MAX_ATTEMPTS: i64 = 5;
@@ -13017,6 +13017,27 @@ fn run_migrations(connection: &Connection) -> Result<(), String> {
                  COMMIT;",
             )
             .map_err(|error| format!("SQLite migration 44 失败：{error}"))?;
+    }
+    if version < 45 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS user_activity_events (
+                   id TEXT PRIMARY KEY,
+                   workspace_scope TEXT NOT NULL,
+                   event_type TEXT NOT NULL CHECK(event_type IN ('note_view', 'note_edit', 'search', 'capture', 'creation')),
+                   vault_id TEXT,
+                   note_path TEXT,
+                   entity_id TEXT,
+                   occurred_at TEXT NOT NULL,
+                   FOREIGN KEY(workspace_scope) REFERENCES local_workspace_scopes(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_activity_events_time
+                   ON user_activity_events(workspace_scope, event_type, occurred_at);
+                 PRAGMA user_version=45;
+                 COMMIT;",
+            )
+            .map_err(|error| format!("SQLite migration 45 失败：{error}"))?;
     }
     Ok(())
 }
