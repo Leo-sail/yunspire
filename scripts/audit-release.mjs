@@ -9,6 +9,7 @@ const root = path.resolve(process.cwd());
 const execFileAsync = promisify(execFile);
 const ignoredDirectories = new Set([
   '.git',
+  '.claude',
   'node_modules',
   'dist',
   'storybook-static',
