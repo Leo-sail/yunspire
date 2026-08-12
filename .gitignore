@@ -1,60 +1,41 @@
-# macOS and editors
+# Rust
+target/
+Cargo.lock
+
+# Node
+node_modules/
+dist/
+
+# OS
 .DS_Store
-.AppleDouble
-.LSOverride
-._*
-.idea/
+Thumbs.db
+
+# IDE
 .vscode/
-*.swp
-*.swo
-*~
+.idea/
 
-# Local user knowledge and Obsidian state
-/vault/
-.obsidian/
-
-# Local runtime data and credentials
-*.sqlite
-*.sqlite-*
-*.sqlite.key
-*.db
-*.key
-*.pem
+# Local
+*.local.*
 .env
-.env.*
-!.env.example
-/runtime/
-/logs/
-/checkpoints/
-/backups/
-/cache/
+.env.local
 
-# Dependencies and generated output
-/node_modules/
-/dist/
-/storybook-static/
-/desktop-ui/generated/
-/src-tauri/target/
-/src-tauri/gen/
-/release/
-/installers/
-/artifacts/
-*.app
-*.dmg
-*.msi
-*.exe
-*.zip
-*.sig
-*.sha256
-__pycache__/
-*.py[cod]
-
-# Local verification artifacts
-/.playwright-cli/
-/design-qa/
-/screenshots/
-/test-results/
-/tests/
-/coverage/
+# Build artifacts
 *.log
 *.tmp
+
+# Claude worktrees
+.claude/worktrees/
+
+# Generated files
+desktop-ui/generated/
+
+# User data (must never be committed)
+vault/
+*.db
+*.db-shm
+*.db-wal
+
+# Development artifacts
+screenshots/
+test-vaults/
+.obsidian/
