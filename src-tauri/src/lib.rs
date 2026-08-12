@@ -28,6 +28,7 @@ mod runtime_db;
 mod scheduler;
 mod search_match;
 mod skill_lifecycle;
+mod smart_features;
 mod spaced_repetition;
 mod task_runtime;
 mod trace;
@@ -547,6 +548,9 @@ pub fn run() {
                 spaced_repetition::record_note_review,
                 spaced_repetition::get_due_for_review,
                 spaced_repetition::get_review_plan_summary,
+                smart_features::generate_learning_path,
+                smart_features::suggest_tags_for_note,
+                smart_features::identify_knowledge_gaps,
                 model_provider::analyze_capture_content,
                 model_provider::bind_capture_analysis_write_manifest,
                 model_provider::issue_direct_write_receipt,
