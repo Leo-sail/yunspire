@@ -4,7 +4,9 @@ mod command_bus;
 mod connectors;
 mod creation;
 mod durable_asset;
+mod error;
 mod execution_ticket;
+mod lease_heartbeat;
 mod memory;
 mod model_config;
 mod model_provider;
@@ -144,31 +146,82 @@ fn start_background_vault_indexing(
     };
     if let Some(previous) = task_slot.take() {
         previous.cancellation.store(true, Ordering::Release);
+        // 等待旧任务完成（最多5秒）
+        let _ = previous
+            .completed
+            .recv_timeout(std::time::Duration::from_secs(5));
     }
+    let vault_count = vaults.len();
     let cancellation = Arc::new(AtomicBool::new(false));
     let task_cancellation = Arc::clone(&cancellation);
     let (completed_tx, completed_rx) = mpsc::sync_channel(1);
     let app_handle = app.clone();
+
+    log::info!("开始后台索引 {} 个 Vault", vault_count);
+
     tauri::async_runtime::spawn_blocking(move || {
+        use std::time::Instant;
+        let start = Instant::now();
+        const MAX_TOTAL_INDEX_TIME_SECS: u64 = 3600; // 1小时总超时
+        const HEARTBEAT_INTERVAL_SECS: u64 = 10;
+        let mut last_heartbeat = Instant::now();
+        let mut succeeded = 0;
+        let mut failed = 0;
+
         let database = app_handle.state::<runtime_db::RuntimeDatabase>();
-        for vault in vaults {
+        for (idx, vault) in vaults.iter().enumerate() {
             let is_cancelled = || {
                 task_cancellation.load(Ordering::Acquire)
                     || !local_runtime_generation_is_active(&app_handle, generation)
             };
+
             if is_cancelled() {
+                log::info!("索引任务被取消，已处理 {}/{}", idx, vaults.len());
                 break;
             }
+
+            // 全局超时检查
+            if start.elapsed().as_secs() > MAX_TOTAL_INDEX_TIME_SECS {
+                log::warn!("索引任务超过1小时全局超时，已处理 {}/{}", idx, vaults.len());
+                break;
+            }
+
+            // 心跳日志
+            if last_heartbeat.elapsed().as_secs() > HEARTBEAT_INTERVAL_SECS {
+                log::info!(
+                    "索引进度：{}/{} ({:.1}%), 已耗时 {:.1}s",
+                    idx,
+                    vaults.len(),
+                    (idx as f64 / vaults.len() as f64) * 100.0,
+                    start.elapsed().as_secs_f64()
+                );
+                last_heartbeat = Instant::now();
+            }
+
             if vault.connection_state == "connected" {
-                if let Err(error) =
-                    database.rebuild_index_for_vault_with_cancellation(&vault.id, &is_cancelled)
-                {
-                    if !is_cancelled() {
-                        log::warn!("无法重建 Vault {} 的索引：{error}", vault.name);
+                match database.rebuild_index_for_vault_with_cancellation(&vault.id, &is_cancelled) {
+                    Ok(_) => {
+                        succeeded += 1;
+                        log::debug!("Vault {} 索引完成", vault.name);
+                    }
+                    Err(error) => {
+                        if !is_cancelled() {
+                            failed += 1;
+                            log::warn!("Vault {} 索引失败：{}", vault.name, error);
+                        }
                     }
                 }
             }
         }
+
+        let duration_secs = start.elapsed().as_secs();
+        log::info!(
+            "后台索引完成：成功 {}, 失败 {}, 耗时 {}s",
+            succeeded,
+            failed,
+            duration_secs
+        );
+
         let _ = completed_tx.send(());
     });
     *task_slot = Some(BackgroundVaultIndexTask {

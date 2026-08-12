@@ -4773,6 +4773,68 @@ impl RuntimeDatabase {
         })
     }
 
+    /// 获取指定 worker 的所有活动 step claims
+    pub(crate) fn get_active_step_claims(
+        &self,
+        workspace_scope: &str,
+        worker_id: &str,
+    ) -> Result<Vec<crate::task_runtime::RuntimeTaskStepClaim>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+
+        let mut statement = connection
+            .prepare(
+                "SELECT claim_id, task_id, plan_revision, step_id, step_kind, title,
+                        depends_on, parameters, effect_class, attempt, lease_owner,
+                        lease_expires_at, reserved_tool_calls, reserved_runtime_seconds,
+                        reserved_tokens, reserved_cost, cancellation_fence, claimed_at
+                 FROM runtime_task_step_runs
+                 WHERE workspace_scope=?1 AND lease_owner=?2 AND state='claimed'
+                 ORDER BY claimed_at ASC",
+            )
+            .map_err(|error| format!("无法准备活动步骤查询：{error}"))?;
+
+        let claims = statement
+            .query_map(params![workspace_scope, worker_id], |row| {
+                let depends_on_json: String = row.get(6)?;
+                let depends_on: Vec<String> = serde_json::from_str(&depends_on_json)
+                    .unwrap_or_default();
+                let parameters_json: String = row.get(7)?;
+                let parameters: serde_json::Value = serde_json::from_str(&parameters_json)
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+                Ok(crate::task_runtime::RuntimeTaskStepClaim {
+                    claim_id: row.get(0)?,
+                    runtime_task_id: row.get(1)?,
+                    plan_revision: row.get::<_, i64>(2)? as u64,
+                    step_id: row.get(3)?,
+                    step_kind: crate::task_runtime::RuntimeTaskStepKind::parse(&row.get::<_, String>(4)?)
+                        .unwrap_or(crate::task_runtime::RuntimeTaskStepKind::Capability),
+                    title: row.get(5)?,
+                    depends_on,
+                    parameters,
+                    effect_class: crate::task_runtime::RuntimeTaskStepEffectClass::parse(&row.get::<_, String>(8)?)
+                        .unwrap_or(crate::task_runtime::RuntimeTaskStepEffectClass::Effectful),
+                    attempt: row.get::<_, i64>(9)? as u64,
+                    lease_owner: row.get(10)?,
+                    lease_expires_at: row.get(11)?,
+                    reserved_tool_calls: row.get::<_, i64>(12)? as u64,
+                    reserved_runtime_seconds: row.get::<_, i64>(13)? as u64,
+                    reserved_tokens: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
+                    reserved_cost: row.get(15)?,
+                    cancellation_fence: row.get::<_, i64>(16)? as u64,
+                    claimed_at: row.get(17)?,
+                })
+            })
+            .map_err(|error| format!("无法执行活动步骤查询：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法读取活动步骤：{error}"))?;
+
+        Ok(claims)
+    }
+
     pub(crate) fn validate_runtime_execution_ticket_renewal(
         &self,
         workspace_scope: &str,

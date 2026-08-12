@@ -42,7 +42,7 @@ pub enum ErrorCode {
     BudgetExceeded,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ErrorContext {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,17 +53,6 @@ pub struct ErrorContext {
     pub task_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_path: Option<String>,
-}
-
-impl Default for ErrorContext {
-    fn default() -> Self {
-        Self {
-            vault_id: None,
-            note_id: None,
-            task_id: None,
-            file_path: None,
-        }
-    }
 }
 
 impl YunspireError {
@@ -98,12 +87,17 @@ impl YunspireError {
         self
     }
 
+    #[allow(dead_code)]
     pub fn permission_denied(resource: &str) -> Self {
-        Self::new(ErrorCode::PermissionDenied, format!("没有权限访问 {}", resource))
-            .recoverable()
-            .with_action("请在设置 > 权限中授权")
+        Self::new(
+            ErrorCode::PermissionDenied,
+            format!("没有权限访问 {}", resource),
+        )
+        .recoverable()
+        .with_action("请在设置 > 权限中授权")
     }
 
+    #[allow(dead_code)]
     pub fn file_not_found(path: &str) -> Self {
         Self::new(ErrorCode::FileNotFound, "找不到指定的文件")
             .recoverable()
@@ -115,6 +109,7 @@ impl YunspireError {
             })
     }
 
+    #[allow(dead_code)]
     pub fn version_conflict(resource: &str, expected: i64, actual: i64) -> Self {
         Self::new(ErrorCode::VersionConflict, format!("{} 版本冲突", resource))
             .recoverable()
@@ -122,12 +117,14 @@ impl YunspireError {
             .with_action("请刷新后重试")
     }
 
+    #[allow(dead_code)]
     pub fn database_error(details: impl Into<String>) -> Self {
         Self::new(ErrorCode::DatabaseError, "数据库操作失败")
             .with_details(details)
             .with_action("如果问题持续，请检查数据库完整性")
     }
 
+    #[allow(dead_code)]
     pub fn model_provider_error(provider: &str, details: impl Into<String>) -> Self {
         Self::new(
             ErrorCode::ModelProviderError,
@@ -174,4 +171,5 @@ impl From<std::io::Error> for YunspireError {
     }
 }
 
+#[allow(dead_code)]
 pub type CommandResult<T> = Result<T, YunspireError>;
