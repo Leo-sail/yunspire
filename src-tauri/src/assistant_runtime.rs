@@ -1251,11 +1251,36 @@ pub(crate) fn finish_request(
     if state == "succeeded" && current.state != "running" {
         return Err("尚未领取的 AI助手请求不能标记为完成".to_string());
     }
+
+    // 提取执行计划
+    let assistant_reply = string_at(&input.result, "assistantReply", "assistant_reply")
+        .unwrap_or_default();
+    let user_message = string_at(&input.result, "userMessage", "user_message")
+        .unwrap_or_default();
+
+    let execution_plan = if !assistant_reply.is_empty() {
+        crate::execution_plan_extractor::extract_execution_plan(assistant_reply, user_message)
+    } else {
+        None
+    };
+
+    let execution_plan_json = execution_plan
+        .as_ref()
+        .and_then(|plan| serde_json::to_string(plan).ok());
+
     tx.execute(
         "UPDATE assistant_requests SET state=?3, result_json=?4, last_error=?5,
-             completed_at=?6, updated_at=?6
+             execution_plan_json=?6, completed_at=?7, updated_at=?7
              WHERE workspace_scope=?1 AND id=?2 AND state IN ('queued', 'running')",
-        params![scope, input.request_id, state, result_json, error, now],
+        params![
+            scope,
+            input.request_id,
+            state,
+            result_json,
+            error,
+            execution_plan_json,
+            now
+        ],
     )
     .map_err(|database_error| format!("无法保存 AI助手请求终态：{database_error}"))?;
     if state != "cancelled" {
@@ -1445,6 +1470,63 @@ pub(crate) fn recover_requests_for_startup(
         .map_err(|error| format!("无法读取可恢复的 AI助手请求：{error}"))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("无法解析可恢复的 AI助手请求：{error}"))
+}
+
+/// 更新执行步骤
+#[tauri::command]
+pub fn update_assistant_execution_step(
+    database: State<'_, RuntimeDatabase>,
+    request_id: String,
+    step_number: usize,
+) -> Result<(), String> {
+    let scope = database.local_workspace_scope()?;
+    let connection = database
+        .connection
+        .lock()
+        .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+
+    let now = Utc::now().to_rfc3339();
+
+    connection
+        .execute(
+            "UPDATE assistant_requests
+             SET current_step=?3, updated_at=?4
+             WHERE workspace_scope=?1 AND id=?2",
+            params![scope, request_id.trim(), step_number as i64, now],
+        )
+        .map_err(|error| format!("无法更新执行步骤：{error}"))?;
+
+    Ok(())
+}
+
+/// 获取执行计划
+#[tauri::command]
+pub fn get_assistant_execution_plan(
+    database: State<'_, RuntimeDatabase>,
+    request_id: String,
+) -> Result<Option<crate::execution_plan::ExecutionPlan>, String> {
+    let scope = database.local_workspace_scope()?;
+    let connection = database
+        .connection
+        .lock()
+        .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+
+    let plan_json = connection
+        .query_row(
+            "SELECT execution_plan_json FROM assistant_requests
+             WHERE workspace_scope=?1 AND id=?2",
+            params![scope, request_id.trim()],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|error| format!("无法读取执行计划：{error}"))?
+        .flatten();
+
+    plan_json
+        .as_ref()
+        .and_then(|json| serde_json::from_str(json).ok())
+        .map(Ok)
+        .transpose()
 }
 
 #[tauri::command]

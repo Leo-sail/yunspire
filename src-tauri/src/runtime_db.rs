@@ -53,7 +53,7 @@ const MAX_INBOUND_RECORD_BYTES: usize = 512 * 1024;
 const MAX_RUNTIME_PLAN_BYTES: usize = 256 * 1024;
 const MAX_RUNTIME_EVIDENCE_BYTES: usize = 256 * 1024;
 const DEFAULT_LOCAL_WORKSPACE_SCOPE: &str = "local";
-const CURRENT_SCHEMA_VERSION: i64 = 42;
+const CURRENT_SCHEMA_VERSION: i64 = 44;
 const APPLICATION_AUTHORIZATION_VERSION: i64 = 1;
 const VAULT_INDEX_DEBOUNCE_MS: i64 = 300;
 const VAULT_INDEX_MAX_ATTEMPTS: i64 = 5;
@@ -13006,6 +13006,17 @@ fn run_migrations(connection: &Connection) -> Result<(), String> {
                  COMMIT;",
             )
             .map_err(|error| format!("SQLite migration 43 失败：{error}"))?;
+    }
+    if version < 44 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE assistant_requests ADD COLUMN execution_plan_json TEXT;
+                 ALTER TABLE assistant_requests ADD COLUMN current_step INTEGER;
+                 PRAGMA user_version=44;
+                 COMMIT;",
+            )
+            .map_err(|error| format!("SQLite migration 44 失败：{error}"))?;
     }
     Ok(())
 }

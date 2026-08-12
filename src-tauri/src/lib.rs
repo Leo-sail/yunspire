@@ -8,6 +8,7 @@ mod creation;
 mod durable_asset;
 mod error;
 mod execution_plan;
+mod execution_plan_extractor;
 mod execution_ticket;
 mod knowledge_health;
 mod lease_heartbeat;
@@ -469,6 +470,8 @@ pub fn run() {
                 assistant_runtime::cancel_assistant_runtime_request,
                 assistant_runtime::advance_assistant_conversation_revision,
                 assistant_runtime::recover_assistant_requests,
+                assistant_runtime::update_assistant_execution_step,
+                assistant_runtime::get_assistant_execution_plan,
                 command_bus::evaluate_application_command,
                 command_bus::submit_application_command,
                 execution_ticket::retire_execution_ticket,
