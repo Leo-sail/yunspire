@@ -512,6 +512,7 @@ pub fn run() {
                 capture_pipeline::prepare_capture_image_analysis_input,
                 capture_pipeline::discard_capture_attachments,
                 capture_pipeline::extract_capture_source,
+                capture_pipeline::extract_capture_source_v2,
                 model_provider::analyze_capture_content,
                 model_provider::bind_capture_analysis_write_manifest,
                 model_provider::issue_direct_write_receipt,

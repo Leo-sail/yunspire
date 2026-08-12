@@ -3026,3 +3026,202 @@ fn extract_capture_source_blocking(job: CaptureExtractionJob) -> Result<CaptureE
     }
     Ok(capture_extraction(source_type, result))
 }
+
+/// 解析 CaptureExtraction 为 CaptureResult（包含优雅降级信息）
+fn parse_capture_extraction(extraction: CaptureExtraction) -> crate::capture_result::CaptureResult {
+    use crate::capture_result::*;
+
+    let result_obj = extraction.result.as_object();
+
+    // 检查是否有错误或警告
+    let has_errors = result_obj
+        .and_then(|obj| obj.get("errors"))
+        .and_then(|v| v.as_array())
+        .map(|arr| !arr.is_empty())
+        .unwrap_or(false);
+
+    let warnings: Vec<CaptureWarning> = result_obj
+        .and_then(|obj| obj.get("warnings"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|msg| CaptureWarning {
+                    warning_type: "extraction_warning".to_string(),
+                    message: msg.to_string(),
+                    affected_resource: None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // 检查图片相关字段
+    let linked_images_total = result_obj
+        .and_then(|obj| obj.get("linked_images_total"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+
+    let linked_images_succeeded = result_obj
+        .and_then(|obj| obj.get("linked_images_succeeded"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+
+    let linked_images_failed: Vec<FailedImage> = result_obj
+        .and_then(|obj| obj.get("linked_images_failed"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    item.as_object().and_then(|obj| {
+                        let url = obj.get("url")?.as_str()?.to_string();
+                        let reason = obj
+                            .get("reason")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("未知错误")
+                            .to_string();
+                        Some(FailedImage {
+                            url,
+                            reason,
+                            is_critical: false,
+                        })
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let image_enhancement = if linked_images_total > 0 {
+        Some(ImageEnhancementResult {
+            total: linked_images_total,
+            succeeded: linked_images_succeeded,
+            failed: linked_images_failed.clone(),
+            retryable: !linked_images_failed.is_empty(),
+        })
+    } else {
+        None
+    };
+
+    // 检查模型分析
+    let model_analysis_attempted = result_obj
+        .and_then(|obj| obj.get("model_analysis_attempted"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let model_analysis_succeeded = result_obj
+        .and_then(|obj| obj.get("model_analysis"))
+        .map(|v| !v.is_null())
+        .unwrap_or(false);
+
+    let model_analysis = if model_analysis_attempted {
+        if model_analysis_succeeded {
+            Some(ModelEnhancementResult::success(serde_json::json!({})))
+        } else {
+            let error = result_obj
+                .and_then(|obj| obj.get("model_analysis_error"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("模型分析失败")
+                .to_string();
+            Some(ModelEnhancementResult::failure(error))
+        }
+    } else {
+        None
+    };
+
+    // 检查 Agent 库保存
+    let agent_vault_attempted = result_obj
+        .and_then(|obj| obj.get("agent_vault_attempted"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let agent_vault_succeeded = result_obj
+        .and_then(|obj| obj.get("agent_vault_saved"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let agent_vault = if agent_vault_attempted {
+        if agent_vault_succeeded {
+            Some(AgentVaultResult::success())
+        } else {
+            let error = result_obj
+                .and_then(|obj| obj.get("agent_vault_error"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("Agent 库保存失败")
+                .to_string();
+            Some(AgentVaultResult::failure(error))
+        }
+    } else {
+        None
+    };
+
+    let enhancements = EnhancementResults {
+        linked_images: image_enhancement,
+        model_analysis,
+        agent_vault,
+    };
+
+    // 判断整体状态
+    let has_enhancement_failures = !linked_images_failed.is_empty()
+        || (model_analysis_attempted && !model_analysis_succeeded)
+        || (agent_vault_attempted && !agent_vault_succeeded);
+
+    let status = if has_errors {
+        CaptureStatus::CoreFailed
+    } else if has_enhancement_failures || !warnings.is_empty() {
+        CaptureStatus::PartialSuccess
+    } else {
+        CaptureStatus::FullSuccess
+    };
+
+    CaptureResult {
+        status,
+        core_saved: !has_errors,
+        enhancements,
+        warnings,
+        error: if has_errors {
+            result_obj
+                .and_then(|obj| obj.get("errors"))
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        } else {
+            None
+        },
+    }
+}
+
+/// 采集源提取 v2（支持优雅降级）
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn extract_capture_source_v2(
+    app: tauri::AppHandle,
+    database: tauri::State<'_, RuntimeDatabase>,
+    source_type: String,
+    source: String,
+    files: Vec<CaptureInputFile>,
+    authorization_id: Option<String>,
+    authorization_state: tauri::State<'_, CaptureAuthorizationState>,
+    task_id: Option<String>,
+    speech_locale: Option<String>,
+    task_state: tauri::State<'_, CaptureTaskState>,
+    upload_state: tauri::State<'_, CaptureUploadState>,
+) -> Result<crate::capture_result::CaptureResult, String> {
+    // 调用现有的 v1 函数
+    let extraction = extract_capture_source(
+        app,
+        database,
+        source_type,
+        source,
+        files,
+        authorization_id,
+        authorization_state,
+        task_id,
+        speech_locale,
+        task_state,
+        upload_state,
+    )
+    .await?;
+
+    // 解析为 CaptureResult
+    Ok(parse_capture_extraction(extraction))
+}

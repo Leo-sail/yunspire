@@ -39,11 +39,14 @@ pub struct CaptureResult {
 #[serde(rename_all = "camelCase")]
 pub struct EnhancementResults {
     /// 外链图片处理结果
-    pub linked_images: ImageEnhancementResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linked_images: Option<ImageEnhancementResult>,
     /// 模型分析结果
-    pub model_analysis: ModelEnhancementResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_analysis: Option<ModelEnhancementResult>,
     /// Agent 库保存结果
-    pub agent_vault: AgentVaultResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_vault: Option<AgentVaultResult>,
 }
 
 /// 图片增强结果
