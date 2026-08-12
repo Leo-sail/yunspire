@@ -4,6 +4,7 @@ mod capture_result;
 mod command_bus;
 mod connectors;
 mod content_fingerprint;
+mod content_intelligence;
 mod content_value;
 mod content_value_ux;
 mod creation;
@@ -554,6 +555,10 @@ pub fn run() {
                 smart_features::identify_knowledge_gaps,
                 graph_visualization::get_graph_visualization,
                 graph_visualization::get_node_subgraph,
+                content_intelligence::generate_note_summary,
+                content_intelligence::extract_keywords,
+                content_intelligence::identify_note_topic,
+                content_intelligence::recommend_similar_content,
                 model_provider::analyze_capture_content,
                 model_provider::bind_capture_analysis_write_manifest,
                 model_provider::issue_direct_write_receipt,
