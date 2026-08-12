@@ -17,6 +17,7 @@ mod policy;
 mod prompt;
 mod runtime_db;
 mod scheduler;
+mod search_match;
 mod skill_lifecycle;
 mod task_runtime;
 mod trace;
