@@ -13,6 +13,7 @@ mod error;
 mod execution_plan;
 mod execution_plan_extractor;
 mod execution_ticket;
+mod knowledge_graph;
 mod knowledge_health;
 mod lease_heartbeat;
 mod memory;
@@ -538,6 +539,10 @@ pub fn run() {
                 content_value_ux::calculate_notes_value_batch,
                 content_value_ux::get_actionable_suggestions,
                 enhanced_ux::get_comprehensive_insights,
+                knowledge_graph::build_knowledge_graph,
+                knowledge_graph::get_hub_nodes,
+                knowledge_graph::get_isolated_nodes,
+                knowledge_graph::find_related_notes,
                 model_provider::analyze_capture_content,
                 model_provider::bind_capture_analysis_write_manifest,
                 model_provider::issue_direct_write_receipt,
