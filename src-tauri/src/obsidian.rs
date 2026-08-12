@@ -238,6 +238,8 @@ pub struct VaultSearchResult {
     excerpt: String,
     modified_at: String,
     score: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    match_reasons: Option<crate::search_match::MatchReasons>,
 }
 
 #[derive(Serialize)]
@@ -1971,6 +1973,21 @@ pub fn search_vault_notes(
             }
             let title = title_from_markdown(&path, &content);
             let title_match = title.to_lowercase().contains(&query_lower);
+
+            // 分析匹配原因
+            use crate::search_match::MatchReasonAnalyzer;
+            let mut match_reasons = crate::search_match::MatchReasons::default();
+
+            if title_match {
+                match_reasons.title_match = MatchReasonAnalyzer::analyze_title_match(&title, query);
+            }
+
+            if !path_match && !title_match {
+                // 仅内容匹配
+                match_reasons.content_match =
+                    MatchReasonAnalyzer::analyze_content_match(&content, query, 3);
+            }
+
             results.push(VaultSearchResult {
                 vault_id: vault.id.clone(),
                 vault_name: vault.name.clone(),
@@ -1985,6 +2002,7 @@ pub fn search_vault_notes(
                 } else {
                     60
                 },
+                match_reasons: Some(match_reasons),
             });
         }
     }
