@@ -347,25 +347,26 @@
           <div id="content-value-container"></div>
         </div>
 
-        <!-- 其他视图占位符 -->
+        <!-- 知识健康视图 -->
         <div id="health-view" style="display: none;">
-          <h2>知识健康度仪表盘</h2>
-          <p>正在开发中...</p>
+          <div id="health-container"></div>
         </div>
 
+        <!-- 间隔重复学习视图 -->
         <div id="spaced-repetition-view" style="display: none;">
           <h2>间隔重复学习系统</h2>
           <p>正在开发中...</p>
         </div>
 
+        <!-- AI 智能视图 -->
         <div id="ai-intelligence-view" style="display: none;">
           <h2>AI 内容智能</h2>
           <p>正在开发中...</p>
         </div>
 
+        <!-- 性能监控视图 -->
         <div id="performance-view" style="display: none;">
-          <h2>性能监控</h2>
-          <p>正在开发中...</p>
+          <div id="performance-container"></div>
         </div>
 
         <div id="metrics-view" style="display: none;">
@@ -385,10 +386,14 @@
     import { appState, notifications } from './state-management.js';
     import { KnowledgeGraphVisualization } from './knowledge-graph-visualization.js';
     import { ContentValueDashboard } from './content-value-dashboard.js';
+    import { KnowledgeHealthDashboard } from './knowledge-health-dashboard.js';
+    import { PerformanceMonitorDashboard } from './performance-monitor-dashboard.js';
 
     // 初始化组件
     let graphViz = null;
     let valueDashboard = null;
+    let healthDashboard = null;
+    let performanceDashboard = null;
 
     // 导航切换
     document.querySelectorAll('.nav-item').forEach(item => {
@@ -440,6 +445,19 @@
         if (vaultId) {
           valueDashboard.loadData(vaultId);
         }
+      }
+
+      if (view === 'health' && !healthDashboard) {
+        healthDashboard = new KnowledgeHealthDashboard('health-container');
+        const vaultId = document.getElementById('vault-selector').value;
+        if (vaultId) {
+          healthDashboard.loadData(vaultId);
+        }
+      }
+
+      if (view === 'performance' && !performanceDashboard) {
+        performanceDashboard = new PerformanceMonitorDashboard('performance-container');
+        performanceDashboard.loadData();
       }
     }
 
