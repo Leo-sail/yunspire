@@ -13,6 +13,7 @@ mod error;
 mod execution_plan;
 mod execution_plan_extractor;
 mod execution_ticket;
+mod graph_visualization;
 mod knowledge_graph;
 mod knowledge_health;
 mod lease_heartbeat;
@@ -551,6 +552,8 @@ pub fn run() {
                 smart_features::generate_learning_path,
                 smart_features::suggest_tags_for_note,
                 smart_features::identify_knowledge_gaps,
+                graph_visualization::get_graph_visualization,
+                graph_visualization::get_node_subgraph,
                 model_provider::analyze_capture_content,
                 model_provider::bind_capture_analysis_write_manifest,
                 model_provider::issue_direct_write_receipt,
