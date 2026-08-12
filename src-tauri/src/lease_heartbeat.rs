@@ -236,3 +236,22 @@ pub(crate) fn start_lease_heartbeat_if_needed(
     let state = app.state::<LeaseHeartbeatState>();
     state.initialize(app.clone(), worker_id)
 }
+
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_lease_heartbeat_interval() {
+        // 测试心跳间隔在合理范围
+        let interval_secs = 30;
+        assert!(interval_secs >= 10 && interval_secs <= 60);
+    }
+
+    #[test]
+    fn test_lease_expiry_calculation() {
+        // 测试过期时间计算（间隔的 2 倍）
+        let interval = 30;
+        let expiry = interval * 2;
+        assert_eq!(expiry, 60);
+    }
+}

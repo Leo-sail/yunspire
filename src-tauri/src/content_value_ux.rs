@@ -203,3 +203,26 @@ fn estimate_score_improvement(suggestion: &str) -> f64 {
         3.0 // 一般性建议
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_action_type_inference() {
+        assert!(matches!(infer_action_type("添加标签"), ActionType::AddTags));
+        assert!(matches!(infer_action_type("建立链接"), ActionType::AddLinks));
+        assert!(matches!(infer_action_type("扩充内容"), ActionType::ExpandContent));
+        assert!(matches!(infer_action_type("归档笔记"), ActionType::Archive));
+        assert!(matches!(infer_action_type("未知操作"), ActionType::Review));
+    }
+
+    #[test]
+    fn test_score_improvement_estimation() {
+        assert_eq!(estimate_score_improvement("扩充内容"), 15.0);
+        assert_eq!(estimate_score_improvement("添加链接"), 12.0);
+        assert_eq!(estimate_score_improvement("添加标签"), 8.0);
+        assert_eq!(estimate_score_improvement("未知操作"), 3.0);
+    }
+}

@@ -1,5 +1,4 @@
 use crate::knowledge_graph::KnowledgeGraph;
-use crate::spaced_repetition::SpacedRepetitionRecord;
 use serde::Serialize;
 use std::collections::HashMap;
 

@@ -140,7 +140,7 @@ impl KnowledgeGraph {
         }
 
         // 3. 添加标签关联边（同标签的笔记间建立关联）
-        for (_tag, notes) in &tag_map {
+        for notes in tag_map.values() {
             for i in 0..notes.len() {
                 for j in (i + 1)..notes.len() {
                     edges.push(NoteEdge {
@@ -265,7 +265,7 @@ impl KnowledgeGraph {
 
     /// 检测知识簇（基于标签和链接密度）
     fn detect_clusters(
-        nodes: &[NoteNode],
+        _nodes: &[NoteNode],
         edges: &[NoteEdge],
         tag_map: &HashMap<String, Vec<String>>,
     ) -> Vec<KnowledgeCluster> {

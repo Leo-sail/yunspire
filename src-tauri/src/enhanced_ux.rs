@@ -1,4 +1,3 @@
-use crate::metrics::UsageMetrics;
 use serde::Serialize;
 
 /// 错误详情（增强版）
@@ -100,7 +99,6 @@ impl<T> ProgressResult<T> {
     }
 }
 
-use crate::content_value::ContentValueScore;
 use crate::knowledge_health::KnowledgeHealthDashboard;
 use crate::metrics::MetricsReport;
 use crate::runtime_db::RuntimeDatabase;
@@ -346,4 +344,39 @@ fn generate_priority_recommendations(
     recommendations.sort_by(|a, b| a.priority.cmp(&b.priority));
 
     recommendations
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_enhanced_error_from_string() {
+        let db_error = "SQLite 数据库连接失败".to_string();
+        let error = EnhancedError::from_string(db_error);
+
+        assert_eq!(error.error_type, "database_error");
+        assert!(error.recoverable);
+        assert!(error.suggestion.is_some());
+    }
+
+    #[test]
+    fn test_parse_permission_error() {
+        let perm_error = "权限不足，无法访问该资源".to_string();
+        let error = EnhancedError::from_string(perm_error);
+
+        assert_eq!(error.error_type, "permission_denied");
+        assert!(!error.recoverable);
+    }
+
+    #[test]
+    fn test_priority_ordering() {
+        let high = Priority::High;
+        let medium = Priority::Medium;
+        let low = Priority::Low;
+
+        assert!(high < medium);
+        assert!(medium < low);
+    }
 }

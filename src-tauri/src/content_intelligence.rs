@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// 笔记摘要
 #[derive(Clone, Debug, Serialize)]
