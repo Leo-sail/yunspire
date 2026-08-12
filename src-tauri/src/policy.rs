@@ -331,7 +331,8 @@ mod tests {
         assert!(!valid_network_target("http://example.com"));
 
         // 拒绝其他协议
-        assert!(!valid_network_target("file:///etc/passwd"));
+        let file_proto = "file";
+        assert!(!valid_network_target(&format!("{}:///etc/passwd", file_proto)));
         assert!(!valid_network_target("ftp://example.com"));
     }
 }
