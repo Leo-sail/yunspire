@@ -96,6 +96,7 @@ const REPORT_SUBSCRIPTION_UPSERT_RUNTIME_HANDLER_PAIRS: &[(&str, &str)] = &[
 pub struct RuntimeDatabase {
     pub(crate) connection: Mutex<Connection>,
     path: PathBuf,
+    config: crate::database::DatabaseConfig,
 }
 
 pub(crate) struct ModelUsageRecord<'a> {
@@ -1089,6 +1090,12 @@ pub(crate) fn apply_evaluated_optimization_candidate_in_connection(
 
 impl RuntimeDatabase {
     pub fn open(app: &AppHandle) -> Result<Self, String> {
+        // 初始化数据库基础设施（性能监控等）
+        crate::database::init_database_infrastructure();
+
+        // 创建数据库配置（默认配置）
+        let config = crate::database::DatabaseConfig::default();
+
         #[cfg(debug_assertions)]
         let app_data = std::env::var_os("YUNSPIRE_APP_DATA_DIR")
             .map(PathBuf::from)
@@ -1118,9 +1125,18 @@ impl RuntimeDatabase {
             )
             .map_err(|error| format!("无法配置 SQLite：{error}"))?;
         run_migrations(&connection)?;
+
+        log::info!(
+            "数据库初始化完成 - 连接池: {}, 批处理: {}, 慢查询阈值: {}ms",
+            config.connection_pool_size,
+            config.vault_index_batch_size,
+            config.slow_query_threshold_ms
+        );
+
         Ok(Self {
             connection: Mutex::new(connection),
             path,
+            config,
         })
     }
 
@@ -6574,6 +6590,10 @@ impl RuntimeDatabase {
     where
         F: Fn() -> bool,
     {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("rebuild_index_for_vault")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let workspace_scope = self.local_workspace_scope()?;
         self.ensure_vault_read_allowed(&workspace_scope, vault_id)?;
         let (_, root) = resolve_vault_for_runtime(vault_id)?;
@@ -6586,6 +6606,14 @@ impl RuntimeDatabase {
             is_cancelled,
         )?;
         ensure_index_not_cancelled(is_cancelled)?;
+
+        log::info!(
+            "开始索引重建: vault={}, 文件数={}, 批处理大小={}",
+            vault_id,
+            markdown.len(),
+            self.config.vault_index_batch_size
+        );
+
         let mut connection = self
             .connection
             .lock()
@@ -6611,20 +6639,43 @@ impl RuntimeDatabase {
 
         let mut indexed_notes = 0;
         let mut skipped_notes = 0;
-        for path in markdown {
+
+        // 使用配置的批处理大小
+        for (batch_idx, batch) in markdown.chunks(self.config.vault_index_batch_size).enumerate() {
             ensure_index_not_cancelled(is_cancelled)?;
-            match prepare_note_index(&root, &path).and_then(|note| {
-                note.map(|note| upsert_prepared_note_index(&transaction, vault_id, &note))
-                    .transpose()
-            }) {
-                Ok(Some(())) => indexed_notes += 1,
-                Ok(None) | Err(_) => skipped_notes += 1,
+
+            for path in batch {
+                match prepare_note_index(&root, path).and_then(|note| {
+                    note.map(|note| upsert_prepared_note_index(&transaction, vault_id, &note))
+                        .transpose()
+                }) {
+                    Ok(Some(())) => indexed_notes += 1,
+                    Ok(None) | Err(_) => skipped_notes += 1,
+                }
+            }
+
+            // 每批次完成后记录进度
+            if batch_idx % 10 == 0 && batch_idx > 0 {
+                log::debug!(
+                    "索引进度: {}/{} 文件已处理",
+                    indexed_notes + skipped_notes,
+                    markdown.len()
+                );
             }
         }
+
         ensure_index_not_cancelled(is_cancelled)?;
         transaction
             .commit()
             .map_err(|error| format!("无法提交索引事务：{error}"))?;
+
+        log::info!(
+            "索引重建完成: vault={}, 成功={}, 跳过={}",
+            vault_id,
+            indexed_notes,
+            skipped_notes
+        );
+
         Ok(IndexBuildResult {
             vault_id: vault_id.to_string(),
             indexed_notes,
