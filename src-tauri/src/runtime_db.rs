@@ -6718,6 +6718,10 @@ impl RuntimeDatabase {
         path: &Path,
         inherited_trace_id: Option<&str>,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("enqueue_vault_index_path")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let workspace_scope = self.local_workspace_scope()?;
         self.ensure_vault_read_allowed(&workspace_scope, vault_id)?;
         let relative_path = normalized_index_relative_path(root, path)?;
@@ -6758,6 +6762,10 @@ impl RuntimeDatabase {
     }
 
     pub(crate) fn recover_vault_index_changes(&self) -> Result<usize, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("recover_vault_index_changes")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let now = Utc::now();
         let now_text = now.to_rfc3339();
         let mut connection = self
@@ -6792,6 +6800,10 @@ impl RuntimeDatabase {
         &self,
         limit: usize,
     ) -> Result<Vec<ClaimedVaultIndexChange>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("claim_vault_index_changes")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let now = Utc::now();
         let now_ms = now.timestamp_millis();
         let now_text = now.to_rfc3339();
@@ -6887,6 +6899,10 @@ impl RuntimeDatabase {
         change: &ClaimedVaultIndexChange,
         current_root: &Path,
     ) -> Result<Option<AppliedVaultIndexChange>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("apply_claimed_vault_index_change")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let canonical_root = canonical_index_root(current_root)?;
         if canonical_root != change.canonical_root {
             return Err("Vault 根目录已变化，拒绝应用旧索引任务".to_string());
