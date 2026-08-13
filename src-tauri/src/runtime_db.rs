@@ -1324,6 +1324,10 @@ impl RuntimeDatabase {
     }
 
     pub fn sync_vault_registry(&self, vaults: &[VaultDescriptor]) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("sync_vault_registry")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let current_ids = vaults
             .iter()
             .map(|vault| vault.id.as_str())
@@ -15827,6 +15831,10 @@ fn save_workspace_snapshot_in(
     database: &RuntimeDatabase,
     mut snapshot: WorkspaceSnapshot,
 ) -> Result<(), String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("save_workspace_snapshot")
+        .with_threshold(database.config.slow_query_threshold_ms);
+
     let workspace_scope = database.local_workspace_scope()?;
     validate_records(&snapshot.tasks, "任务")?;
     // Conversation articles are user content, not control-plane records. They can
@@ -16540,6 +16548,10 @@ pub fn upsert_inbound_content_record(
 pub fn load_workspace_snapshot(
     database: State<'_, RuntimeDatabase>,
 ) -> Result<Option<WorkspaceSnapshot>, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("load_workspace_snapshot")
+        .with_threshold(database.config.slow_query_threshold_ms);
+
     let workspace_scope = database.local_workspace_scope()?;
     let connection = database
         .connection
@@ -17144,6 +17156,10 @@ fn load_missing_neural_embedding_inputs(
     vault_id: Option<&str>,
     limit: usize,
 ) -> Result<Vec<NeuralEmbeddingNoteInput>, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("load_missing_neural_embedding_inputs")
+        .with_threshold(database.config.slow_query_threshold_ms);
+
     let scoped = vault_id.filter(|value| *value != "all");
     let sql = if scoped.is_some() {
         "SELECT i.vault_id, i.relative_path, i.title, i.content_hash,
