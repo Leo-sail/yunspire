@@ -47,7 +47,20 @@ pub struct PerformanceReport {
     pub query_performance: Vec<QueryPerformance>,
 }
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
+// 全局性能监控器实例
+static GLOBAL_MONITOR: OnceLock<Arc<PerformanceMonitor>> = OnceLock::new();
+
+/// 获取全局性能监控器
+pub fn global_monitor() -> Option<Arc<PerformanceMonitor>> {
+    GLOBAL_MONITOR.get().cloned()
+}
+
+/// 初始化全局性能监控器
+pub fn init_global_monitor(slow_threshold_ms: u64) {
+    GLOBAL_MONITOR.get_or_init(|| Arc::new(PerformanceMonitor::new(slow_threshold_ms)));
+}
 
 /// 性能监控器
 pub struct PerformanceMonitor {
@@ -86,7 +99,6 @@ impl PerformanceMonitor {
     }
 
     /// 记录慢查询
-    #[allow(dead_code)]
     pub fn record_slow_query(&self, query: String, duration_ms: u64, params: Option<String>) {
         if duration_ms < self.slow_threshold_ms {
             return;
@@ -232,25 +244,30 @@ impl Drop for Timer {
     }
 }
 
-use std::sync::OnceLock;
-
-// 全局性能监控器（慢查询阈值 100ms）
-static GLOBAL_MONITOR: OnceLock<Arc<PerformanceMonitor>> = OnceLock::new();
-
-fn get_global_monitor() -> &'static Arc<PerformanceMonitor> {
-    GLOBAL_MONITOR.get_or_init(|| Arc::new(PerformanceMonitor::new(100)))
-}
-
 /// 获取性能报告
 #[tauri::command]
 pub fn get_performance_report() -> Result<PerformanceReport, String> {
-    Ok(get_global_monitor().generate_report())
+    if let Some(monitor) = global_monitor() {
+        Ok(monitor.generate_report())
+    } else {
+        Ok(PerformanceReport {
+            total_queries: 0,
+            slow_queries_count: 0,
+            avg_query_time_ms: 0.0,
+            p95_query_time_ms: 0,
+            p99_query_time_ms: 0,
+            top_slow_queries: vec![],
+            query_performance: vec![],
+        })
+    }
 }
 
 /// 清空性能监控数据
 #[tauri::command]
 pub fn clear_performance_metrics() -> Result<(), String> {
-    get_global_monitor().clear();
+    if let Some(monitor) = global_monitor() {
+        monitor.clear();
+    }
     Ok(())
 }
 

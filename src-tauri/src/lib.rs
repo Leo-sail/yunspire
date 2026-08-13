@@ -8,6 +8,7 @@ mod content_intelligence;
 mod content_value;
 mod content_value_ux;
 mod creation;
+mod database;
 mod durable_asset;
 mod enhanced_ux;
 mod error;
