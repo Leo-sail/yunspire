@@ -43,8 +43,8 @@ use tauri::{AppHandle, Manager, State};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
-const MAX_SNAPSHOT_RECORDS: usize = 10_000;
-const MAX_RECORD_BYTES: usize = 2 * 1024 * 1024;
+const MAX_SNAPSHOT_RECORDS: usize = 10_000; // 将逐步迁移到 DatabaseConfig
+const MAX_RECORD_BYTES: usize = 2 * 1024 * 1024; // 将逐步迁移到 DatabaseConfig
 const MAX_CREATION_MANIFEST_BYTES: usize = 256 * 1024;
 const MAX_CREATION_RESOURCE_JSON_DEPTH: usize = 32;
 const MAX_CREATION_RESOURCE_JSON_NODES: usize = 20_000;
@@ -1564,6 +1564,10 @@ impl RuntimeDatabase {
         include_inactive: bool,
         limit: usize,
     ) -> Result<Vec<LongTermMemoryRecord>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("query_long_term_memory")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         if query.chars().count() > MAX_SEARCH_QUERY_CHARS {
             return Err("长期记忆查询超过 512 个字符".to_string());
         }
@@ -1641,6 +1645,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         input: &LongTermMemoryGovernanceInput,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("govern_long_term_memory")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         if !valid_runtime_identifier(&input.id, 160) {
             return Err("长期记忆 ID 无效".to_string());
         }
