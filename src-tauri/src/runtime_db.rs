@@ -18033,6 +18033,10 @@ fn load_lexical_search_candidates(
     query: &str,
     candidate_limit: i64,
 ) -> Result<Vec<IndexedSearchCandidate>, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("load_lexical_search_candidates")
+        .with_threshold(100);
+
     let lexical_match_query = lexical_fts_match_query(query)?;
     let legacy_match_query = fts_match_query(query)?;
     let lexical_sql = if scoped.is_some() {
@@ -18136,6 +18140,10 @@ fn load_vector_search_candidates(
     scoped: Option<&str>,
     query: &str,
 ) -> Result<Vec<IndexedSearchCandidate>, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("load_vector_search_candidates")
+        .with_threshold(100);
+
     let Some(query_vector) = query_local_feature_vector(query) else {
         return Ok(Vec::new());
     };
@@ -18218,6 +18226,10 @@ fn load_neural_search_candidates(
     scoped: Option<&str>,
     context: &NeuralSearchContext,
 ) -> Result<(Vec<IndexedSearchCandidate>, bool), String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("load_neural_search_candidates")
+        .with_threshold(100);
+
     let sql = if scoped.is_some() {
         "SELECT i.vault_id, i.relative_path, i.title,
                 COALESCE((
@@ -18374,6 +18386,10 @@ fn indexed_search_in_connection_with_neural(
     max_results: usize,
     neural: Option<&NeuralSearchContext>,
 ) -> Result<Vec<IndexedSearchResult>, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("indexed_search_in_connection_with_neural")
+        .with_threshold(100);
+
     let query = query.trim();
     if query.is_empty() {
         return Err("搜索词不能为空".to_string());
