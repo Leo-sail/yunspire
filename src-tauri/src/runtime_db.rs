@@ -3872,6 +3872,10 @@ impl RuntimeDatabase {
         trace_id: &str,
         accepted_at: &str,
     ) -> Result<(Option<String>, bool), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("persist_application_command")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         crate::trace::validate_trace_id(trace_id)?;
         let command_payload = serde_json::to_string(command)
             .map_err(|error| format!("无法序列化应用命令：{error}"))?;
@@ -8208,6 +8212,10 @@ impl RuntimeDatabase {
         candidate_id: &str,
         mutation_key: Option<&RuntimeEffectMutationKey>,
     ) -> Result<OptimizationProfileResult, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("apply_optimization_candidate")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         if !valid_runtime_identifier(candidate_id, 160) {
             return Err("优化候选 ID 无效".to_string());
         }
