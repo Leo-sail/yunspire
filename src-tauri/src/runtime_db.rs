@@ -1872,6 +1872,10 @@ impl RuntimeDatabase {
         resource_type: &str,
         payload: &Value,
     ) -> Result<Value, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("upsert_report_resource")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         if !matches!(resource_type, "report" | "report_subscription") {
             return Err("不支持的报告资源类型".to_string());
         }
@@ -1938,6 +1942,9 @@ impl RuntimeDatabase {
         cursor_id: Option<&str>,
         limit: usize,
     ) -> Result<ManagedResourcePage, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("list_report_resources_page")
+            .with_threshold(self.config.slow_query_threshold_ms);
         if !matches!(resource_type, "report" | "report_subscription") {
             return Err("不支持的报告资源类型".to_string());
         }
@@ -2201,6 +2208,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         input: CreationResourceInput,
     ) -> Result<CreationResource, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("upsert_creation_resource")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let resource = validate_creation_resource_input(&input)?;
         let mut connection = self
             .connection
@@ -2313,6 +2324,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         include_archived: bool,
     ) -> Result<Vec<CreationResource>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("list_creation_resources")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
