@@ -1,4 +1,5 @@
 pub mod algorithm;
+pub mod async_ops;
 pub mod encoding;
 pub mod neural;
 pub mod plugin;
@@ -14,6 +15,8 @@ pub use types::{
 pub(crate) use algorithm::{
     cjk_lexical_terms, indexed_search_candidate_signals, indexed_search_in_connection_with_neural,
 };
+
+pub(crate) use async_ops::{prepare_neural_search_context, refresh_neural_embedding_notes};
 
 pub(crate) use encoding::{
     decode_neural_embedding, encode_neural_embedding, neural_embedding_input_hash,
