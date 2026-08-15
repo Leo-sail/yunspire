@@ -1485,6 +1485,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         limit: usize,
     ) -> Result<Vec<PendingLongTermMemoryEvent>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("pending_long_term_memory_events")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -1519,6 +1523,10 @@ impl RuntimeDatabase {
         content_hash: &str,
         committed_at: &str,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("commit_long_term_memory_event_internal")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -4218,6 +4226,10 @@ impl RuntimeDatabase {
         occurrence_id: &str,
         runtime_task_id: &str,
     ) -> Result<RuntimeScheduleDispatchBinding, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("runtime_schedule_dispatch_binding")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
