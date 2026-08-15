@@ -1553,6 +1553,10 @@ impl RuntimeDatabase {
         event_id: &str,
         error: &str,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("fail_long_term_memory_event")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -1793,6 +1797,10 @@ impl RuntimeDatabase {
         report_subscriptions: &[Value],
         scheduler_enabled: bool,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("sync_runtime_state")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         validate_records(tasks, "原生任务")?;
         validate_records(schedules, "原生定时任务")?;
         let _ = report_subscriptions;
@@ -1828,6 +1836,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         snapshot: &ManagedResourceSnapshotInput,
     ) -> Result<ManagedResourceSnapshot, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("sync_managed_resources")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         // Reports and report subscriptions are persisted through their dedicated
         // per-record commands. Keeping them out of this full-snapshot sync avoids
         // turning a request-size guard into a product-level record ceiling.
@@ -2154,6 +2166,10 @@ impl RuntimeDatabase {
         &self,
         workspace_scope: &str,
     ) -> Result<ManagedResourceSnapshot, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("load_managed_resources")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
