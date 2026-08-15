@@ -1,8 +1,10 @@
 pub mod algorithm;
 pub mod encoding;
 pub mod neural;
+pub mod plugin;
 pub mod types;
 
+pub use plugin::SearchPlugin;
 pub use types::{
     IndexedSearchResult, IndexedSearchSignals, NeuralEmbeddingIndexStatus,
     NeuralEmbeddingVaultIndexStatus,
@@ -24,6 +26,3 @@ pub(crate) use neural::{
     load_missing_neural_embedding_inputs, persist_neural_embedding_and_bindings,
     update_neural_embedding_index_state,
 };
-
-// 将在后续实现中添加：
-// - plugin.rs: SearchPlugin 实现
