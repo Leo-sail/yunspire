@@ -4438,6 +4438,10 @@ impl RuntimeDatabase {
         task_id: &str,
         plan_revision: Option<u64>,
     ) -> Result<Vec<RuntimeTaskStepFrontierItem>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("runtime_task_step_frontier")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         if !valid_runtime_identifier(task_id, 180) {
             return Err("原生任务步骤 frontier taskId 无效".to_string());
         }
@@ -4775,6 +4779,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         input: &RuntimeTaskStepLeaseRenewalInput,
     ) -> Result<RuntimeTaskStepLeaseRenewalReceipt, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("renew_runtime_task_step_lease")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         crate::task_runtime::validate_runtime_task_step_lease_renewal(input)?;
         let mut connection = self
             .connection
@@ -6015,6 +6023,10 @@ impl RuntimeDatabase {
         task_id: Option<&str>,
         supplied_trace_id: Option<&str>,
     ) -> Result<String, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("resolve_operation_trace_id")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         if let Some(trace_id) = supplied_trace_id.filter(|value| !value.trim().is_empty()) {
             return Ok(crate::trace::validate_trace_id(trace_id)?.to_string());
         }
@@ -6038,6 +6050,10 @@ impl RuntimeDatabase {
         vault_id: Option<&str>,
         allowed_states: &[&str],
     ) -> Result<NativeRuntimeTask, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("ensure_runtime_task_authorized")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let task = self.runtime_task(workspace_scope, task_id)?;
         if !allowed_states.contains(&task.state.as_str()) {
             return Err(format!("原生任务状态 {} 不允许执行当前操作", task.state));
@@ -6795,6 +6811,10 @@ impl RuntimeDatabase {
         path: &Path,
         trace_id: &str,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("enqueue_vault_index_path_with_trace")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         self.enqueue_vault_index_path_inner(vault_id, root, path, Some(trace_id))
     }
 
