@@ -1,5 +1,6 @@
 pub mod algorithm;
 pub mod async_ops;
+pub mod bridge;
 pub mod core_search;
 pub mod encoding;
 pub mod neural;
@@ -11,6 +12,9 @@ pub use types::{
     IndexedSearchResult, IndexedSearchSignals, NeuralEmbeddingIndexStatus,
     NeuralEmbeddingVaultIndexStatus,
 };
+
+// 公开桥接函数供 runtime_db.rs 使用
+pub use bridge::indexed_search_impl;
 
 // 内部使用
 pub(crate) use algorithm::{
