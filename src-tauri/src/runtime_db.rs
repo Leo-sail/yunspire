@@ -5542,6 +5542,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         input: &RuntimeTaskEvidenceInput,
     ) -> Result<RuntimeTaskEvidence, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("append_runtime_task_evidence")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         crate::task_runtime::validate_runtime_task_evidence_shape(input)?;
         let task_id = input.task_id.trim();
         let mut connection = self
@@ -7059,6 +7063,10 @@ impl RuntimeDatabase {
         change: &ClaimedVaultIndexChange,
         reason: &str,
     ) -> Result<bool, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("discard_claimed_vault_index_change")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let now = Utc::now().to_rfc3339();
         let mut connection = self
             .connection
@@ -7105,6 +7113,10 @@ impl RuntimeDatabase {
         change: &ClaimedVaultIndexChange,
         error: &str,
     ) -> Result<VaultIndexFailureOutcome, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("fail_claimed_vault_index_change")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let terminal = change.attempt_count >= VAULT_INDEX_MAX_ATTEMPTS;
         let retry_delay = VAULT_INDEX_RETRY_BASE_MS
             .saturating_mul(1_i64 << change.attempt_count.saturating_sub(1).min(6));
@@ -16124,6 +16136,10 @@ fn delete_workspace_messages_in(
     database: &RuntimeDatabase,
     message_ids: Vec<String>,
 ) -> Result<usize, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("delete_workspace_messages")
+        .with_threshold(database.config.slow_query_threshold_ms);
+
     if message_ids.len() > 512 {
         return Err("单次最多删除 512 条消息；可继续分批删除".to_string());
     }
@@ -17698,6 +17714,10 @@ fn load_neural_embedding_index_status(
     configured: Option<&crate::model_provider::ConfiguredEmbeddingModel>,
     configuration_error: Option<String>,
 ) -> Result<NeuralEmbeddingIndexStatus, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("load_neural_embedding_index_status")
+        .with_threshold(database.config.slow_query_threshold_ms);
+
     let scoped = normalize_neural_embedding_vault_id(vault_id)?;
     let connection = database
         .connection
