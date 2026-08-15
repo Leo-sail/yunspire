@@ -2674,6 +2674,10 @@ impl RuntimeDatabase {
         &self,
         workspace_scope: &str,
     ) -> Result<Vec<RuntimeTaskRecovery>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("recover_interrupted_runtime_tasks")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -4130,6 +4134,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         task_id: &str,
     ) -> Result<NativeRuntimeTask, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("runtime_task")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -4142,6 +4150,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         task_id: &str,
     ) -> Result<Option<RuntimeTaskContractSnapshot>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("runtime_task_contract")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -4246,6 +4258,10 @@ impl RuntimeDatabase {
         task_id: &str,
         plan: &RuntimeTaskPlanInput,
     ) -> Result<RuntimeTaskContractSnapshot, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("define_runtime_task_plan")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         crate::task_runtime::validate_runtime_task_plan(plan)?;
         if !valid_runtime_identifier(task_id, 180) {
             return Err("原生任务计划 taskId 无效".to_string());
@@ -15931,6 +15947,10 @@ fn list_workspace_messages_page_in(
     cursor_id: Option<&str>,
     limit: Option<usize>,
 ) -> Result<WorkspaceMessagePage, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("list_workspace_messages_page")
+        .with_threshold(database.config.slow_query_threshold_ms);
+
     if cursor_created_at.is_some() != cursor_id.is_some() {
         return Err("消息分页游标必须同时包含 cursorCreatedAt 和 cursorId".to_string());
     }
