@@ -5019,6 +5019,10 @@ impl RuntimeDatabase {
         capability_id: &str,
         operation: &str,
     ) -> Result<RuntimeEffectfulHandlerAuthorization, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("validate_runtime_effectful_handler")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let authorization = {
             let connection = self
                 .connection
@@ -5051,6 +5055,10 @@ impl RuntimeDatabase {
         operation_context: &OperationContext,
         allowed_pairs: &[(&str, &str)],
     ) -> Result<RuntimeEffectfulHandlerAuthorization, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("validate_runtime_effectful_handler_pairs")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let authorization = {
             let connection = self
                 .connection
@@ -5085,6 +5093,10 @@ impl RuntimeDatabase {
         operation: &str,
         usage: TrustedHandlerUsage,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("record_runtime_effectful_handler_completion")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let authorization = self.validate_runtime_effectful_handler(
             ticket_state,
             workspace_scope,
@@ -5117,6 +5129,10 @@ impl RuntimeDatabase {
         completion_key: &str,
         usage: TrustedHandlerUsage,
     ) -> Result<bool, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("record_runtime_effectful_handler_completion_once")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let authorization = self.validate_runtime_effectful_handler(
             ticket_state,
             workspace_scope,
@@ -5145,6 +5161,10 @@ impl RuntimeDatabase {
         child_task_id: &str,
         binding: &RuntimeTaskStepCommandBinding,
     ) -> Result<RuntimeReadOnlyCapabilityResult, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("execute_runtime_read_only_capability")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
