@@ -2990,6 +2990,10 @@ impl RuntimeDatabase {
         task_id: &str,
         resolution: &str,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("resolve_runtime_task_recovery")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         if !matches!(
             resolution,
             "completed" | "resumed" | "needs_input" | "manual" | "failed"
@@ -3263,6 +3267,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         record: &InboundContentRecordInput,
     ) -> Result<InboundContentRecordReceipt, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("upsert_inbound_content_record")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         validate_inbound_content_record(record)?;
         let extraction_json = serialize_inbound_record_section(&record.extraction, "提取诊断")?;
         let analysis_json = serialize_inbound_record_section(&record.analysis, "模型分析")?;
