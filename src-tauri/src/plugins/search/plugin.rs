@@ -84,22 +84,25 @@ impl YunspirePlugin for SearchPlugin {
     fn commands(&self) -> Vec<Command> {
         vec![
             // 命令 1: indexed_search
-            Command::new("indexed_search", |_params| {
-                // TODO: 实现搜索命令
-                // 当前委托给 runtime_db.rs 中的实现
-                Err("indexed_search 命令尚未完全迁移".to_string())
+            Command::new("indexed_search", |params| {
+                // TODO: 实现异步命令包装
+                // 当前返回占位错误
+                let _ = params;
+                Err("indexed_search 需要异步实现，请使用 runtime_db.rs 的桥接函数".to_string())
             }),
 
             // 命令 2: get_neural_embedding_index_status
-            Command::new("get_neural_embedding_index_status", |_params| {
+            Command::new("get_neural_embedding_index_status", |params| {
                 // TODO: 实现状态查询命令
-                Err("get_neural_embedding_index_status 命令尚未完全迁移".to_string())
+                let _ = params;
+                Err("get_neural_embedding_index_status 需要异步实现，请使用 runtime_db.rs 的桥接函数".to_string())
             }),
 
             // 命令 3: rebuild_neural_embedding_index
-            Command::new("rebuild_neural_embedding_index", |_params| {
+            Command::new("rebuild_neural_embedding_index", |params| {
                 // TODO: 实现索引重建命令
-                Err("rebuild_neural_embedding_index 命令尚未完全迁移".to_string())
+                let _ = params;
+                Err("rebuild_neural_embedding_index 需要异步实现，请使用 runtime_db.rs 的桥接函数".to_string())
             }),
         ]
     }
