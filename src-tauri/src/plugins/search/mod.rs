@@ -1,3 +1,4 @@
+pub mod algorithm;
 pub mod encoding;
 pub mod neural;
 pub mod types;
@@ -8,6 +9,10 @@ pub use types::{
 };
 
 // 内部使用
+pub(crate) use algorithm::{
+    cjk_lexical_terms, indexed_search_candidate_signals, indexed_search_in_connection_with_neural,
+};
+
 pub(crate) use encoding::{
     decode_neural_embedding, encode_neural_embedding, neural_embedding_input_hash,
     neural_embedding_state_priority, neural_note_embedding_input,
@@ -21,5 +26,4 @@ pub(crate) use neural::{
 };
 
 // 将在后续实现中添加：
-// - algorithm.rs: 搜索算法和 RRF 计算
 // - plugin.rs: SearchPlugin 实现
