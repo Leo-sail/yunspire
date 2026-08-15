@@ -7,6 +7,7 @@ mod content_fingerprint;
 mod content_intelligence;
 mod content_value;
 mod content_value_ux;
+mod core; // 插件系统核心
 mod creation;
 mod database;
 mod durable_asset;
@@ -26,6 +27,7 @@ mod model_provider;
 mod obsidian;
 mod obsidian_management;
 mod performance_monitor;
+mod plugins; // 插件实现
 mod policy;
 mod prompt;
 mod runtime_db;
