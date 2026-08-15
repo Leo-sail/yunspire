@@ -1424,6 +1424,10 @@ impl RuntimeDatabase {
         occurred_at: &str,
         payload: &Value,
     ) -> Result<bool, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("stage_long_term_memory_event")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let serialized = serde_json::to_string(payload)
             .map_err(|error| format!("无法序列化长期记忆投递记录：{error}"))?;
         if serialized.len() > MAX_RECORD_BYTES {
@@ -1906,6 +1910,10 @@ impl RuntimeDatabase {
         resource_type: &str,
         id: &str,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("delete_report_resource")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         if !matches!(resource_type, "report" | "report_subscription") {
             return Err("不支持的报告资源类型".to_string());
         }
@@ -2023,6 +2031,10 @@ impl RuntimeDatabase {
         cursor_id: Option<&str>,
         limit: usize,
     ) -> Result<ReportSourcePage, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("read_report_source_page")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let start = chrono::DateTime::parse_from_rfc3339(start_at)
             .map_err(|_| "报告数据开始时间必须是 RFC3339".to_string())?
             .with_timezone(&Utc)
@@ -6538,6 +6550,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         vaults: &[VaultDescriptor],
     ) -> Result<Vec<String>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("purge_unreadable_vault_indexes")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let unreadable_vault_ids = vaults
             .iter()
             .filter(|vault| vault.connection_state == "connected")
