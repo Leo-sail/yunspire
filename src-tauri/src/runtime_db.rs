@@ -4476,6 +4476,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         input: &RuntimeTaskStepClaimInput,
     ) -> Result<RuntimeTaskStepClaimBatch, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("claim_runtime_task_plan_steps")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         crate::task_runtime::validate_runtime_task_step_claim(input)?;
         let mut connection = self
             .connection
@@ -5454,6 +5458,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         input: &RuntimeTaskStepCompletionInput,
     ) -> Result<RuntimeTaskStepReceipt, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("complete_runtime_task_plan_step")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         crate::task_runtime::validate_runtime_task_step_completion(input)?;
         self.finalize_runtime_task_step(
             workspace_scope,
@@ -16053,6 +16061,10 @@ fn search_workspace_messages_in(
     query: &str,
     limit: Option<usize>,
 ) -> Result<Vec<WorkspaceMessageSearchResult>, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("search_workspace_messages")
+        .with_threshold(database.config.slow_query_threshold_ms);
+
     let match_query = lexical_fts_match_query(query)?;
     let result_limit = limit.unwrap_or(50).clamp(1, 100);
     let workspace_scope = database.local_workspace_scope()?;
