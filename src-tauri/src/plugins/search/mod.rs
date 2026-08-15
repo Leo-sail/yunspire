@@ -1,4 +1,5 @@
 pub mod encoding;
+pub mod neural;
 pub mod types;
 
 pub use types::{
@@ -13,7 +14,12 @@ pub(crate) use encoding::{
     normalize_neural_embedding, normalize_neural_embedding_vault_id,
 };
 
+pub(crate) use neural::{
+    cached_neural_embedding_in_connection, load_cached_neural_embedding,
+    load_missing_neural_embedding_inputs, persist_neural_embedding_and_bindings,
+    update_neural_embedding_index_state,
+};
+
 // 将在后续实现中添加：
-// - neural.rs: 神经嵌入数据库操作
-// - algorithm.rs: 搜索算法
+// - algorithm.rs: 搜索算法和 RRF 计算
 // - plugin.rs: SearchPlugin 实现
