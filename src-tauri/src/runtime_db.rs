@@ -2366,6 +2366,10 @@ impl RuntimeDatabase {
         resource_type: &str,
         id: &str,
     ) -> Result<Vec<CreationResource>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("list_creation_resource_revisions")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let resource_type = validate_creation_resource_type(resource_type)?;
         let id = validate_creation_resource_id(id)?;
         let connection = self
@@ -2400,6 +2404,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         input: CreationResourceRestoreInput,
     ) -> Result<CreationResource, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("restore_creation_resource_revision")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let resource_type = validate_creation_resource_type(&input.resource_type)?;
         let id = validate_creation_resource_id(&input.id)?;
         if input.revision == 0 || input.expected_current_revision == 0 {
@@ -2505,6 +2513,10 @@ impl RuntimeDatabase {
         resource_type: &str,
         id: &str,
     ) -> Result<CreationResourceArchiveReceipt, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("archive_creation_resource")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let resource_type = validate_creation_resource_type(resource_type)?;
         let id = validate_creation_resource_id(id)?;
         let mut connection = self
@@ -2587,6 +2599,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         limit: usize,
     ) -> Result<Vec<DueRuntimeSchedule>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("claim_due_runtime_schedules")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -2986,6 +3002,10 @@ impl RuntimeDatabase {
         interrupted_task_id: &str,
         replacement_key: &str,
     ) -> Result<RuntimeTaskRecoveryReplacement, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("supersede_runtime_task_for_recovery")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let interrupted_task_id = interrupted_task_id.trim();
         let replacement_key = replacement_key.trim();
         if !valid_runtime_identifier(interrupted_task_id, 180)
@@ -3138,6 +3158,10 @@ impl RuntimeDatabase {
         replacement_task_id: &str,
         replacement_key: &str,
     ) -> Result<RuntimeTaskRecoveryReplacement, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("bind_runtime_task_recovery_replacement")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let interrupted_task_id = interrupted_task_id.trim();
         let replacement_task_id = replacement_task_id.trim();
         let replacement_key = replacement_key.trim();
