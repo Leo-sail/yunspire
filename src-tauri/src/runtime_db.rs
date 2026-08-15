@@ -936,6 +936,10 @@ pub(crate) fn load_optimization_profile_in_connection(
     connection: &Connection,
     workspace_scope: &str,
 ) -> Result<OptimizationProfileResult, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("load_optimization_profile_in_connection")
+        .with_threshold(100); // 使用默认阈值
+
     let row = connection
         .query_row(
             "SELECT version, candidate_id, guidance, rules_json, skill_hints_json, updated_at
@@ -969,6 +973,10 @@ pub(crate) fn apply_evaluated_optimization_candidate_in_connection(
     workspace_scope: &str,
     candidate_id: &str,
 ) -> Result<OptimizationProfileResult, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("apply_evaluated_optimization_candidate_in_connection")
+        .with_threshold(100);
+
     if !valid_runtime_identifier(candidate_id, 160) {
         return Err("优化候选 ID 无效".to_string());
     }
@@ -8708,6 +8716,10 @@ pub(crate) fn read_runtime_effect_mutation_result<T: serde::de::DeserializeOwned
     workspace_scope: &str,
     key: &RuntimeEffectMutationKey,
 ) -> Result<Option<T>, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("read_runtime_effect_mutation_result")
+        .with_threshold(100);
+
     let stored = connection
         .query_row(
             "SELECT request_hash, result_json
@@ -8735,6 +8747,10 @@ pub(crate) fn persist_runtime_effect_mutation_result<T: Serialize>(
     key: &RuntimeEffectMutationKey,
     result: &T,
 ) -> Result<(), String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("persist_runtime_effect_mutation_result")
+        .with_threshold(100);
+
     let result_json = serde_json::to_string(result)
         .map_err(|error| format!("无法序列化 Runtime 副作用结果：{error}"))?;
     connection
