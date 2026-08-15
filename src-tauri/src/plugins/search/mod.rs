@@ -1,5 +1,6 @@
 pub mod algorithm;
 pub mod async_ops;
+pub mod core_search;
 pub mod encoding;
 pub mod neural;
 pub mod plugin;

@@ -130,8 +130,8 @@ fn is_cjk(c: char) -> bool {
 
 /// 在连接中执行索引搜索（带神经嵌入支持）
 ///
-/// 注意：这是一个简化的占位实现
-/// 完整的实现将在后续迭代中从 runtime_db.rs 迁移
+/// 注意：此函数已迁移到 core_search.rs
+/// 请使用 crate::plugins::search::core_search::indexed_search_in_connection_with_neural
 ///
 /// # 参数
 /// - `connection`: 数据库连接
@@ -143,15 +143,20 @@ fn is_cjk(c: char) -> bool {
 /// # 返回
 /// 搜索结果列表
 pub(crate) fn indexed_search_in_connection_with_neural(
-    _connection: &Connection,
-    _vault_id: Option<&str>,
-    _query: &str,
-    _max_results: usize,
-    _neural: Option<&NeuralSearchContext>,
+    connection: &Connection,
+    vault_id: Option<&str>,
+    query: &str,
+    max_results: usize,
+    neural: Option<&NeuralSearchContext>,
 ) -> Result<Vec<IndexedSearchResult>, String> {
-    // TODO: 从 runtime_db.rs 迁移完整实现
-    // 当前返回占位错误，实际调用仍使用 runtime_db.rs 中的实现
-    Err("搜索算法尚未完全迁移，请使用 runtime_db.rs 中的实现".to_string())
+    // 委托给 core_search 模块
+    crate::plugins::search::core_search::indexed_search_in_connection_with_neural(
+        connection,
+        vault_id,
+        query,
+        max_results,
+        neural,
+    )
 }
 
 #[cfg(test)]
