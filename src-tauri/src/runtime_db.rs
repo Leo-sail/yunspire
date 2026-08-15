@@ -5796,6 +5796,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         input: &RuntimeScheduleDispatchAckInput,
     ) -> Result<NativeRuntimeTask, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("acknowledge_runtime_schedule_dispatch")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         crate::task_runtime::validate_runtime_schedule_dispatch_ack(input)?;
         let occurrence_id = input.occurrence_id.trim();
         let runtime_task_id = input.runtime_task_id.trim();
@@ -7575,6 +7579,10 @@ impl RuntimeDatabase {
         &self,
         requested_path: &str,
     ) -> Result<DatabaseRestoreResult, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("restore_for_runtime")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         self.restore(requested_path)
     }
 
