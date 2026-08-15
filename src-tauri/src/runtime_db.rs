@@ -1163,6 +1163,10 @@ impl RuntimeDatabase {
     pub(crate) fn application_authorization(
         &self,
     ) -> Result<ApplicationAuthorizationState, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("application_authorization")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -1201,6 +1205,10 @@ impl RuntimeDatabase {
         &self,
         granted: bool,
     ) -> Result<ApplicationAuthorizationState, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("set_application_authorization")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let status = if granted { "granted" } else { "denied" };
         let decided_at = Utc::now().to_rfc3339();
         let connection = self
@@ -1229,6 +1237,10 @@ impl RuntimeDatabase {
     }
 
     pub(crate) fn record_model_usage(&self, record: &ModelUsageRecord<'_>) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("record_model_usage")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let workspace_scope = self.local_workspace_scope()?;
         crate::trace::validate_trace_id(record.trace_id)?;
         let mut connection = self
@@ -4927,6 +4939,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         worker_id: &str,
     ) -> Result<Vec<crate::task_runtime::RuntimeTaskStepClaim>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("get_active_step_claims")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -4993,6 +5009,10 @@ impl RuntimeDatabase {
         child_task_id: &str,
         binding: &RuntimeTaskStepCommandBinding,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("validate_runtime_execution_ticket_renewal")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -5587,6 +5607,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         input: &RuntimeTaskStepFailureInput,
     ) -> Result<RuntimeTaskStepReceipt, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("fail_runtime_task_plan_step")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         crate::task_runtime::validate_runtime_task_step_failure(input)?;
         self.finalize_runtime_task_step(
             workspace_scope,
@@ -5610,6 +5634,10 @@ impl RuntimeDatabase {
         plan_revision: Option<u64>,
         limit: usize,
     ) -> Result<Vec<RuntimeTaskStepReceipt>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("list_runtime_task_step_receipts")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let limit = limit.clamp(1, 512);
         let connection = self
             .connection
@@ -6162,6 +6190,9 @@ impl RuntimeDatabase {
         state: Option<&str>,
         limit: usize,
     ) -> Result<Vec<NativeRuntimeTask>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("list_runtime_tasks")
+            .with_threshold(self.config.slow_query_threshold_ms);
         if state.is_some_and(|value| !valid_runtime_task_state(value)) {
             return Err("任务状态筛选无效".to_string());
         }
@@ -6209,6 +6240,10 @@ impl RuntimeDatabase {
         detail: &str,
         checkpoint: Option<&Value>,
     ) -> Result<NativeRuntimeTask, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("transition_native_runtime_task")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         self.transition_native_runtime_task_internal(
             workspace_scope,
             task_id,
@@ -6231,6 +6266,10 @@ impl RuntimeDatabase {
         checkpoint: Option<&Value>,
         trusted_execution_receipt: &TrustedExecutionReceipt,
     ) -> Result<NativeRuntimeTask, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("transition_native_runtime_task_with_trusted_execution_receipt")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         self.transition_native_runtime_task_internal(
             workspace_scope,
             task_id,
@@ -6865,6 +6904,10 @@ impl RuntimeDatabase {
         root: &Path,
         path: &Path,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("enqueue_vault_index_path")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         self.enqueue_vault_index_path_inner(vault_id, root, path, None)
     }
 
@@ -7318,6 +7361,10 @@ impl RuntimeDatabase {
         &self,
         vault: &VaultDescriptor,
     ) -> Result<VaultIndexReconcileResult, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("reconcile_vault_index")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         if vault.connection_state != "connected" {
             return Err("只能校准已连接的 Vault".to_string());
         }
@@ -7492,6 +7539,10 @@ impl RuntimeDatabase {
     }
 
     pub(crate) fn backup_for_runtime(&self) -> Result<DatabaseBackupResult, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("backup_for_runtime")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         self.backup()
     }
 
