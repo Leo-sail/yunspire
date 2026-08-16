@@ -12,6 +12,9 @@ pub mod types;
 pub mod validation;
 pub mod budget;
 pub mod receipt;
+pub mod statistics;
+pub mod contract;
+pub mod evidence;
 
 // 重新导出核心类型
 pub use types::*;
@@ -28,3 +31,4 @@ pub use recovery::{
     bind_runtime_task_recovery_replacement, recover_interrupted_runtime_tasks,
     resolve_runtime_task_recovery, supersede_runtime_task_for_recovery,
 };
+pub use evidence::{append_runtime_task_evidence, ensure_runtime_task_authorized};
