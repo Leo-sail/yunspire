@@ -1,3 +1,4 @@
+pub mod bridge;
 pub mod lifecycle;
 pub mod plugin;
 pub mod recovery;
