@@ -91,42 +91,64 @@ pub fn runtime_task_step_frontier(
     Ok(frontier)
 }
 
-/// 认领步骤（占位实现）
-pub fn claim_runtime_task_plan_steps(
-    _database: &RuntimeDatabase,
-    _workspace_scope: &str,
-    _input: &RuntimeTaskStepClaimInput,
-) -> Result<RuntimeTaskStepClaimBatch, String> {
-    // TODO: 从 runtime_db.rs 4574-4835 行提取实现
-    Err("claim_runtime_task_plan_steps 待实现".to_string())
-}
-
-/// 续期租约（占位实现）
+/// 续期租约（包装实现）
 pub fn renew_runtime_task_step_lease(
-    _database: &RuntimeDatabase,
-    _workspace_scope: &str,
-    _input: &RuntimeTaskStepLeaseRenewalInput,
+    database: &RuntimeDatabase,
+    workspace_scope: &str,
+    input: &RuntimeTaskStepLeaseRenewalInput,
 ) -> Result<RuntimeTaskStepLeaseRenewalReceipt, String> {
-    // TODO: 从 runtime_db.rs 4837-4943 行提取实现
-    Err("renew_runtime_task_step_lease 待实现".to_string())
+    // 性能监控
+    let _profiler = QueryProfiler::new("renew_runtime_task_step_lease").with_threshold(100);
+
+    // 暂时直接调用 runtime_db 的实现
+    // TODO: 未来可以将完整逻辑迁移到这里
+    database.renew_runtime_task_step_lease(workspace_scope, input)
 }
 
-/// 完成步骤（占位实现）
+/// 认领步骤（包装实现）
+pub fn claim_runtime_task_plan_steps(
+    database: &RuntimeDatabase,
+    workspace_scope: &str,
+    input: &RuntimeTaskStepClaimInput,
+) -> Result<RuntimeTaskStepClaimBatch, String> {
+    // 性能监控
+    let _profiler = QueryProfiler::new("claim_runtime_task_plan_steps").with_threshold(100);
+
+    // 暂时直接调用 runtime_db 的实现
+    // TODO: 未来可以将完整逻辑迁移到这里
+    database.claim_runtime_task_plan_steps(workspace_scope, input)
+}
+
+/// 完成步骤
 pub fn complete_runtime_task_plan_step(
-    _database: &RuntimeDatabase,
-    _workspace_scope: &str,
-    _input: &RuntimeTaskStepCompletionInput,
+    database: &RuntimeDatabase,
+    workspace_scope: &str,
+    input: &RuntimeTaskStepCompletionInput,
 ) -> Result<(), String> {
-    // TODO: 从 runtime_db.rs 5588-5611 行提取实现
-    Err("complete_runtime_task_plan_step 待实现".to_string())
+    // 性能监控
+    let _profiler = QueryProfiler::new("complete_runtime_task_plan_step").with_threshold(100);
+
+    crate::task_runtime::validate_runtime_task_step_completion(input)?;
+
+    // 调用 runtime_db 的 finalize 方法（暂时保留在 runtime_db 中）
+    database
+        .complete_runtime_task_plan_step(workspace_scope, input)
+        .map(|_| ())
 }
 
-/// 失败步骤（占位实现）
+/// 失败步骤
 pub fn fail_runtime_task_plan_step(
-    _database: &RuntimeDatabase,
-    _workspace_scope: &str,
-    _input: &RuntimeTaskStepFailureInput,
+    database: &RuntimeDatabase,
+    workspace_scope: &str,
+    input: &RuntimeTaskStepFailureInput,
 ) -> Result<(), String> {
-    // TODO: 从 runtime_db.rs 5613-5636 行提取实现
-    Err("fail_runtime_task_plan_step 待实现".to_string())
+    // 性能监控
+    let _profiler = QueryProfiler::new("fail_runtime_task_plan_step").with_threshold(100);
+
+    crate::task_runtime::validate_runtime_task_step_failure(input)?;
+
+    // 调用 runtime_db 的 finalize 方法（暂时保留在 runtime_db 中）
+    database
+        .fail_runtime_task_plan_step(workspace_scope, input)
+        .map(|_| ())
 }
