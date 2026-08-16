@@ -1,6 +1,7 @@
 pub mod assets;
 pub mod markdown;
 pub mod model;
+pub mod mode;
 pub mod renderer;
 pub mod runtime;
 pub mod theme;

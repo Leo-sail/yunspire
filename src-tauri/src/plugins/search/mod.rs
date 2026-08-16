@@ -1,0 +1,36 @@
+pub mod algorithm;
+pub mod async_ops;
+pub mod bridge;
+pub mod core_search;
+pub mod encoding;
+pub mod neural;
+pub mod plugin;
+pub mod types;
+
+pub use plugin::SearchPlugin;
+pub use types::{
+    IndexedSearchResult, IndexedSearchSignals, NeuralEmbeddingIndexStatus,
+    NeuralEmbeddingVaultIndexStatus,
+};
+
+// 公开桥接函数供 runtime_db.rs 使用
+pub use bridge::indexed_search_impl;
+
+// 内部使用
+pub(crate) use algorithm::{
+    cjk_lexical_terms, indexed_search_candidate_signals, indexed_search_in_connection_with_neural,
+};
+
+pub(crate) use async_ops::{prepare_neural_search_context, refresh_neural_embedding_notes};
+
+pub(crate) use encoding::{
+    decode_neural_embedding, encode_neural_embedding, neural_embedding_input_hash,
+    neural_embedding_state_priority, neural_note_embedding_input,
+    normalize_neural_embedding, normalize_neural_embedding_vault_id,
+};
+
+pub(crate) use neural::{
+    cached_neural_embedding_in_connection, load_cached_neural_embedding,
+    load_missing_neural_embedding_inputs, persist_neural_embedding_and_bindings,
+    update_neural_embedding_index_state,
+};

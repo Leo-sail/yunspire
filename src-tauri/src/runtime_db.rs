@@ -43,8 +43,8 @@ use tauri::{AppHandle, Manager, State};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
-const MAX_SNAPSHOT_RECORDS: usize = 10_000;
-const MAX_RECORD_BYTES: usize = 2 * 1024 * 1024;
+const MAX_SNAPSHOT_RECORDS: usize = 10_000; // 将逐步迁移到 DatabaseConfig
+const MAX_RECORD_BYTES: usize = 2 * 1024 * 1024; // 将逐步迁移到 DatabaseConfig
 const MAX_CREATION_MANIFEST_BYTES: usize = 256 * 1024;
 const MAX_CREATION_RESOURCE_JSON_DEPTH: usize = 32;
 const MAX_CREATION_RESOURCE_JSON_NODES: usize = 20_000;
@@ -53,7 +53,7 @@ const MAX_INBOUND_RECORD_BYTES: usize = 512 * 1024;
 const MAX_RUNTIME_PLAN_BYTES: usize = 256 * 1024;
 const MAX_RUNTIME_EVIDENCE_BYTES: usize = 256 * 1024;
 const DEFAULT_LOCAL_WORKSPACE_SCOPE: &str = "local";
-const CURRENT_SCHEMA_VERSION: i64 = 42;
+const CURRENT_SCHEMA_VERSION: i64 = 45;
 const APPLICATION_AUTHORIZATION_VERSION: i64 = 1;
 const VAULT_INDEX_DEBOUNCE_MS: i64 = 300;
 const VAULT_INDEX_MAX_ATTEMPTS: i64 = 5;
@@ -96,6 +96,7 @@ const REPORT_SUBSCRIPTION_UPSERT_RUNTIME_HANDLER_PAIRS: &[(&str, &str)] = &[
 pub struct RuntimeDatabase {
     pub(crate) connection: Mutex<Connection>,
     path: PathBuf,
+    config: crate::database::DatabaseConfig,
 }
 
 pub(crate) struct ModelUsageRecord<'a> {
@@ -935,6 +936,10 @@ pub(crate) fn load_optimization_profile_in_connection(
     connection: &Connection,
     workspace_scope: &str,
 ) -> Result<OptimizationProfileResult, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("load_optimization_profile_in_connection")
+        .with_threshold(100); // 使用默认阈值
+
     let row = connection
         .query_row(
             "SELECT version, candidate_id, guidance, rules_json, skill_hints_json, updated_at
@@ -968,6 +973,10 @@ pub(crate) fn apply_evaluated_optimization_candidate_in_connection(
     workspace_scope: &str,
     candidate_id: &str,
 ) -> Result<OptimizationProfileResult, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("apply_evaluated_optimization_candidate_in_connection")
+        .with_threshold(100);
+
     if !valid_runtime_identifier(candidate_id, 160) {
         return Err("优化候选 ID 无效".to_string());
     }
@@ -1089,6 +1098,12 @@ pub(crate) fn apply_evaluated_optimization_candidate_in_connection(
 
 impl RuntimeDatabase {
     pub fn open(app: &AppHandle) -> Result<Self, String> {
+        // 初始化数据库基础设施（性能监控等）
+        crate::database::init_database_infrastructure();
+
+        // 创建数据库配置（默认配置）
+        let config = crate::database::DatabaseConfig::default();
+
         #[cfg(debug_assertions)]
         let app_data = std::env::var_os("YUNSPIRE_APP_DATA_DIR")
             .map(PathBuf::from)
@@ -1118,9 +1133,18 @@ impl RuntimeDatabase {
             )
             .map_err(|error| format!("无法配置 SQLite：{error}"))?;
         run_migrations(&connection)?;
+
+        log::info!(
+            "数据库初始化完成 - 连接池: {}, 批处理: {}, 慢查询阈值: {}ms",
+            config.connection_pool_size,
+            config.vault_index_batch_size,
+            config.slow_query_threshold_ms
+        );
+
         Ok(Self {
             connection: Mutex::new(connection),
             path,
+            config,
         })
     }
 
@@ -1147,6 +1171,10 @@ impl RuntimeDatabase {
     pub(crate) fn application_authorization(
         &self,
     ) -> Result<ApplicationAuthorizationState, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("application_authorization")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -1185,6 +1213,10 @@ impl RuntimeDatabase {
         &self,
         granted: bool,
     ) -> Result<ApplicationAuthorizationState, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("set_application_authorization")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let status = if granted { "granted" } else { "denied" };
         let decided_at = Utc::now().to_rfc3339();
         let connection = self
@@ -1213,6 +1245,10 @@ impl RuntimeDatabase {
     }
 
     pub(crate) fn record_model_usage(&self, record: &ModelUsageRecord<'_>) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("record_model_usage")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let workspace_scope = self.local_workspace_scope()?;
         crate::trace::validate_trace_id(record.trace_id)?;
         let mut connection = self
@@ -1308,6 +1344,10 @@ impl RuntimeDatabase {
     }
 
     pub fn sync_vault_registry(&self, vaults: &[VaultDescriptor]) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("sync_vault_registry")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let current_ids = vaults
             .iter()
             .map(|vault| vault.id.as_str())
@@ -1404,6 +1444,10 @@ impl RuntimeDatabase {
         occurred_at: &str,
         payload: &Value,
     ) -> Result<bool, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("stage_long_term_memory_event")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let serialized = serde_json::to_string(payload)
             .map_err(|error| format!("无法序列化长期记忆投递记录：{error}"))?;
         if serialized.len() > MAX_RECORD_BYTES {
@@ -1461,6 +1505,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         limit: usize,
     ) -> Result<Vec<PendingLongTermMemoryEvent>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("pending_long_term_memory_events")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -1495,6 +1543,10 @@ impl RuntimeDatabase {
         content_hash: &str,
         committed_at: &str,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("commit_long_term_memory_event_internal")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -1521,6 +1573,10 @@ impl RuntimeDatabase {
         event_id: &str,
         error: &str,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("fail_long_term_memory_event")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -1548,6 +1604,10 @@ impl RuntimeDatabase {
         include_inactive: bool,
         limit: usize,
     ) -> Result<Vec<LongTermMemoryRecord>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("query_long_term_memory")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         if query.chars().count() > MAX_SEARCH_QUERY_CHARS {
             return Err("长期记忆查询超过 512 个字符".to_string());
         }
@@ -1625,6 +1685,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         input: &LongTermMemoryGovernanceInput,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("govern_long_term_memory")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         if !valid_runtime_identifier(&input.id, 160) {
             return Err("长期记忆 ID 无效".to_string());
         }
@@ -1753,6 +1817,10 @@ impl RuntimeDatabase {
         report_subscriptions: &[Value],
         scheduler_enabled: bool,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("sync_runtime_state")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         validate_records(tasks, "原生任务")?;
         validate_records(schedules, "原生定时任务")?;
         let _ = report_subscriptions;
@@ -1788,6 +1856,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         snapshot: &ManagedResourceSnapshotInput,
     ) -> Result<ManagedResourceSnapshot, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("sync_managed_resources")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         // Reports and report subscriptions are persisted through their dedicated
         // per-record commands. Keeping them out of this full-snapshot sync avoids
         // turning a request-size guard into a product-level record ceiling.
@@ -1844,6 +1916,10 @@ impl RuntimeDatabase {
         resource_type: &str,
         payload: &Value,
     ) -> Result<Value, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("upsert_report_resource")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         if !matches!(resource_type, "report" | "report_subscription") {
             return Err("不支持的报告资源类型".to_string());
         }
@@ -1874,6 +1950,10 @@ impl RuntimeDatabase {
         resource_type: &str,
         id: &str,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("delete_report_resource")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         if !matches!(resource_type, "report" | "report_subscription") {
             return Err("不支持的报告资源类型".to_string());
         }
@@ -1910,6 +1990,9 @@ impl RuntimeDatabase {
         cursor_id: Option<&str>,
         limit: usize,
     ) -> Result<ManagedResourcePage, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("list_report_resources_page")
+            .with_threshold(self.config.slow_query_threshold_ms);
         if !matches!(resource_type, "report" | "report_subscription") {
             return Err("不支持的报告资源类型".to_string());
         }
@@ -1988,6 +2071,10 @@ impl RuntimeDatabase {
         cursor_id: Option<&str>,
         limit: usize,
     ) -> Result<ReportSourcePage, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("read_report_source_page")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let start = chrono::DateTime::parse_from_rfc3339(start_at)
             .map_err(|_| "报告数据开始时间必须是 RFC3339".to_string())?
             .with_timezone(&Utc)
@@ -2099,6 +2186,10 @@ impl RuntimeDatabase {
         &self,
         workspace_scope: &str,
     ) -> Result<ManagedResourceSnapshot, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("load_managed_resources")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -2173,6 +2264,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         input: CreationResourceInput,
     ) -> Result<CreationResource, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("upsert_creation_resource")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let resource = validate_creation_resource_input(&input)?;
         let mut connection = self
             .connection
@@ -2285,6 +2380,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         include_archived: bool,
     ) -> Result<Vec<CreationResource>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("list_creation_resources")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -2323,6 +2422,10 @@ impl RuntimeDatabase {
         resource_type: &str,
         id: &str,
     ) -> Result<Vec<CreationResource>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("list_creation_resource_revisions")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let resource_type = validate_creation_resource_type(resource_type)?;
         let id = validate_creation_resource_id(id)?;
         let connection = self
@@ -2357,6 +2460,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         input: CreationResourceRestoreInput,
     ) -> Result<CreationResource, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("restore_creation_resource_revision")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let resource_type = validate_creation_resource_type(&input.resource_type)?;
         let id = validate_creation_resource_id(&input.id)?;
         if input.revision == 0 || input.expected_current_revision == 0 {
@@ -2462,6 +2569,10 @@ impl RuntimeDatabase {
         resource_type: &str,
         id: &str,
     ) -> Result<CreationResourceArchiveReceipt, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("archive_creation_resource")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let resource_type = validate_creation_resource_type(resource_type)?;
         let id = validate_creation_resource_id(id)?;
         let mut connection = self
@@ -2544,6 +2655,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         limit: usize,
     ) -> Result<Vec<DueRuntimeSchedule>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("claim_due_runtime_schedules")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -2646,6 +2761,10 @@ impl RuntimeDatabase {
         &self,
         workspace_scope: &str,
     ) -> Result<Vec<RuntimeTaskRecovery>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("recover_interrupted_runtime_tasks")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -2907,6 +3026,10 @@ impl RuntimeDatabase {
         task_id: &str,
         resolution: &str,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("resolve_runtime_task_recovery")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         if !matches!(
             resolution,
             "completed" | "resumed" | "needs_input" | "manual" | "failed"
@@ -2939,6 +3062,10 @@ impl RuntimeDatabase {
         interrupted_task_id: &str,
         replacement_key: &str,
     ) -> Result<RuntimeTaskRecoveryReplacement, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("supersede_runtime_task_for_recovery")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let interrupted_task_id = interrupted_task_id.trim();
         let replacement_key = replacement_key.trim();
         if !valid_runtime_identifier(interrupted_task_id, 180)
@@ -3091,6 +3218,10 @@ impl RuntimeDatabase {
         replacement_task_id: &str,
         replacement_key: &str,
     ) -> Result<RuntimeTaskRecoveryReplacement, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("bind_runtime_task_recovery_replacement")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let interrupted_task_id = interrupted_task_id.trim();
         let replacement_task_id = replacement_task_id.trim();
         let replacement_key = replacement_key.trim();
@@ -3172,6 +3303,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         record: &InboundContentRecordInput,
     ) -> Result<InboundContentRecordReceipt, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("upsert_inbound_content_record")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         validate_inbound_content_record(record)?;
         let extraction_json = serialize_inbound_record_section(&record.extraction, "提取诊断")?;
         let analysis_json = serialize_inbound_record_section(&record.analysis, "模型分析")?;
@@ -3757,6 +3892,10 @@ impl RuntimeDatabase {
         trace_id: &str,
         accepted_at: &str,
     ) -> Result<(Option<String>, bool), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("persist_application_command")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         crate::trace::validate_trace_id(trace_id)?;
         let command_payload = serde_json::to_string(command)
             .map_err(|error| format!("无法序列化应用命令：{error}"))?;
@@ -4102,11 +4241,8 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         task_id: &str,
     ) -> Result<NativeRuntimeTask, String> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
-        read_native_runtime_task(&connection, workspace_scope, task_id)
+        // 转发到 task_management 模块
+        crate::task_management::query::runtime_task(self, workspace_scope, task_id)
     }
 
     pub(crate) fn runtime_task_contract(
@@ -4114,11 +4250,8 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         task_id: &str,
     ) -> Result<Option<RuntimeTaskContractSnapshot>, String> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
-        read_runtime_task_contract(&connection, workspace_scope, task_id)
+        // 转发到 task_management 模块
+        crate::task_management::query::runtime_task_contract(self, workspace_scope, task_id)
     }
 
     pub(crate) fn runtime_schedule_dispatch_binding(
@@ -4127,6 +4260,10 @@ impl RuntimeDatabase {
         occurrence_id: &str,
         runtime_task_id: &str,
     ) -> Result<RuntimeScheduleDispatchBinding, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("runtime_schedule_dispatch_binding")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -4218,6 +4355,10 @@ impl RuntimeDatabase {
         task_id: &str,
         plan: &RuntimeTaskPlanInput,
     ) -> Result<RuntimeTaskContractSnapshot, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("define_runtime_task_plan")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         crate::task_runtime::validate_runtime_task_plan(plan)?;
         if !valid_runtime_identifier(task_id, 180) {
             return Err("原生任务计划 taskId 无效".to_string());
@@ -4343,6 +4484,10 @@ impl RuntimeDatabase {
         task_id: &str,
         plan_revision: Option<u64>,
     ) -> Result<Vec<RuntimeTaskStepFrontierItem>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("runtime_task_step_frontier")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         if !valid_runtime_identifier(task_id, 180) {
             return Err("原生任务步骤 frontier taskId 无效".to_string());
         }
@@ -4417,6 +4562,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         input: &RuntimeTaskStepClaimInput,
     ) -> Result<RuntimeTaskStepClaimBatch, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("claim_runtime_task_plan_steps")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         crate::task_runtime::validate_runtime_task_step_claim(input)?;
         let mut connection = self
             .connection
@@ -4676,6 +4825,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         input: &RuntimeTaskStepLeaseRenewalInput,
     ) -> Result<RuntimeTaskStepLeaseRenewalReceipt, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("renew_runtime_task_step_lease")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         crate::task_runtime::validate_runtime_task_step_lease_renewal(input)?;
         let mut connection = self
             .connection
@@ -4773,12 +4926,87 @@ impl RuntimeDatabase {
         })
     }
 
+    /// 获取指定 worker 的所有活动 step claims
+    #[allow(dead_code)]
+    pub(crate) fn get_active_step_claims(
+        &self,
+        workspace_scope: &str,
+        worker_id: &str,
+    ) -> Result<Vec<crate::task_runtime::RuntimeTaskStepClaim>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("get_active_step_claims")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+
+        let mut statement = connection
+            .prepare(
+                "SELECT claim_id, task_id, plan_revision, step_id, step_kind, title,
+                        depends_on, parameters, effect_class, attempt, lease_owner,
+                        lease_expires_at, reserved_tool_calls, reserved_runtime_seconds,
+                        reserved_tokens, reserved_cost, cancellation_fence, claimed_at
+                 FROM runtime_task_step_runs
+                 WHERE workspace_scope=?1 AND lease_owner=?2 AND state='claimed'
+                 ORDER BY claimed_at ASC",
+            )
+            .map_err(|error| format!("无法准备活动步骤查询：{error}"))?;
+
+        let claims = statement
+            .query_map(params![workspace_scope, worker_id], |row| {
+                let depends_on_json: String = row.get(6)?;
+                let depends_on: Vec<String> =
+                    serde_json::from_str(&depends_on_json).unwrap_or_default();
+                let parameters_json: String = row.get(7)?;
+                let parameters: serde_json::Value = serde_json::from_str(&parameters_json)
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+                Ok(crate::task_runtime::RuntimeTaskStepClaim {
+                    claim_id: row.get(0)?,
+                    runtime_task_id: row.get(1)?,
+                    plan_revision: row.get::<_, i64>(2)? as u64,
+                    step_id: row.get(3)?,
+                    step_kind: crate::task_runtime::RuntimeTaskStepKind::parse(
+                        &row.get::<_, String>(4)?,
+                    )
+                    .unwrap_or(crate::task_runtime::RuntimeTaskStepKind::Capability),
+                    title: row.get(5)?,
+                    depends_on,
+                    parameters,
+                    effect_class: crate::task_runtime::RuntimeTaskStepEffectClass::parse(
+                        &row.get::<_, String>(8)?,
+                    )
+                    .unwrap_or(crate::task_runtime::RuntimeTaskStepEffectClass::Effectful),
+                    attempt: row.get::<_, i64>(9)? as u64,
+                    lease_owner: row.get(10)?,
+                    lease_expires_at: row.get(11)?,
+                    reserved_tool_calls: row.get::<_, i64>(12)? as u64,
+                    reserved_runtime_seconds: row.get::<_, i64>(13)? as u64,
+                    reserved_tokens: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
+                    reserved_cost: row.get(15)?,
+                    cancellation_fence: row.get::<_, i64>(16)? as u64,
+                    claimed_at: row.get(17)?,
+                })
+            })
+            .map_err(|error| format!("无法执行活动步骤查询：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法读取活动步骤：{error}"))?;
+
+        Ok(claims)
+    }
+
     pub(crate) fn validate_runtime_execution_ticket_renewal(
         &self,
         workspace_scope: &str,
         child_task_id: &str,
         binding: &RuntimeTaskStepCommandBinding,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("validate_runtime_execution_ticket_renewal")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -4809,6 +5037,10 @@ impl RuntimeDatabase {
         capability_id: &str,
         operation: &str,
     ) -> Result<RuntimeEffectfulHandlerAuthorization, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("validate_runtime_effectful_handler")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let authorization = {
             let connection = self
                 .connection
@@ -4841,6 +5073,10 @@ impl RuntimeDatabase {
         operation_context: &OperationContext,
         allowed_pairs: &[(&str, &str)],
     ) -> Result<RuntimeEffectfulHandlerAuthorization, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("validate_runtime_effectful_handler_pairs")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let authorization = {
             let connection = self
                 .connection
@@ -4875,6 +5111,10 @@ impl RuntimeDatabase {
         operation: &str,
         usage: TrustedHandlerUsage,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("record_runtime_effectful_handler_completion")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let authorization = self.validate_runtime_effectful_handler(
             ticket_state,
             workspace_scope,
@@ -4907,6 +5147,10 @@ impl RuntimeDatabase {
         completion_key: &str,
         usage: TrustedHandlerUsage,
     ) -> Result<bool, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("record_runtime_effectful_handler_completion_once")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let authorization = self.validate_runtime_effectful_handler(
             ticket_state,
             workspace_scope,
@@ -4935,6 +5179,10 @@ impl RuntimeDatabase {
         child_task_id: &str,
         binding: &RuntimeTaskStepCommandBinding,
     ) -> Result<RuntimeReadOnlyCapabilityResult, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("execute_runtime_read_only_capability")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let connection = self
             .connection
             .lock()
@@ -5328,6 +5576,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         input: &RuntimeTaskStepCompletionInput,
     ) -> Result<RuntimeTaskStepReceipt, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("complete_runtime_task_plan_step")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         crate::task_runtime::validate_runtime_task_step_completion(input)?;
         self.finalize_runtime_task_step(
             workspace_scope,
@@ -5349,6 +5601,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         input: &RuntimeTaskStepFailureInput,
     ) -> Result<RuntimeTaskStepReceipt, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("fail_runtime_task_plan_step")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         crate::task_runtime::validate_runtime_task_step_failure(input)?;
         self.finalize_runtime_task_step(
             workspace_scope,
@@ -5372,6 +5628,10 @@ impl RuntimeDatabase {
         plan_revision: Option<u64>,
         limit: usize,
     ) -> Result<Vec<RuntimeTaskStepReceipt>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("list_runtime_task_step_receipts")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let limit = limit.clamp(1, 512);
         let connection = self
             .connection
@@ -5408,6 +5668,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         input: &RuntimeTaskEvidenceInput,
     ) -> Result<RuntimeTaskEvidence, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("append_runtime_task_evidence")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         crate::task_runtime::validate_runtime_task_evidence_shape(input)?;
         let task_id = input.task_id.trim();
         let mut connection = self
@@ -5602,6 +5866,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         input: &RuntimeScheduleDispatchAckInput,
     ) -> Result<NativeRuntimeTask, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("acknowledge_runtime_schedule_dispatch")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         crate::task_runtime::validate_runtime_schedule_dispatch_ack(input)?;
         let occurrence_id = input.occurrence_id.trim();
         let runtime_task_id = input.runtime_task_id.trim();
@@ -5841,6 +6109,10 @@ impl RuntimeDatabase {
         task_id: Option<&str>,
         supplied_trace_id: Option<&str>,
     ) -> Result<String, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("resolve_operation_trace_id")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         if let Some(trace_id) = supplied_trace_id.filter(|value| !value.trim().is_empty()) {
             return Ok(crate::trace::validate_trace_id(trace_id)?.to_string());
         }
@@ -5864,6 +6136,10 @@ impl RuntimeDatabase {
         vault_id: Option<&str>,
         allowed_states: &[&str],
     ) -> Result<NativeRuntimeTask, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("ensure_runtime_task_authorized")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let task = self.runtime_task(workspace_scope, task_id)?;
         if !allowed_states.contains(&task.state.as_str()) {
             return Err(format!("原生任务状态 {} 不允许执行当前操作", task.state));
@@ -5908,6 +6184,9 @@ impl RuntimeDatabase {
         state: Option<&str>,
         limit: usize,
     ) -> Result<Vec<NativeRuntimeTask>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("list_runtime_tasks")
+            .with_threshold(self.config.slow_query_threshold_ms);
         if state.is_some_and(|value| !valid_runtime_task_state(value)) {
             return Err("任务状态筛选无效".to_string());
         }
@@ -5955,6 +6234,10 @@ impl RuntimeDatabase {
         detail: &str,
         checkpoint: Option<&Value>,
     ) -> Result<NativeRuntimeTask, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("transition_native_runtime_task")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         self.transition_native_runtime_task_internal(
             workspace_scope,
             task_id,
@@ -5977,6 +6260,10 @@ impl RuntimeDatabase {
         checkpoint: Option<&Value>,
         trusted_execution_receipt: &TrustedExecutionReceipt,
     ) -> Result<NativeRuntimeTask, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("transition_native_runtime_task_with_trusted_execution_receipt")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         self.transition_native_runtime_task_internal(
             workspace_scope,
             task_id,
@@ -6376,6 +6663,10 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         vaults: &[VaultDescriptor],
     ) -> Result<Vec<String>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("purge_unreadable_vault_indexes")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let unreadable_vault_ids = vaults
             .iter()
             .filter(|vault| vault.connection_state == "connected")
@@ -6507,6 +6798,10 @@ impl RuntimeDatabase {
     where
         F: Fn() -> bool,
     {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("rebuild_index_for_vault")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let workspace_scope = self.local_workspace_scope()?;
         self.ensure_vault_read_allowed(&workspace_scope, vault_id)?;
         let (_, root) = resolve_vault_for_runtime(vault_id)?;
@@ -6519,6 +6814,14 @@ impl RuntimeDatabase {
             is_cancelled,
         )?;
         ensure_index_not_cancelled(is_cancelled)?;
+
+        log::info!(
+            "开始索引重建: vault={}, 文件数={}, 批处理大小={}",
+            vault_id,
+            markdown.len(),
+            self.config.vault_index_batch_size
+        );
+
         let mut connection = self
             .connection
             .lock()
@@ -6544,20 +6847,43 @@ impl RuntimeDatabase {
 
         let mut indexed_notes = 0;
         let mut skipped_notes = 0;
-        for path in markdown {
+
+        // 使用配置的批处理大小
+        for (batch_idx, batch) in markdown.chunks(self.config.vault_index_batch_size).enumerate() {
             ensure_index_not_cancelled(is_cancelled)?;
-            match prepare_note_index(&root, &path).and_then(|note| {
-                note.map(|note| upsert_prepared_note_index(&transaction, vault_id, &note))
-                    .transpose()
-            }) {
-                Ok(Some(())) => indexed_notes += 1,
-                Ok(None) | Err(_) => skipped_notes += 1,
+
+            for path in batch {
+                match prepare_note_index(&root, path).and_then(|note| {
+                    note.map(|note| upsert_prepared_note_index(&transaction, vault_id, &note))
+                        .transpose()
+                }) {
+                    Ok(Some(())) => indexed_notes += 1,
+                    Ok(None) | Err(_) => skipped_notes += 1,
+                }
+            }
+
+            // 每批次完成后记录进度
+            if batch_idx % 10 == 0 && batch_idx > 0 {
+                log::debug!(
+                    "索引进度: {}/{} 文件已处理",
+                    indexed_notes + skipped_notes,
+                    markdown.len()
+                );
             }
         }
+
         ensure_index_not_cancelled(is_cancelled)?;
         transaction
             .commit()
             .map_err(|error| format!("无法提交索引事务：{error}"))?;
+
+        log::info!(
+            "索引重建完成: vault={}, 成功={}, 跳过={}",
+            vault_id,
+            indexed_notes,
+            skipped_notes
+        );
+
         Ok(IndexBuildResult {
             vault_id: vault_id.to_string(),
             indexed_notes,
@@ -6572,6 +6898,10 @@ impl RuntimeDatabase {
         root: &Path,
         path: &Path,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("enqueue_vault_index_path")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         self.enqueue_vault_index_path_inner(vault_id, root, path, None)
     }
 
@@ -6582,6 +6912,10 @@ impl RuntimeDatabase {
         path: &Path,
         trace_id: &str,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("enqueue_vault_index_path_with_trace")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         self.enqueue_vault_index_path_inner(vault_id, root, path, Some(trace_id))
     }
 
@@ -6592,6 +6926,10 @@ impl RuntimeDatabase {
         path: &Path,
         inherited_trace_id: Option<&str>,
     ) -> Result<(), String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("enqueue_vault_index_path")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let workspace_scope = self.local_workspace_scope()?;
         self.ensure_vault_read_allowed(&workspace_scope, vault_id)?;
         let relative_path = normalized_index_relative_path(root, path)?;
@@ -6632,6 +6970,10 @@ impl RuntimeDatabase {
     }
 
     pub(crate) fn recover_vault_index_changes(&self) -> Result<usize, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("recover_vault_index_changes")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let now = Utc::now();
         let now_text = now.to_rfc3339();
         let mut connection = self
@@ -6666,6 +7008,10 @@ impl RuntimeDatabase {
         &self,
         limit: usize,
     ) -> Result<Vec<ClaimedVaultIndexChange>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("claim_vault_index_changes")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let now = Utc::now();
         let now_ms = now.timestamp_millis();
         let now_text = now.to_rfc3339();
@@ -6761,6 +7107,10 @@ impl RuntimeDatabase {
         change: &ClaimedVaultIndexChange,
         current_root: &Path,
     ) -> Result<Option<AppliedVaultIndexChange>, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("apply_claimed_vault_index_change")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let canonical_root = canonical_index_root(current_root)?;
         if canonical_root != change.canonical_root {
             return Err("Vault 根目录已变化，拒绝应用旧索引任务".to_string());
@@ -6874,6 +7224,10 @@ impl RuntimeDatabase {
         change: &ClaimedVaultIndexChange,
         reason: &str,
     ) -> Result<bool, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("discard_claimed_vault_index_change")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let now = Utc::now().to_rfc3339();
         let mut connection = self
             .connection
@@ -6920,6 +7274,10 @@ impl RuntimeDatabase {
         change: &ClaimedVaultIndexChange,
         error: &str,
     ) -> Result<VaultIndexFailureOutcome, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("fail_claimed_vault_index_change")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         let terminal = change.attempt_count >= VAULT_INDEX_MAX_ATTEMPTS;
         let retry_delay = VAULT_INDEX_RETRY_BASE_MS
             .saturating_mul(1_i64 << change.attempt_count.saturating_sub(1).min(6));
@@ -6997,6 +7355,10 @@ impl RuntimeDatabase {
         &self,
         vault: &VaultDescriptor,
     ) -> Result<VaultIndexReconcileResult, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("reconcile_vault_index")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         if vault.connection_state != "connected" {
             return Err("只能校准已连接的 Vault".to_string());
         }
@@ -7171,6 +7533,10 @@ impl RuntimeDatabase {
     }
 
     pub(crate) fn backup_for_runtime(&self) -> Result<DatabaseBackupResult, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("backup_for_runtime")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         self.backup()
     }
 
@@ -7306,6 +7672,10 @@ impl RuntimeDatabase {
         &self,
         requested_path: &str,
     ) -> Result<DatabaseRestoreResult, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("restore_for_runtime")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         self.restore(requested_path)
     }
 
@@ -7887,6 +8257,10 @@ impl RuntimeDatabase {
         candidate_id: &str,
         mutation_key: Option<&RuntimeEffectMutationKey>,
     ) -> Result<OptimizationProfileResult, String> {
+        // 性能监控
+        let _profiler = crate::database::QueryProfiler::new("apply_optimization_candidate")
+            .with_threshold(self.config.slow_query_threshold_ms);
+
         if !valid_runtime_identifier(candidate_id, 160) {
             return Err("优化候选 ID 无效".to_string());
         }
@@ -8328,6 +8702,10 @@ pub(crate) fn read_runtime_effect_mutation_result<T: serde::de::DeserializeOwned
     workspace_scope: &str,
     key: &RuntimeEffectMutationKey,
 ) -> Result<Option<T>, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("read_runtime_effect_mutation_result")
+        .with_threshold(100);
+
     let stored = connection
         .query_row(
             "SELECT request_hash, result_json
@@ -8355,6 +8733,10 @@ pub(crate) fn persist_runtime_effect_mutation_result<T: Serialize>(
     key: &RuntimeEffectMutationKey,
     result: &T,
 ) -> Result<(), String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("persist_runtime_effect_mutation_result")
+        .with_threshold(100);
+
     let result_json = serde_json::to_string(result)
         .map_err(|error| format!("无法序列化 Runtime 副作用结果：{error}"))?;
     connection
@@ -12912,6 +13294,93 @@ fn run_migrations(connection: &Connection) -> Result<(), String> {
             )
             .map_err(|error| format!("SQLite migration 42 无法收紧自动对话记忆状态：{error}"))?;
     }
+    if version < 43 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS content_fingerprints (
+                   workspace_scope TEXT NOT NULL,
+                   content_id TEXT NOT NULL,
+                   content_type TEXT NOT NULL,
+                   exact_hash TEXT NOT NULL,
+                   structure_hash TEXT NOT NULL,
+                   simhash INTEGER NOT NULL,
+                   source_fingerprint TEXT,
+                   title TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   PRIMARY KEY (workspace_scope, content_id),
+                   FOREIGN KEY(workspace_scope) REFERENCES local_workspace_scopes(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_fingerprints_exact
+                   ON content_fingerprints(workspace_scope, exact_hash);
+                 CREATE INDEX IF NOT EXISTS idx_fingerprints_structure
+                   ON content_fingerprints(workspace_scope, structure_hash);
+                 CREATE INDEX IF NOT EXISTS idx_fingerprints_simhash
+                   ON content_fingerprints(workspace_scope, simhash);
+                 PRAGMA user_version=43;
+                 COMMIT;",
+            )
+            .map_err(|error| format!("SQLite migration 43 失败：{error}"))?;
+    }
+    if version < 44 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE assistant_requests ADD COLUMN execution_plan_json TEXT;
+                 ALTER TABLE assistant_requests ADD COLUMN current_step INTEGER;
+                 PRAGMA user_version=44;
+                 COMMIT;",
+            )
+            .map_err(|error| format!("SQLite migration 44 失败：{error}"))?;
+    }
+    if version < 45 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS user_activity_events (
+                   id TEXT PRIMARY KEY,
+                   workspace_scope TEXT NOT NULL,
+                   event_type TEXT NOT NULL CHECK(event_type IN ('note_view', 'note_edit', 'search', 'capture', 'creation')),
+                   vault_id TEXT,
+                   note_path TEXT,
+                   entity_id TEXT,
+                   occurred_at TEXT NOT NULL,
+                   FOREIGN KEY(workspace_scope) REFERENCES local_workspace_scopes(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_activity_events_time
+                   ON user_activity_events(workspace_scope, event_type, occurred_at);
+                 PRAGMA user_version=45;
+                 COMMIT;",
+            )
+            .map_err(|error| format!("SQLite migration 45 失败：{error}"))?;
+    }
+
+    // Migration 46: 间隔重复（Spaced Repetition）
+    if version < 46 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS spaced_repetition_records (
+                   workspace_scope TEXT NOT NULL,
+                   vault_id TEXT NOT NULL,
+                   note_path TEXT NOT NULL,
+                   review_count INTEGER NOT NULL DEFAULT 0,
+                   last_reviewed_at TEXT NOT NULL,
+                   next_review_at TEXT NOT NULL,
+                   interval_days INTEGER NOT NULL,
+                   memory_strength REAL NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   PRIMARY KEY (workspace_scope, vault_id, note_path),
+                   FOREIGN KEY(workspace_scope) REFERENCES local_workspace_scopes(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_spaced_repetition_next_review
+                   ON spaced_repetition_records(workspace_scope, vault_id, next_review_at);
+                 PRAGMA user_version=46;
+                 COMMIT;",
+            )
+            .map_err(|error| format!("SQLite migration 46 失败：{error}"))?;
+    }
+
     Ok(())
 }
 
@@ -15598,6 +16067,10 @@ fn save_workspace_snapshot_in(
     database: &RuntimeDatabase,
     mut snapshot: WorkspaceSnapshot,
 ) -> Result<(), String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("save_workspace_snapshot")
+        .with_threshold(database.config.slow_query_threshold_ms);
+
     let workspace_scope = database.local_workspace_scope()?;
     validate_records(&snapshot.tasks, "任务")?;
     // Conversation articles are user content, not control-plane records. They can
@@ -15694,6 +16167,10 @@ fn list_workspace_messages_page_in(
     cursor_id: Option<&str>,
     limit: Option<usize>,
 ) -> Result<WorkspaceMessagePage, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("list_workspace_messages_page")
+        .with_threshold(database.config.slow_query_threshold_ms);
+
     if cursor_created_at.is_some() != cursor_id.is_some() {
         return Err("消息分页游标必须同时包含 cursorCreatedAt 和 cursorId".to_string());
     }
@@ -15781,6 +16258,10 @@ fn search_workspace_messages_in(
     query: &str,
     limit: Option<usize>,
 ) -> Result<Vec<WorkspaceMessageSearchResult>, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("search_workspace_messages")
+        .with_threshold(database.config.slow_query_threshold_ms);
+
     let match_query = lexical_fts_match_query(query)?;
     let result_limit = limit.unwrap_or(50).clamp(1, 100);
     let workspace_scope = database.local_workspace_scope()?;
@@ -15840,6 +16321,10 @@ fn delete_workspace_messages_in(
     database: &RuntimeDatabase,
     message_ids: Vec<String>,
 ) -> Result<usize, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("delete_workspace_messages")
+        .with_threshold(database.config.slow_query_threshold_ms);
+
     if message_ids.len() > 512 {
         return Err("单次最多删除 512 条消息；可继续分批删除".to_string());
     }
@@ -16311,6 +16796,10 @@ pub fn upsert_inbound_content_record(
 pub fn load_workspace_snapshot(
     database: State<'_, RuntimeDatabase>,
 ) -> Result<Option<WorkspaceSnapshot>, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("load_workspace_snapshot")
+        .with_threshold(database.config.slow_query_threshold_ms);
+
     let workspace_scope = database.local_workspace_scope()?;
     let connection = database
         .connection
@@ -16915,6 +17404,10 @@ fn load_missing_neural_embedding_inputs(
     vault_id: Option<&str>,
     limit: usize,
 ) -> Result<Vec<NeuralEmbeddingNoteInput>, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("load_missing_neural_embedding_inputs")
+        .with_threshold(database.config.slow_query_threshold_ms);
+
     let scoped = vault_id.filter(|value| *value != "all");
     let sql = if scoped.is_some() {
         "SELECT i.vault_id, i.relative_path, i.title, i.content_hash,
@@ -17406,6 +17899,10 @@ fn load_neural_embedding_index_status(
     configured: Option<&crate::model_provider::ConfiguredEmbeddingModel>,
     configuration_error: Option<String>,
 ) -> Result<NeuralEmbeddingIndexStatus, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("load_neural_embedding_index_status")
+        .with_threshold(database.config.slow_query_threshold_ms);
+
     let scoped = normalize_neural_embedding_vault_id(vault_id)?;
     let connection = database
         .connection
@@ -17804,6 +18301,10 @@ fn load_lexical_search_candidates(
     query: &str,
     candidate_limit: i64,
 ) -> Result<Vec<IndexedSearchCandidate>, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("load_lexical_search_candidates")
+        .with_threshold(100);
+
     let lexical_match_query = lexical_fts_match_query(query)?;
     let legacy_match_query = fts_match_query(query)?;
     let lexical_sql = if scoped.is_some() {
@@ -17907,6 +18408,10 @@ fn load_vector_search_candidates(
     scoped: Option<&str>,
     query: &str,
 ) -> Result<Vec<IndexedSearchCandidate>, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("load_vector_search_candidates")
+        .with_threshold(100);
+
     let Some(query_vector) = query_local_feature_vector(query) else {
         return Ok(Vec::new());
     };
@@ -17989,6 +18494,10 @@ fn load_neural_search_candidates(
     scoped: Option<&str>,
     context: &NeuralSearchContext,
 ) -> Result<(Vec<IndexedSearchCandidate>, bool), String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("load_neural_search_candidates")
+        .with_threshold(100);
+
     let sql = if scoped.is_some() {
         "SELECT i.vault_id, i.relative_path, i.title,
                 COALESCE((
@@ -18145,6 +18654,10 @@ fn indexed_search_in_connection_with_neural(
     max_results: usize,
     neural: Option<&NeuralSearchContext>,
 ) -> Result<Vec<IndexedSearchResult>, String> {
+    // 性能监控
+    let _profiler = crate::database::QueryProfiler::new("indexed_search_in_connection_with_neural")
+        .with_threshold(100);
+
     let query = query.trim();
     if query.is_empty() {
         return Err("搜索词不能为空".to_string());
@@ -18524,5 +19037,156 @@ pub async fn indexed_search(
             .then_with(|| left.relative_path.cmp(&right.relative_path))
     });
     results.truncate(max_results);
+
+    // 记录搜索事件
+    let _ = crate::metrics::record_activity_event(database.inner(), "search", None, None, None);
+
     Ok(results)
+}
+
+/// 检测内容重复
+pub fn detect_content_duplicate(
+    connection: &Connection,
+    workspace_scope: &str,
+    fingerprint: &crate::content_fingerprint::ContentFingerprint,
+) -> Result<Option<crate::content_fingerprint::DuplicateDetectionResult>, String> {
+    use crate::content_fingerprint::{ContentFingerprint, DuplicateDetectionResult, DuplicateLevel};
+
+    // L1: 精确匹配
+    if let Some((existing_id, existing_title)) = connection
+        .query_row(
+            "SELECT content_id, title FROM content_fingerprints
+             WHERE workspace_scope=?1 AND exact_hash=?2
+             LIMIT 1",
+            params![workspace_scope, &fingerprint.exact_hash],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("查询精确匹配失败：{e}"))?
+    {
+        return Ok(Some(DuplicateDetectionResult {
+            level: DuplicateLevel::Exact,
+            existing_content_id: existing_id,
+            existing_title,
+            similarity_score: 1.0,
+        }));
+    }
+
+    // L2: 结构匹配
+    if let Some((existing_id, existing_title)) = connection
+        .query_row(
+            "SELECT content_id, title FROM content_fingerprints
+             WHERE workspace_scope=?1 AND structure_hash=?2
+             LIMIT 1",
+            params![workspace_scope, &fingerprint.structure_hash],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("查询结构匹配失败：{e}"))?
+    {
+        return Ok(Some(DuplicateDetectionResult {
+            level: DuplicateLevel::StructuralSimilar,
+            existing_content_id: existing_id,
+            existing_title,
+            similarity_score: 0.9,
+        }));
+    }
+
+    // L3: SimHash 相似匹配（汉明距离 < 3）
+    let mut stmt = connection
+        .prepare(
+            "SELECT content_id, title, simhash FROM content_fingerprints
+             WHERE workspace_scope=?1
+             LIMIT 1000",
+        )
+        .map_err(|e| format!("准备 SimHash 查询失败：{e}"))?;
+
+    let candidates: Vec<(String, String, u64)> = stmt
+        .query_map(params![workspace_scope], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? as u64,
+            ))
+        })
+        .map_err(|e| format!("查询 SimHash 失败：{e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    for (content_id, title, existing_simhash) in candidates {
+        let distance = ContentFingerprint::hamming_distance(fingerprint.simhash, existing_simhash);
+        if distance < 3 {
+            return Ok(Some(DuplicateDetectionResult {
+                level: DuplicateLevel::SemanticSimilar,
+                existing_content_id: content_id,
+                existing_title: title,
+                similarity_score: 1.0 - (distance as f64 / 64.0),
+            }));
+        }
+    }
+
+    // L4: 来源指纹匹配
+    if let Some(ref source_fp) = fingerprint.source_fingerprint {
+        if let Some((existing_id, existing_title)) = connection
+            .query_row(
+                "SELECT content_id, title FROM content_fingerprints
+                 WHERE workspace_scope=?1 AND source_fingerprint=?2
+                 LIMIT 1",
+                params![workspace_scope, source_fp],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|e| format!("查询来源指纹失败：{e}"))?
+        {
+            return Ok(Some(DuplicateDetectionResult {
+                level: DuplicateLevel::UpdatedVersion,
+                existing_content_id: existing_id,
+                existing_title,
+                similarity_score: 0.8,
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
+/// 存储内容指纹
+pub fn store_content_fingerprint(
+    connection: &Connection,
+    workspace_scope: &str,
+    content_id: &str,
+    content_type: &str,
+    fingerprint: &crate::content_fingerprint::ContentFingerprint,
+    title: &str,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().to_rfc3339();
+
+    connection
+        .execute(
+            "INSERT INTO content_fingerprints
+             (workspace_scope, content_id, content_type, exact_hash, structure_hash,
+              simhash, source_fingerprint, title, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(workspace_scope, content_id) DO UPDATE SET
+               exact_hash=excluded.exact_hash,
+               structure_hash=excluded.structure_hash,
+               simhash=excluded.simhash,
+               source_fingerprint=excluded.source_fingerprint,
+               title=excluded.title,
+               created_at=excluded.created_at",
+            params![
+                workspace_scope,
+                content_id,
+                content_type,
+                &fingerprint.exact_hash,
+                &fingerprint.structure_hash,
+                fingerprint.simhash as i64,
+                &fingerprint.source_fingerprint,
+                title,
+                now,
+            ],
+        )
+        .map_err(|e| format!("存储指纹失败：{e}"))?;
+
+    Ok(())
 }

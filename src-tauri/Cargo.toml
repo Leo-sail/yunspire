@@ -1,6 +1,6 @@
 [package]
 name = "yunspire"
-version = "0.4.2"
+version = "0.4.3"
 description = "Yunspire local-first self-growing personal knowledge hub"
 authors = ["Leo Chang <leochang210@gmail.com>"]
 license-file = "../LICENSE"
@@ -38,3 +38,4 @@ tempfile = "3.12"
 uuid = { version = "1.10", features = ["v4"] }
 aes-gcm = "0.10"
 unicode-normalization = "0.1"
+thiserror = "2.0"

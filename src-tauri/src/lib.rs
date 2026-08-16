@@ -1,20 +1,42 @@
 mod assistant_runtime;
 mod capture_pipeline;
+mod capture_result;
 mod command_bus;
 mod connectors;
+mod content_fingerprint;
+mod content_intelligence;
+mod content_value;
+mod content_value_ux;
+mod core; // 插件系统核心
 mod creation;
+mod database;
 mod durable_asset;
+mod enhanced_ux;
+mod error;
+mod execution_plan;
+mod execution_plan_extractor;
 mod execution_ticket;
+mod graph_visualization;
+mod knowledge_graph;
+mod knowledge_health;
+mod lease_heartbeat;
 mod memory;
+mod metrics;
 mod model_config;
 mod model_provider;
 mod obsidian;
 mod obsidian_management;
+mod performance_monitor;
+mod plugins; // 插件实现
 mod policy;
 mod prompt;
 mod runtime_db;
 mod scheduler;
+mod search_match;
 mod skill_lifecycle;
+mod smart_features;
+mod spaced_repetition;
+mod task_management; // 任务管理模块（从 runtime_db 提取）
 mod task_runtime;
 mod trace;
 mod updater;
@@ -27,6 +49,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use tauri::{path::BaseDirectory, AppHandle, Manager, State};
+use uuid::Uuid;
 
 struct BackgroundVaultIndexTask {
     cancellation: Arc<AtomicBool>,
@@ -144,31 +167,82 @@ fn start_background_vault_indexing(
     };
     if let Some(previous) = task_slot.take() {
         previous.cancellation.store(true, Ordering::Release);
+        // 等待旧任务完成（最多5秒）
+        let _ = previous
+            .completed
+            .recv_timeout(std::time::Duration::from_secs(5));
     }
+    let vault_count = vaults.len();
     let cancellation = Arc::new(AtomicBool::new(false));
     let task_cancellation = Arc::clone(&cancellation);
     let (completed_tx, completed_rx) = mpsc::sync_channel(1);
     let app_handle = app.clone();
+
+    log::info!("开始后台索引 {} 个 Vault", vault_count);
+
     tauri::async_runtime::spawn_blocking(move || {
+        use std::time::Instant;
+        let start = Instant::now();
+        const MAX_TOTAL_INDEX_TIME_SECS: u64 = 3600; // 1小时总超时
+        const HEARTBEAT_INTERVAL_SECS: u64 = 10;
+        let mut last_heartbeat = Instant::now();
+        let mut succeeded = 0;
+        let mut failed = 0;
+
         let database = app_handle.state::<runtime_db::RuntimeDatabase>();
-        for vault in vaults {
+        for (idx, vault) in vaults.iter().enumerate() {
             let is_cancelled = || {
                 task_cancellation.load(Ordering::Acquire)
                     || !local_runtime_generation_is_active(&app_handle, generation)
             };
+
             if is_cancelled() {
+                log::info!("索引任务被取消，已处理 {}/{}", idx, vaults.len());
                 break;
             }
+
+            // 全局超时检查
+            if start.elapsed().as_secs() > MAX_TOTAL_INDEX_TIME_SECS {
+                log::warn!("索引任务超过1小时全局超时，已处理 {}/{}", idx, vaults.len());
+                break;
+            }
+
+            // 心跳日志
+            if last_heartbeat.elapsed().as_secs() > HEARTBEAT_INTERVAL_SECS {
+                log::info!(
+                    "索引进度：{}/{} ({:.1}%), 已耗时 {:.1}s",
+                    idx,
+                    vaults.len(),
+                    (idx as f64 / vaults.len() as f64) * 100.0,
+                    start.elapsed().as_secs_f64()
+                );
+                last_heartbeat = Instant::now();
+            }
+
             if vault.connection_state == "connected" {
-                if let Err(error) =
-                    database.rebuild_index_for_vault_with_cancellation(&vault.id, &is_cancelled)
-                {
-                    if !is_cancelled() {
-                        log::warn!("无法重建 Vault {} 的索引：{error}", vault.name);
+                match database.rebuild_index_for_vault_with_cancellation(&vault.id, &is_cancelled) {
+                    Ok(_) => {
+                        succeeded += 1;
+                        log::debug!("Vault {} 索引完成", vault.name);
+                    }
+                    Err(error) => {
+                        if !is_cancelled() {
+                            failed += 1;
+                            log::warn!("Vault {} 索引失败：{}", vault.name, error);
+                        }
                     }
                 }
             }
         }
+
+        let duration_secs = start.elapsed().as_secs();
+        log::info!(
+            "后台索引完成：成功 {}, 失败 {}, 耗时 {}s",
+            succeeded,
+            failed,
+            duration_secs
+        );
+
         let _ = completed_tx.send(());
     });
     *task_slot = Some(BackgroundVaultIndexTask {
@@ -193,6 +267,12 @@ fn activate_local_runtime(
     scheduler::start_scheduler(app);
     vault_watcher::start_vault_index_worker(app);
     start_background_vault_indexing(app, vaults, generation);
+
+    // 启动 Lease 心跳守护线程
+    let worker_id = format!("worker-{}", Uuid::new_v4());
+    if let Err(error) = lease_heartbeat::start_lease_heartbeat_if_needed(app, worker_id) {
+        log::warn!("无法启动 Lease 心跳守护线程：{}", error);
+    }
 }
 
 fn initialize_local_runtime_once(
@@ -374,6 +454,7 @@ pub fn run() {
         .manage(durable_asset::DurableAssetState::default())
         .manage(vault_watcher::VaultWatcherState::default())
         .manage(scheduler::SchedulerState::default())
+        .manage(lease_heartbeat::LeaseHeartbeatState::default())
         .manage(LocalRuntimeInitializationState::default())
         .invoke_handler({
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
@@ -402,6 +483,8 @@ pub fn run() {
                 assistant_runtime::cancel_assistant_runtime_request,
                 assistant_runtime::advance_assistant_conversation_revision,
                 assistant_runtime::recover_assistant_requests,
+                assistant_runtime::update_assistant_execution_step,
+                assistant_runtime::get_assistant_execution_plan,
                 command_bus::evaluate_application_command,
                 command_bus::submit_application_command,
                 execution_ticket::retire_execution_ticket,
@@ -449,6 +532,41 @@ pub fn run() {
                 capture_pipeline::prepare_capture_image_analysis_input,
                 capture_pipeline::discard_capture_attachments,
                 capture_pipeline::extract_capture_source,
+                capture_pipeline::extract_capture_source_v2,
+                creation::mode::get_creation_mode,
+                creation::mode::set_creation_mode,
+                content_fingerprint::detect_content_duplicate,
+                execution_plan::generate_execution_plan,
+                execution_plan::submit_execution_decision,
+                execution_plan::get_execution_logs,
+                knowledge_health::get_knowledge_health_dashboard,
+                metrics::get_metrics_report,
+                metrics::record_note_view,
+                content_value::calculate_note_value,
+                content_value::get_value_ranked_notes,
+                content_value::get_value_report,
+                content_value_ux::calculate_notes_value_batch,
+                content_value_ux::get_actionable_suggestions,
+                enhanced_ux::get_comprehensive_insights,
+                knowledge_graph::build_knowledge_graph,
+                knowledge_graph::get_hub_nodes,
+                knowledge_graph::get_isolated_nodes,
+                knowledge_graph::find_related_notes,
+                spaced_repetition::record_note_review,
+                spaced_repetition::get_due_for_review,
+                spaced_repetition::get_review_plan_summary,
+                smart_features::generate_learning_path,
+                smart_features::suggest_tags_for_note,
+                smart_features::identify_knowledge_gaps,
+                graph_visualization::get_graph_visualization,
+                graph_visualization::get_node_subgraph,
+                content_intelligence::generate_note_summary,
+                content_intelligence::extract_keywords,
+                content_intelligence::identify_note_topic,
+                content_intelligence::recommend_similar_content,
+                performance_monitor::get_performance_report,
+                performance_monitor::clear_performance_metrics,
+                performance_monitor::get_memory_stats,
                 model_provider::analyze_capture_content,
                 model_provider::bind_capture_analysis_write_manifest,
                 model_provider::issue_direct_write_receipt,
@@ -576,6 +694,7 @@ pub fn run() {
                 task_runtime::complete_runtime_task_plan_step,
                 task_runtime::fail_runtime_task_plan_step,
                 task_runtime::transition_runtime_task,
+                lease_heartbeat::get_lease_heartbeat_status,
                 vault_watcher::refresh_vault_access_policy,
                 updater::check_for_updates,
                 updater::prepare_update_installation,

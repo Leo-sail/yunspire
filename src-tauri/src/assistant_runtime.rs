@@ -479,32 +479,68 @@ pub(crate) fn enqueue_request(
         )
         .optional()
         .map_err(|error| format!("无法读取 AI助手对话修订号：{error}"))?;
-    if stored_revision.is_some_and(|revision| input.conversation_revision < revision) {
-        return Err("AI助手请求来自已经失效的对话修订版本".to_string());
+
+    // 严格的版本检查（乐观锁）
+    if let Some(stored) = stored_revision {
+        if input.conversation_revision != stored {
+            return Err(format!(
+                "对话版本冲突：期望 {}，实际 {}。请刷新对话后重试",
+                input.conversation_revision, stored
+            ));
+        }
     }
-    if stored_revision.is_some_and(|revision| input.conversation_revision > revision) {
+
+    // 先取消旧版本的请求（如果存在）
+    if stored_revision.is_some() {
         tx.execute(
             "UPDATE assistant_requests
              SET state='cancelled', last_error='对话上下文已进入新修订版本',
                  completed_at=?3, updated_at=?3
              WHERE workspace_scope=?1 AND conversation_id=?2
+               AND conversation_revision < ?4
                AND state IN ('queued', 'running')",
-            params![scope, conversation_id, now],
+            params![scope, conversation_id, now, input.conversation_revision],
         )
         .map_err(|error| format!("无法取消旧修订版本的 AI助手请求：{error}"))?;
     }
-    tx.execute(
-        "INSERT INTO assistant_conversations
-         (workspace_scope, id, revision, context_json, updated_at)
-         VALUES (?1, ?2, ?3, '[]', ?4)
-         ON CONFLICT(workspace_scope, id) DO UPDATE SET
-           revision=excluded.revision,
-           context_json=CASE WHEN excluded.revision > assistant_conversations.revision
-             THEN '[]' ELSE assistant_conversations.context_json END,
-           updated_at=excluded.updated_at",
-        params![scope, conversation_id, input.conversation_revision, now],
-    )
-    .map_err(|error| format!("无法保存 AI助手对话修订号：{error}"))?;
+
+    // 计算新版本号
+    let next_revision = input.conversation_revision + 1;
+
+    // 使用 UPDATE 来实现乐观锁（确保原子性）
+    let updated = tx
+        .execute(
+            "UPDATE assistant_conversations
+         SET revision=?3, updated_at=?4
+         WHERE workspace_scope=?1 AND id=?2 AND revision=?5",
+            params![
+                scope,
+                conversation_id,
+                next_revision,
+                now,
+                input.conversation_revision
+            ],
+        )
+        .map_err(|error| format!("无法更新 AI助手对话修订号：{error}"))?;
+
+    // 如果没有更新任何行，说明发生了并发冲突或首次创建
+    if updated == 0 {
+        // 尝试插入（首次创建对话）
+        match tx.execute(
+            "INSERT INTO assistant_conversations
+             (workspace_scope, id, revision, context_json, updated_at)
+             VALUES (?1, ?2, ?3, '[]', ?4)",
+            params![scope, conversation_id, next_revision, now],
+        ) {
+            Ok(_) => {
+                log::debug!("首次创建对话 {} 版本 {}", conversation_id, next_revision);
+            }
+            Err(_) => {
+                // 插入失败说明其他事务已经创建，版本冲突
+                return Err("对话版本已被其他请求更新，请重试".to_string());
+            }
+        }
+    }
     let sequence = tx
         .query_row(
             "SELECT COALESCE(MAX(sequence), 0) + 1 FROM assistant_requests
@@ -1215,11 +1251,36 @@ pub(crate) fn finish_request(
     if state == "succeeded" && current.state != "running" {
         return Err("尚未领取的 AI助手请求不能标记为完成".to_string());
     }
+
+    // 提取执行计划
+    let assistant_reply = string_at(&input.result, "assistantReply", "assistant_reply")
+        .unwrap_or_default();
+    let user_message = string_at(&input.result, "userMessage", "user_message")
+        .unwrap_or_default();
+
+    let execution_plan = if !assistant_reply.is_empty() {
+        crate::execution_plan_extractor::extract_execution_plan(assistant_reply, user_message)
+    } else {
+        None
+    };
+
+    let execution_plan_json = execution_plan
+        .as_ref()
+        .and_then(|plan| serde_json::to_string(plan).ok());
+
     tx.execute(
         "UPDATE assistant_requests SET state=?3, result_json=?4, last_error=?5,
-             completed_at=?6, updated_at=?6
+             execution_plan_json=?6, completed_at=?7, updated_at=?7
              WHERE workspace_scope=?1 AND id=?2 AND state IN ('queued', 'running')",
-        params![scope, input.request_id, state, result_json, error, now],
+        params![
+            scope,
+            input.request_id,
+            state,
+            result_json,
+            error,
+            execution_plan_json,
+            now
+        ],
     )
     .map_err(|database_error| format!("无法保存 AI助手请求终态：{database_error}"))?;
     if state != "cancelled" {
@@ -1409,6 +1470,63 @@ pub(crate) fn recover_requests_for_startup(
         .map_err(|error| format!("无法读取可恢复的 AI助手请求：{error}"))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("无法解析可恢复的 AI助手请求：{error}"))
+}
+
+/// 更新执行步骤
+#[tauri::command]
+pub fn update_assistant_execution_step(
+    database: State<'_, RuntimeDatabase>,
+    request_id: String,
+    step_number: usize,
+) -> Result<(), String> {
+    let scope = database.local_workspace_scope()?;
+    let connection = database
+        .connection
+        .lock()
+        .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+
+    let now = Utc::now().to_rfc3339();
+
+    connection
+        .execute(
+            "UPDATE assistant_requests
+             SET current_step=?3, updated_at=?4
+             WHERE workspace_scope=?1 AND id=?2",
+            params![scope, request_id.trim(), step_number as i64, now],
+        )
+        .map_err(|error| format!("无法更新执行步骤：{error}"))?;
+
+    Ok(())
+}
+
+/// 获取执行计划
+#[tauri::command]
+pub fn get_assistant_execution_plan(
+    database: State<'_, RuntimeDatabase>,
+    request_id: String,
+) -> Result<Option<crate::execution_plan::ExecutionPlan>, String> {
+    let scope = database.local_workspace_scope()?;
+    let connection = database
+        .connection
+        .lock()
+        .map_err(|_| "SQLite 连接锁不可用".to_string())?;
+
+    let plan_json = connection
+        .query_row(
+            "SELECT execution_plan_json FROM assistant_requests
+             WHERE workspace_scope=?1 AND id=?2",
+            params![scope, request_id.trim()],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|error| format!("无法读取执行计划：{error}"))?
+        .flatten();
+
+    plan_json
+        .as_ref()
+        .and_then(|json| serde_json::from_str(json).ok())
+        .map(Ok)
+        .transpose()
 }
 
 #[tauri::command]
