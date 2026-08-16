@@ -98,7 +98,7 @@ pub struct StepClaimResult {
 /// # 返回
 /// 认领结果
 pub fn claim_steps(
-    _database: &RuntimeDatabase,
+    database: &RuntimeDatabase,
     task_id: &str,
     holder: &str,
     max_steps: usize,
@@ -120,14 +120,67 @@ pub fn claim_steps(
         ));
     }
 
-    // TODO: 实现实际的步骤认领逻辑
-    // 1. 查询可用步骤（依赖已满足，未被认领）
-    // 2. 创建租约
-    // 3. 返回认领结果
+    // 获取可执行的步骤前沿
+    let frontier = get_step_frontier(database, task_id)?;
+
+    // 限制认领数量
+    let steps_to_claim: Vec<String> = frontier.into_iter().take(max_steps).collect();
+
+    if steps_to_claim.is_empty() {
+        return Ok(StepClaimResult {
+            claimed_steps: vec![],
+            leases: vec![],
+        });
+    }
+
+    let mut conn = database
+        .connection
+        .lock()
+        .map_err(|e| StepError::DatabaseError(format!("获取数据库连接失败: {}", e)))?;
+
+    // 开始事务
+    let tx = conn
+        .transaction()
+        .map_err(|e| StepError::DatabaseError(e.to_string()))?;
+
+    let now = chrono::Utc::now();
+    let expires_at = (now + chrono::Duration::seconds(300)).to_rfc3339(); // 默认 5 分钟
+    let created_at = now.to_rfc3339();
+
+    let mut leases = Vec::new();
+
+    // 为每个步骤创建租约
+    for step_id in &steps_to_claim {
+        // 插入租约
+        tx.execute(
+            "INSERT INTO runtime_step_leases (step_id, holder, expires_at, renewal_count, created_at)
+             VALUES (?, ?, ?, 0, ?)",
+            rusqlite::params![step_id, holder, expires_at, created_at],
+        )
+        .map_err(|e| StepError::DatabaseError(e.to_string()))?;
+
+        // 更新步骤状态为 claimed
+        tx.execute(
+            "UPDATE runtime_task_steps SET state = 'claimed', updated_at = ? WHERE step_id = ?",
+            rusqlite::params![created_at, step_id],
+        )
+        .map_err(|e| StepError::DatabaseError(e.to_string()))?;
+
+        leases.push(StepLease {
+            step_id: step_id.clone(),
+            holder: holder.to_string(),
+            expires_at: expires_at.clone(),
+            renewal_count: 0,
+        });
+    }
+
+    // 提交事务
+    tx.commit()
+        .map_err(|e| StepError::DatabaseError(e.to_string()))?;
 
     Ok(StepClaimResult {
-        claimed_steps: vec![],
-        leases: vec![],
+        claimed_steps: steps_to_claim,
+        leases,
     })
 }
 
@@ -414,7 +467,7 @@ pub fn release_step_lease(
 /// # 返回
 /// 可执行步骤 ID 列表
 pub fn get_step_frontier(
-    _database: &RuntimeDatabase,
+    database: &RuntimeDatabase,
     task_id: &str,
 ) -> Result<Vec<String>, StepError> {
     // 验证参数
@@ -422,12 +475,61 @@ pub fn get_step_frontier(
         return Err(StepError::ValidationError("任务 ID 不能为空".to_string()));
     }
 
-    // TODO: 实现实际的前沿查询逻辑
-    // 1. 查询任务的所有步骤
-    // 2. 检查每个步骤的依赖是否满足
-    // 3. 返回可执行的步骤列表
+    let conn = database
+        .connection
+        .lock()
+        .map_err(|e| StepError::DatabaseError(format!("获取数据库连接失败: {}", e)))?;
 
-    Ok(vec![])
+    // 查询所有待执行的步骤（pending 状态且未被认领）
+    let mut stmt = conn
+        .prepare(
+            "SELECT step_id, depends_on
+             FROM runtime_task_steps
+             WHERE task_id = ? AND state = 'pending'
+             AND step_id NOT IN (SELECT step_id FROM runtime_step_leases)",
+        )
+        .map_err(|e| StepError::DatabaseError(e.to_string()))?;
+
+    let steps = stmt
+        .query_map([task_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .map_err(|e| StepError::DatabaseError(e.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| StepError::DatabaseError(e.to_string()))?;
+
+    // 查询所有已完成的步骤
+    let mut completed_stmt = conn
+        .prepare(
+            "SELECT step_id FROM runtime_task_steps
+             WHERE task_id = ? AND state = 'completed'",
+        )
+        .map_err(|e| StepError::DatabaseError(e.to_string()))?;
+
+    let completed_steps: std::collections::HashSet<String> = completed_stmt
+        .query_map([task_id], |row| row.get(0))
+        .map_err(|e| StepError::DatabaseError(e.to_string()))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| StepError::DatabaseError(e.to_string()))?;
+
+    // 过滤出依赖已满足的步骤
+    let mut frontier = Vec::new();
+    for (step_id, depends_on) in steps {
+        let dependencies_met = if let Some(deps_str) = depends_on {
+            // 解析依赖列表（逗号分隔）
+            let deps: Vec<&str> = deps_str.split(',').map(|s| s.trim()).collect();
+            deps.iter().all(|dep| completed_steps.contains(*dep))
+        } else {
+            // 无依赖，可以执行
+            true
+        };
+
+        if dependencies_met {
+            frontier.push(step_id);
+        }
+    }
+
+    Ok(frontier)
 }
 
 #[cfg(test)]
