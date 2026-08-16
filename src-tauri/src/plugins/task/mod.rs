@@ -1,6 +1,7 @@
 pub mod lifecycle;
 pub mod recovery;
 pub mod steps;
+pub mod storage;
 pub mod types;
 pub mod validation;
 
@@ -28,4 +29,9 @@ pub use steps::{
 pub use recovery::{
     bind_recovery_replacement, get_task_recovery, recover_interrupted_tasks, resolve_recovery,
     supersede_task, RecoveryError, RecoveryRecommendation,
+};
+
+pub use storage::{
+    delete_task, list_tasks, load_task, save_task, task_statistics, StorageError, TaskFilters,
+    TaskStatistics,
 };
