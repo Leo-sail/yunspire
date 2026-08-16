@@ -49,7 +49,8 @@ impl std::fmt::Display for RecoveryError {
 impl std::error::Error for RecoveryError {}
 
 /// 恢复建议
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RecoveryRecommendation {
     /// 恢复执行
     Resume,

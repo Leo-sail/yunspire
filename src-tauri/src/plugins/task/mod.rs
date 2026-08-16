@@ -6,6 +6,9 @@ pub mod storage;
 pub mod types;
 pub mod validation;
 
+#[cfg(test)]
+mod tests;
+
 pub use plugin::TaskPlugin;
 
 pub use types::{
