@@ -1,4 +1,5 @@
 pub mod lifecycle;
+pub mod steps;
 pub mod types;
 pub mod validation;
 
@@ -16,4 +17,9 @@ pub use validation::{
 pub use lifecycle::{
     cancel_task, complete_task, create_task, fail_task, get_task_state, is_valid_transition,
     transition_task_state, LifecycleError,
+};
+
+pub use steps::{
+    claim_steps, complete_step, fail_step, get_step_frontier, release_step_lease,
+    renew_step_lease, StepClaimResult, StepError, StepLease,
 };
