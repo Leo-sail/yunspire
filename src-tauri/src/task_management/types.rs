@@ -2,17 +2,18 @@
 ///
 /// 从 runtime_db.rs 提取的任务管理相关数据结构
 
+use crate::task_runtime::{RuntimeTaskStepEffectClass, RuntimeTaskStepKind};
 use serde::{Deserialize, Serialize};
 
 /// 任务计划步骤记录
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeTaskPlanStepRecord {
     pub step_id: String,
-    pub step_kind: String,
+    pub step_kind: RuntimeTaskStepKind,
     pub title: String,
     pub depends_on: Option<Vec<String>>,
     pub parameters: serde_json::Value,
-    pub effect_class: String,
+    pub effect_class: RuntimeTaskStepEffectClass,
 }
 
 /// 任务恢复信息

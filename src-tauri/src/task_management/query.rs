@@ -30,8 +30,8 @@ fn map_native_runtime_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<NativeRu
     })
 }
 
-/// 读取原生任务
-fn read_native_runtime_task(
+/// 读取原生任务（公开给 steps.rs 使用）
+pub(crate) fn read_native_runtime_task(
     connection: &Connection,
     workspace_scope: &str,
     task_id: &str,
