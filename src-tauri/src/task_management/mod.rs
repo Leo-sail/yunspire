@@ -6,6 +6,7 @@
 pub mod query;
 pub mod lifecycle;
 pub mod steps;
+pub mod steps_helpers;
 pub mod recovery;
 pub mod types;
 
