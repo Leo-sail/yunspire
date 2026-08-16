@@ -36,6 +36,7 @@ mod search_match;
 mod skill_lifecycle;
 mod smart_features;
 mod spaced_repetition;
+mod task_management; // 任务管理模块（从 runtime_db 提取）
 mod task_runtime;
 mod trace;
 mod updater;

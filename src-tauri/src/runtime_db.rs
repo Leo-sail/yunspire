@@ -4241,15 +4241,8 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         task_id: &str,
     ) -> Result<NativeRuntimeTask, String> {
-        // 性能监控
-        let _profiler = crate::database::QueryProfiler::new("runtime_task")
-            .with_threshold(self.config.slow_query_threshold_ms);
-
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
-        read_native_runtime_task(&connection, workspace_scope, task_id)
+        // 转发到 task_management 模块
+        crate::task_management::query::runtime_task(self, workspace_scope, task_id)
     }
 
     pub(crate) fn runtime_task_contract(
@@ -4257,15 +4250,8 @@ impl RuntimeDatabase {
         workspace_scope: &str,
         task_id: &str,
     ) -> Result<Option<RuntimeTaskContractSnapshot>, String> {
-        // 性能监控
-        let _profiler = crate::database::QueryProfiler::new("runtime_task_contract")
-            .with_threshold(self.config.slow_query_threshold_ms);
-
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| "SQLite 连接锁不可用".to_string())?;
-        read_runtime_task_contract(&connection, workspace_scope, task_id)
+        // 转发到 task_management 模块
+        crate::task_management::query::runtime_task_contract(self, workspace_scope, task_id)
     }
 
     pub(crate) fn runtime_schedule_dispatch_binding(
