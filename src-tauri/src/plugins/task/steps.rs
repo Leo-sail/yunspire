@@ -142,7 +142,7 @@ pub fn claim_steps(
 /// # 返回
 /// 新的过期时间
 pub fn renew_step_lease(
-    _database: &RuntimeDatabase,
+    database: &RuntimeDatabase,
     step_id: &str,
     holder: &str,
     extend_seconds: u64,
@@ -164,15 +164,31 @@ pub fn renew_step_lease(
         ));
     }
 
-    // TODO: 实现实际的租约续期逻辑
-    // 1. 验证租约持有者
-    // 2. 检查租约是否过期
-    // 3. 更新过期时间
+    let conn = database
+        .connection
+        .lock()
+        .map_err(|e| StepError::DatabaseError(format!("获取数据库连接失败: {}", e)))?;
 
-    let new_expires_at = chrono::Utc::now()
-        .checked_add_signed(chrono::Duration::seconds(extend_seconds as i64))
-        .ok_or_else(|| StepError::ValidationError("时间计算溢出".to_string()))?
+    // 计算新的过期时间
+    let new_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(extend_seconds as i64))
         .to_rfc3339();
+
+    // 更新租约
+    let rows_affected = conn
+        .execute(
+            "UPDATE runtime_step_leases
+             SET expires_at = ?, renewal_count = renewal_count + 1
+             WHERE step_id = ? AND holder = ?",
+            rusqlite::params![new_expires_at, step_id, holder],
+        )
+        .map_err(|e| StepError::DatabaseError(e.to_string()))?;
+
+    if rows_affected == 0 {
+        return Err(StepError::StepNotFound(format!(
+            "步骤 {} 的租约不存在或持有者不匹配",
+            step_id
+        )));
+    }
 
     Ok(new_expires_at)
 }
@@ -188,10 +204,10 @@ pub fn renew_step_lease(
 /// # 返回
 /// 是否成功
 pub fn complete_step(
-    _database: &RuntimeDatabase,
+    database: &RuntimeDatabase,
     step_id: &str,
     holder: &str,
-    _result: Option<&Value>,
+    result: Option<&Value>,
 ) -> Result<bool, StepError> {
     // 验证参数
     if step_id.is_empty() {
@@ -204,12 +220,59 @@ pub fn complete_step(
         ));
     }
 
-    // TODO: 实现实际的步骤完成逻辑
-    // 1. 验证租约持有者
-    // 2. 检查租约是否过期
-    // 3. 标记步骤为完成
-    // 4. 释放租约
-    // 5. 检查是否有依赖此步骤的步骤可以执行
+    let mut conn = database
+        .connection
+        .lock()
+        .map_err(|e| StepError::DatabaseError(format!("获取数据库连接失败: {}", e)))?;
+
+    // 开始事务
+    let tx = conn
+        .transaction()
+        .map_err(|e| StepError::DatabaseError(e.to_string()))?;
+
+    // 验证租约存在且持有者匹配
+    let lease_exists: bool = match tx.query_row(
+        "SELECT 1 FROM runtime_step_leases WHERE step_id = ? AND holder = ?",
+        rusqlite::params![step_id, holder],
+        |_| Ok(true),
+    ) {
+        Ok(_) => true,
+        Err(rusqlite::Error::QueryReturnedNoRows) => false,
+        Err(e) => return Err(StepError::DatabaseError(e.to_string())),
+    };
+
+    if !lease_exists {
+        return Err(StepError::StepNotFound(format!(
+            "步骤 {} 的租约不存在或持有者不匹配",
+            step_id
+        )));
+    }
+
+    // 序列化结果
+    let result_json = result
+        .map(|r| serde_json::to_string(r))
+        .transpose()
+        .map_err(|e| StepError::ValidationError(format!("结果序列化失败: {}", e)))?;
+
+    // 更新步骤状态
+    tx.execute(
+        "UPDATE runtime_task_steps
+         SET state = 'completed', result = ?, updated_at = ?
+         WHERE step_id = ?",
+        rusqlite::params![result_json, chrono::Utc::now().to_rfc3339(), step_id],
+    )
+    .map_err(|e| StepError::DatabaseError(e.to_string()))?;
+
+    // 删除租约
+    tx.execute(
+        "DELETE FROM runtime_step_leases WHERE step_id = ?",
+        [step_id],
+    )
+    .map_err(|e| StepError::DatabaseError(e.to_string()))?;
+
+    // 提交事务
+    tx.commit()
+        .map_err(|e| StepError::DatabaseError(e.to_string()))?;
 
     Ok(true)
 }
@@ -225,10 +288,10 @@ pub fn complete_step(
 /// # 返回
 /// 是否成功
 pub fn fail_step(
-    _database: &RuntimeDatabase,
+    database: &RuntimeDatabase,
     step_id: &str,
     holder: &str,
-    _error: &str,
+    error: &str,
 ) -> Result<bool, StepError> {
     // 验证参数
     if step_id.is_empty() {
@@ -241,12 +304,53 @@ pub fn fail_step(
         ));
     }
 
-    // TODO: 实现实际的步骤失败逻辑
-    // 1. 验证租约持有者
-    // 2. 检查租约是否过期
-    // 3. 标记步骤为失败
-    // 4. 释放租约
-    // 5. 可能需要标记整个任务为失败
+    let mut conn = database
+        .connection
+        .lock()
+        .map_err(|e| StepError::DatabaseError(format!("获取数据库连接失败: {}", e)))?;
+
+    // 开始事务
+    let tx = conn
+        .transaction()
+        .map_err(|e| StepError::DatabaseError(e.to_string()))?;
+
+    // 验证租约存在且持有者匹配
+    let lease_exists: bool = match tx.query_row(
+        "SELECT 1 FROM runtime_step_leases WHERE step_id = ? AND holder = ?",
+        rusqlite::params![step_id, holder],
+        |_| Ok(true),
+    ) {
+        Ok(_) => true,
+        Err(rusqlite::Error::QueryReturnedNoRows) => false,
+        Err(e) => return Err(StepError::DatabaseError(e.to_string())),
+    };
+
+    if !lease_exists {
+        return Err(StepError::StepNotFound(format!(
+            "步骤 {} 的租约不存在或持有者不匹配",
+            step_id
+        )));
+    }
+
+    // 更新步骤状态
+    tx.execute(
+        "UPDATE runtime_task_steps
+         SET state = 'failed', error = ?, updated_at = ?
+         WHERE step_id = ?",
+        rusqlite::params![error, chrono::Utc::now().to_rfc3339(), step_id],
+    )
+    .map_err(|e| StepError::DatabaseError(e.to_string()))?;
+
+    // 删除租约
+    tx.execute(
+        "DELETE FROM runtime_step_leases WHERE step_id = ?",
+        [step_id],
+    )
+    .map_err(|e| StepError::DatabaseError(e.to_string()))?;
+
+    // 提交事务
+    tx.commit()
+        .map_err(|e| StepError::DatabaseError(e.to_string()))?;
 
     Ok(true)
 }
@@ -261,7 +365,7 @@ pub fn fail_step(
 /// # 返回
 /// 是否成功
 pub fn release_step_lease(
-    _database: &RuntimeDatabase,
+    database: &RuntimeDatabase,
     step_id: &str,
     holder: &str,
 ) -> Result<bool, StepError> {
@@ -276,9 +380,25 @@ pub fn release_step_lease(
         ));
     }
 
-    // TODO: 实现实际的租约释放逻辑
-    // 1. 验证租约持有者
-    // 2. 删除租约记录
+    let conn = database
+        .connection
+        .lock()
+        .map_err(|e| StepError::DatabaseError(format!("获取数据库连接失败: {}", e)))?;
+
+    // 删除租约（验证持有者）
+    let rows_affected = conn
+        .execute(
+            "DELETE FROM runtime_step_leases WHERE step_id = ? AND holder = ?",
+            rusqlite::params![step_id, holder],
+        )
+        .map_err(|e| StepError::DatabaseError(e.to_string()))?;
+
+    if rows_affected == 0 {
+        return Err(StepError::StepNotFound(format!(
+            "步骤 {} 的租约不存在或持有者不匹配",
+            step_id
+        )));
+    }
 
     Ok(true)
 }
