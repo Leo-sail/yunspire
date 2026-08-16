@@ -1,9 +1,12 @@
 pub mod lifecycle;
+pub mod plugin;
 pub mod recovery;
 pub mod steps;
 pub mod storage;
 pub mod types;
 pub mod validation;
+
+pub use plugin::TaskPlugin;
 
 pub use types::{
     RuntimeTask, RuntimeTaskContract, RuntimeTaskPlanStepRecord, RuntimeTaskRecovery,
