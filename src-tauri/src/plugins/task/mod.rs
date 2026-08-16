@@ -1,4 +1,5 @@
 pub mod lifecycle;
+pub mod recovery;
 pub mod steps;
 pub mod types;
 pub mod validation;
@@ -22,4 +23,9 @@ pub use lifecycle::{
 pub use steps::{
     claim_steps, complete_step, fail_step, get_step_frontier, release_step_lease,
     renew_step_lease, StepClaimResult, StepError, StepLease,
+};
+
+pub use recovery::{
+    bind_recovery_replacement, get_task_recovery, recover_interrupted_tasks, resolve_recovery,
+    supersede_task, RecoveryError, RecoveryRecommendation,
 };
