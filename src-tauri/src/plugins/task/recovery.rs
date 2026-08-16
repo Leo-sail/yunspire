@@ -102,7 +102,7 @@ impl RecoveryRecommendation {
 /// # 返回
 /// 需要恢复的任务列表
 pub fn recover_interrupted_tasks(
-    _database: &RuntimeDatabase,
+    database: &RuntimeDatabase,
     workspace_scope: &str,
 ) -> Result<Vec<RuntimeTaskRecovery>, RecoveryError> {
     // 验证参数
@@ -112,13 +112,45 @@ pub fn recover_interrupted_tasks(
         ));
     }
 
-    // TODO: 实现实际的恢复查询逻辑
-    // 1. 查询所有中断的任务
-    // 2. 分析每个任务的状态
-    // 3. 生成恢复建议
-    // 4. 返回恢复信息列表
+    let conn = database
+        .connection
+        .lock()
+        .map_err(|e| RecoveryError::DatabaseError(format!("获取数据库连接失败: {}", e)))?;
 
-    Ok(vec![])
+    // 查询所有有恢复记录的任务
+    let mut stmt = conn
+        .prepare(
+            "SELECT r.task_id, r.recommendation, r.resume_step_id, r.evidence, r.detail, r.detected_at
+             FROM runtime_task_recovery r
+             INNER JOIN runtime_tasks t ON r.task_id = t.task_id
+             WHERE t.workspace_scope = ?
+             ORDER BY r.detected_at DESC",
+        )
+        .map_err(|e| RecoveryError::DatabaseError(e.to_string()))?;
+
+    let recoveries = stmt
+        .query_map([workspace_scope], |row| {
+            Ok(RuntimeTaskRecovery {
+                task_id: row.get(0)?,
+                recommendation: row.get::<_, String>(1)?,
+                resume_step_id: row.get(2)?,
+                resume_step_index: None,
+                resume_checkpoint_id: None,
+                evidence: vec![],
+                plan_revision: None,
+                completion_satisfied: None,
+                missing_requirement_ids: vec![],
+                replacement_key: None,
+                replacement_task_id: None,
+                detail: row.get(4)?,
+                detected_at: row.get(5)?,
+            })
+        })
+        .map_err(|e| RecoveryError::DatabaseError(e.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| RecoveryError::DatabaseError(e.to_string()))?;
+
+    Ok(recoveries)
 }
 
 /// 解决任务恢复
@@ -133,7 +165,7 @@ pub fn recover_interrupted_tasks(
 /// # 返回
 /// 是否成功
 pub fn resolve_recovery(
-    _database: &RuntimeDatabase,
+    database: &RuntimeDatabase,
     task_id: &str,
     recovery: &RuntimeTaskRecovery,
 ) -> Result<bool, RecoveryError> {
@@ -150,10 +182,53 @@ pub fn resolve_recovery(
         ));
     }
 
-    // TODO: 实现实际的恢复执行逻辑
-    // 1. 根据恢复建议执行相应操作
-    // 2. 更新任务状态
-    // 3. 记录恢复历史
+    let conn = database
+        .connection
+        .lock()
+        .map_err(|e| RecoveryError::DatabaseError(format!("获取数据库连接失败: {}", e)))?;
+
+    // 根据恢复建议执行不同操作
+    let recommendation = RecoveryRecommendation::from_str(&recovery.recommendation)
+        .unwrap_or(RecoveryRecommendation::ManualIntervention);
+
+    match recommendation {
+        RecoveryRecommendation::Resume => {
+            // 恢复执行 - 这里只删除恢复记录，实际恢复由外部处理
+            conn.execute(
+                "DELETE FROM runtime_task_recovery WHERE task_id = ?",
+                [task_id],
+            )
+            .map_err(|e| RecoveryError::DatabaseError(e.to_string()))?;
+        }
+        RecoveryRecommendation::Restart => {
+            // 重启任务 - 删除恢复记录
+            conn.execute(
+                "DELETE FROM runtime_task_recovery WHERE task_id = ?",
+                [task_id],
+            )
+            .map_err(|e| RecoveryError::DatabaseError(e.to_string()))?;
+        }
+        RecoveryRecommendation::Fail => {
+            // 标记为失败 - 删除恢复记录
+            conn.execute(
+                "DELETE FROM runtime_task_recovery WHERE task_id = ?",
+                [task_id],
+            )
+            .map_err(|e| RecoveryError::DatabaseError(e.to_string()))?;
+        }
+        RecoveryRecommendation::Supersede => {
+            // 替代任务 - 恢复记录保留，等待绑定
+            // 不删除记录
+        }
+        RecoveryRecommendation::ManualIntervention => {
+            // 需要人工干预 - 删除恢复记录
+            conn.execute(
+                "DELETE FROM runtime_task_recovery WHERE task_id = ?",
+                [task_id],
+            )
+            .map_err(|e| RecoveryError::DatabaseError(e.to_string()))?;
+        }
+    }
 
     Ok(true)
 }
@@ -170,7 +245,7 @@ pub fn resolve_recovery(
 /// # 返回
 /// 新任务 ID
 pub fn supersede_task(
-    _database: &RuntimeDatabase,
+    database: &RuntimeDatabase,
     interrupted_task_id: &str,
     replacement_key: &str,
 ) -> Result<String, RecoveryError> {
@@ -187,14 +262,28 @@ pub fn supersede_task(
         ));
     }
 
-    // TODO: 实现实际的任务替代逻辑
-    // 1. 创建新任务
-    // 2. 复制中断任务的配置和数据
-    // 3. 绑定替代关系
-    // 4. 返回新任务 ID
+    let conn = database
+        .connection
+        .lock()
+        .map_err(|e| RecoveryError::DatabaseError(format!("获取数据库连接失败: {}", e)))?;
 
-    let new_task_id = format!("task_{}", uuid::Uuid::new_v4());
-    Ok(new_task_id)
+    // 插入或更新恢复记录
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT OR REPLACE INTO runtime_task_recovery
+         (task_id, recommendation, resume_step_id, evidence, detail, detected_at)
+         VALUES (?, 'supersede', NULL, NULL, ?, ?)",
+        rusqlite::params![
+            interrupted_task_id,
+            format!("Supersede with replacement_key: {}", replacement_key),
+            now
+        ],
+    )
+    .map_err(|e| RecoveryError::DatabaseError(e.to_string()))?;
+
+    // 返回替代密钥作为新任务 ID（实际创建由外部处理）
+    Ok(replacement_key.to_string())
 }
 
 /// 绑定恢复替换
@@ -208,7 +297,7 @@ pub fn supersede_task(
 /// # 返回
 /// 是否成功
 pub fn bind_recovery_replacement(
-    _database: &RuntimeDatabase,
+    database: &RuntimeDatabase,
     replacement: &RuntimeTaskRecoveryReplacement,
 ) -> Result<bool, RecoveryError> {
     // 验证参数
@@ -224,9 +313,35 @@ pub fn bind_recovery_replacement(
         ));
     }
 
-    // TODO: 实现实际的绑定逻辑
-    // 1. 记录替换关系到数据库
-    // 2. 更新任务状态
+    let conn = database
+        .connection
+        .lock()
+        .map_err(|e| RecoveryError::DatabaseError(format!("获取数据库连接失败: {}", e)))?;
+
+    // 更新恢复记录，添加替换信息
+    let rows_affected = conn
+        .execute(
+            "UPDATE runtime_task_recovery
+             SET detail = ?, evidence = ?
+             WHERE task_id = ? AND recommendation = 'supersede'",
+            rusqlite::params![
+                format!(
+                    "Replacement bound: {} -> {}",
+                    replacement.interrupted_task_id, replacement.replacement_key
+                ),
+                serde_json::to_string(&replacement)
+                    .map_err(|e| RecoveryError::ValidationError(format!("序列化失败: {}", e)))?,
+                replacement.interrupted_task_id
+            ],
+        )
+        .map_err(|e| RecoveryError::DatabaseError(e.to_string()))?;
+
+    if rows_affected == 0 {
+        return Err(RecoveryError::ValidationError(format!(
+            "任务 {} 没有对应的 supersede 恢复记录",
+            replacement.interrupted_task_id
+        )));
+    }
 
     Ok(true)
 }
@@ -240,7 +355,7 @@ pub fn bind_recovery_replacement(
 /// # 返回
 /// 恢复信息（如果存在）
 pub fn get_task_recovery(
-    _database: &RuntimeDatabase,
+    database: &RuntimeDatabase,
     task_id: &str,
 ) -> Result<Option<RuntimeTaskRecovery>, RecoveryError> {
     // 验证参数
@@ -250,11 +365,42 @@ pub fn get_task_recovery(
         ));
     }
 
-    // TODO: 实现实际的查询逻辑
-    // 1. 查询任务的恢复记录
-    // 2. 返回恢复信息
+    let conn = database
+        .connection
+        .lock()
+        .map_err(|e| RecoveryError::DatabaseError(format!("获取数据库连接失败: {}", e)))?;
 
-    Ok(None)
+    // 查询恢复记录
+    let result = conn
+        .query_row(
+            "SELECT task_id, recommendation, resume_step_id, evidence, detail, detected_at
+             FROM runtime_task_recovery
+             WHERE task_id = ?",
+            [task_id],
+            |row| {
+                Ok(RuntimeTaskRecovery {
+                    task_id: row.get(0)?,
+                    recommendation: row.get::<_, String>(1)?,
+                    resume_step_id: row.get(2)?,
+                    resume_step_index: None,
+                    resume_checkpoint_id: None,
+                    evidence: vec![],
+                    plan_revision: None,
+                    completion_satisfied: None,
+                    missing_requirement_ids: vec![],
+                    replacement_key: None,
+                    replacement_task_id: None,
+                    detail: row.get(4)?,
+                    detected_at: row.get(5)?,
+                })
+            },
+        );
+
+    match result {
+        Ok(recovery) => Ok(Some(recovery)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(RecoveryError::DatabaseError(e.to_string())),
+    }
 }
 
 #[cfg(test)]
