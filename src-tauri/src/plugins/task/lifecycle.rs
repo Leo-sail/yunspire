@@ -65,14 +65,12 @@ impl std::error::Error for LifecycleError {}
 /// # 返回
 /// 任务契约
 pub fn create_task(
-    _database: &RuntimeDatabase,
+    database: &RuntimeDatabase,
     workspace_scope: &str,
     task_kind: &str,
-    _payload: &Value,
+    payload: &Value,
 ) -> Result<RuntimeTaskContract, LifecycleError> {
-    // TODO: 实现完整的任务创建逻辑
-    // 当前返回模拟数据
-
+    // 验证参数
     if workspace_scope.is_empty() {
         return Err(LifecycleError::ValidationError(
             "工作区范围不能为空".to_string(),
@@ -85,18 +83,31 @@ pub fn create_task(
         ));
     }
 
+    // 生成任务 ID 和时间戳
     let task_id = format!("task_{}", uuid::Uuid::new_v4());
     let now = chrono::Utc::now().to_rfc3339();
 
-    Ok(RuntimeTaskContract {
-        task_id,
-        workspace_scope: workspace_scope.to_string(),
-        task_kind: task_kind.to_string(),
-        state: "created".to_string(),
-        created_at: now.clone(),
-        updated_at: now,
-        plan_revision: None,
-    })
+    // 构建任务对象
+    let task = crate::plugins::task::types::RuntimeTask {
+        contract: RuntimeTaskContract {
+            task_id: task_id.clone(),
+            workspace_scope: workspace_scope.to_string(),
+            task_kind: task_kind.to_string(),
+            state: "created".to_string(),
+            created_at: now.clone(),
+            updated_at: now,
+            plan_revision: None,
+        },
+        payload: payload.clone(),
+        result: None,
+        error: None,
+    };
+
+    // 保存到数据库
+    crate::plugins::task::storage::save_task(database, &task)
+        .map_err(|e| LifecycleError::DatabaseError(e.to_string()))?;
+
+    Ok(task.contract)
 }
 
 /// 转换任务状态
@@ -110,7 +121,7 @@ pub fn create_task(
 /// # 返回
 /// 是否成功转换
 pub fn transition_task_state(
-    _database: &RuntimeDatabase,
+    database: &RuntimeDatabase,
     task_id: &str,
     from_state: &str,
     to_state: &str,
@@ -130,8 +141,26 @@ pub fn transition_task_state(
         });
     }
 
-    // TODO: 实现实际的数据库更新
-    let _ = task_id;
+    // 加载任务
+    let mut task = crate::plugins::task::storage::load_task(database, task_id)
+        .map_err(|e| LifecycleError::DatabaseError(e.to_string()))?;
+
+    // 验证当前状态
+    if task.contract.state != from_state {
+        return Err(LifecycleError::InvalidTransition {
+            from: task.contract.state.clone(),
+            to: to_state.to_string(),
+            reason: format!("任务当前状态为 {}, 不是 {}", task.contract.state, from_state),
+        });
+    }
+
+    // 更新状态和时间戳
+    task.contract.state = to_state.to_string();
+    task.contract.updated_at = chrono::Utc::now().to_rfc3339();
+
+    // 保存到数据库
+    crate::plugins::task::storage::save_task(database, &task)
+        .map_err(|e| LifecycleError::DatabaseError(e.to_string()))?;
 
     Ok(true)
 }
@@ -227,12 +256,14 @@ pub fn is_valid_transition(from: &str, to: &str) -> bool {
 /// # 返回
 /// 任务状态字符串
 pub fn get_task_state(
-    _database: &RuntimeDatabase,
-    _task_id: &str,
+    database: &RuntimeDatabase,
+    task_id: &str,
 ) -> Result<String, LifecycleError> {
-    // TODO: 实现实际的数据库查询
-    // 当前返回模拟数据
-    Ok("created".to_string())
+    // 加载任务
+    let task = crate::plugins::task::storage::load_task(database, task_id)
+        .map_err(|e| LifecycleError::DatabaseError(e.to_string()))?;
+
+    Ok(task.contract.state)
 }
 
 #[cfg(test)]
